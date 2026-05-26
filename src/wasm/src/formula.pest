@@ -1,0 +1,41 @@
+formula = { SOI ~ "=" ~ expr ~ EOI }
+
+expr = { term ~ (bin_op ~ term)* }
+
+term = _{ 
+    function_call | 
+    range | 
+    cell_ref | 
+    number | 
+    string | 
+    boolean | 
+    "(" ~ expr ~ ")" 
+}
+
+function_call = { ident ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
+
+range = { cell_ref ~ ":" ~ cell_ref }
+
+cell_ref = { r1c1_ref | a1_ref }
+
+a1_ref = { ("$")? ~ ASCII_ALPHA+ ~ ("$")? ~ ASCII_DIGIT+ }
+
+r1c1_ref = { "R" ~ ( ("[" ~ "-"? ~ ASCII_DIGIT+ ~ "]") | ASCII_DIGIT* ) ~ "C" ~ ( ("[" ~ "-"? ~ ASCII_DIGIT+ ~ "]") | ASCII_DIGIT* ) }
+
+ident = @{ !("R" ~ ASCII_DIGIT | "C" ~ ASCII_DIGIT) ~ ASCII_ALPHA+ }
+
+string = ${ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+
+boolean = { ^"TRUE" | ^"FALSE" }
+
+number = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT*)? }
+
+bin_op = _{ add | sub | mul | div | concat | compare }
+add = { "+" }
+sub = { "-" }
+mul = { "*" }
+div = { "/" }
+concat = { "&" }
+compare = { "=" | "<>" | "<=" | ">=" | "<" | ">" }
+
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }

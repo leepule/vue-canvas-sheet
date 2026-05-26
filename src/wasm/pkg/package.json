@@ -1,0 +1,15 @@
+{
+  "name": "table-wasm-engine",
+  "type": "module",
+  "version": "0.1.0",
+  "files": [
+    "table_wasm_engine_bg.wasm",
+    "table_wasm_engine.js",
+    "table_wasm_engine.d.ts"
+  ],
+  "main": "table_wasm_engine.js",
+  "types": "table_wasm_engine.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ]
+}

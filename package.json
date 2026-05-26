@@ -1,0 +1,90 @@
+{
+  "name": "vue-canvas-sheet",
+  "version": "0.1.0",
+  "description": "A high-performance, modular Canvas-based spreadsheet engine with WASM-powered calculation.",
+  "keywords": [
+    "spreadsheet",
+    "excel",
+    "canvas",
+    "table",
+    "vue",
+    "headless",
+    "performance",
+    "wasm",
+    "rust"
+  ],
+  "author": "Vue-Canvas-Sheet Team",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/leepule/vue-canvas-sheet#readme",
+  "bugs": {
+    "url": "https://github.com/leepule/vue-canvas-sheet/issues"
+  },
+  "private": false,
+  "type": "module",
+  "main": "./dist/designer.es.js",
+  "module": "./dist/designer.es.js",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "import": "./dist/designer.es.js"
+    },
+    "./core": {
+      "types": "./types/index.d.ts",
+      "import": "./dist/core.es.js"
+    },
+    "./render": {
+      "types": "./types/index.d.ts",
+      "import": "./dist/render.es.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src/core",
+    "src/render",
+    "src/plugins",
+    "src/wasm",
+    "src/wasm/pkg",
+    "types",
+    "ARCHITECT.md",
+    "LICENSE",
+    "NOTICE",
+    "README.md"
+  ],
+  "scripts": {
+    "dev": "vite",
+    "demo": "vite samples/basic-usage",
+    "build": "npm run build:wasm && vite build",
+    "build:js": "vite build",
+    "build:all": "npm run build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "test:perf": "node scripts/run-performance-tests.mjs",
+    "benchmark": "node scripts/benchmark.mjs",
+    "build:wasm": "node scripts/build-wasm.mjs",
+    "build:wasm:compile": "wasm-pack build src/wasm --target web",
+    "build:wasm:verify": "node scripts/verify-wasm-build.mjs",
+    "check:publish": "npm pack --dry-run",
+    "collab:server": "node scripts/collab-server.mjs"
+  },
+  "dependencies": {
+    "@handsontable/spreadsheet-icons": "^2.0.0",
+    "es-toolkit": "^1.44.0",
+    "xlsx-js-style": "^1.2.0"
+  },
+  "peerDependencies": {
+    "vue": "^3.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.0",
+    "@vitest/coverage-v8": "^3.1.0",
+    "jsdom": "^26.1.0",
+    "sass": "^1.97.3",
+    "vite": "^6.2.0",
+    "vitest": "^3.1.0",
+    "vue": "^3.5.0",
+    "ws": "^8.20.1"
+  }
+}

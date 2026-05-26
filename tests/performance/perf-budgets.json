@@ -1,0 +1,53 @@
+{
+  "workbook_bulk_set_10k": {
+    "metric": "p95Ms",
+    "maxMs": 1000
+  },
+  "workbook_bulk_set_100k": {
+    "metric": "p95Ms",
+    "maxMs": 5000
+  },
+  "formula_recalc_1k_dependents": {
+    "metric": "p95Ms",
+    "maxMs": 750
+  },
+  "formula_recalc_10k_dependents": {
+    "metric": "p95Ms",
+    "maxMs": 3000
+  },
+  "render_payload_10k_visible_cells": {
+    "metric": "p95Ms",
+    "maxMs": 1000,
+    "minPayloadBytes": 100000
+  },
+  "large_range_search_100k_cells": {
+    "metric": "p95Ms",
+    "maxMs": 500
+  },
+  "sparse_json_export_10k_cells": {
+    "metric": "p95Ms",
+    "maxMs": 500,
+    "minPayloadBytes": 100000
+  },
+  "sparse_excel_export_10k_cells": {
+    "metric": "p95Ms",
+    "maxMs": 5000,
+    "minPayloadBytes": 100000
+  },
+  "import_update_model_10k_cells": {
+    "metric": "p95Ms",
+    "maxMs": 1000
+  },
+  "object_pool_acquire_release_10k": {
+    "metric": "p95Ms",
+    "maxMs": 50
+  },
+  "history_batch_1k_commands": {
+    "metric": "p95Ms",
+    "maxMs": 100
+  },
+  "range_dependency_register_100k_cells": {
+    "metric": "p95Ms",
+    "maxMs": 100
+  }
+}

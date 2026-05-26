@@ -1,0 +1,27 @@
+Vue Canvas Sheet
+Copyright 2026 Vue-Canvas-Sheet Team
+
+This product includes software developed by the Vue-Canvas-Sheet contributors
+(https://github.com/leepule/vue-canvas-sheet).
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this product except in compliance with the License. A copy of the License is
+available in the LICENSE file at the root of this distribution and also at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+This product bundles or depends on the following third-party software. Each
+component is provided under its own license; see the respective project for
+the full license text.
+
+* Vue.js (https://github.com/vuejs/core) — MIT License
+* es-toolkit (https://github.com/toss/es-toolkit) — MIT License
+* xlsx-js-style (https://github.com/gitbrent/xlsx-js-style) — Apache-2.0
+* @handsontable/spreadsheet-icons
+    (https://github.com/handsontable/spreadsheet-icons) — MIT License
+* Rust crates used by the WASM calculation engine
+    (pest, pest_derive, wasm-bindgen, js-sys) — MIT OR Apache-2.0 (dual)
