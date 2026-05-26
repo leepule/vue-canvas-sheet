@@ -16,6 +16,7 @@ export class CollaborativeCursorPlugin {
 
   constructor(options = {}) {
     this.expireTime = options.expireTime || 15000; // 自动过期时间（毫秒），默认 15s
+    this._cleanupIntervalMs = options.cleanupInterval || 5000;
     this._cursors = new Map(); // userId -> { range, userInfo, lastActive }
     this._workbook = null;
     this._registry = null;
@@ -25,7 +26,7 @@ export class CollaborativeCursorPlugin {
   onInit(workbook, registry) {
     this._workbook = workbook;
     this._registry = registry;
-    
+
     // 注册全局共享 API 接口供外部/UI 直接调用
     registry.setSharedState('collaborative:setCursor', (userId, range, userInfo) => this.setRemoteCursor(userId, range, userInfo));
     registry.setSharedState('collaborative:removeCursor', (userId) => this.removeRemoteCursor(userId));
@@ -33,17 +34,13 @@ export class CollaborativeCursorPlugin {
   }
 
   onMounted(workbook, registry) {
-    // 启动定时清理过期用户的机制，每 5 秒轮询检测一次
-    this._cleanupTimer = setInterval(() => {
-      this._cleanupExpiredCursors();
-    }, 5000);
+    // 不主动启动定时器：避免空 map 的场景下每 5s 醒一次浪费 wakeup。
+    // 真正需要轮询时（首个 cursor 进入），_ensureCleanupTimer 会启动；
+    // 当所有 cursor 都过期/被移除后，定时器自动停止，等待下一个 cursor 到来。
   }
 
   onUnmount() {
-    if (this._cleanupTimer) {
-      clearInterval(this._cleanupTimer);
-      this._cleanupTimer = null;
-    }
+    this._stopCleanupTimer();
     if (this._registry) {
       this._registry.deleteSharedState('collaborative:setCursor');
       this._registry.deleteSharedState('collaborative:removeCursor');
@@ -51,6 +48,29 @@ export class CollaborativeCursorPlugin {
       this._registry.deleteSharedState('collaborative:active-cursors');
     }
     this._cursors.clear();
+  }
+
+  /**
+   * 启动周期清理定时器（幂等）。
+   * 仅当存在活跃光标且定时器未运行时创建。
+   * @private
+   */
+  _ensureCleanupTimer() {
+    if (this._cleanupTimer || this._cursors.size === 0) return;
+    this._cleanupTimer = setInterval(() => {
+      this._cleanupExpiredCursors();
+    }, this._cleanupIntervalMs);
+  }
+
+  /**
+   * 停止周期清理定时器（幂等）。
+   * @private
+   */
+  _stopCleanupTimer() {
+    if (this._cleanupTimer) {
+      clearInterval(this._cleanupTimer);
+      this._cleanupTimer = null;
+    }
   }
 
   /**
@@ -127,6 +147,9 @@ export class CollaborativeCursorPlugin {
       lastActive: Date.now()
     });
 
+    // 首次添加光标时启动周期清理；已存在则是 no-op
+    this._ensureCleanupTimer();
+
     this._updateSharedState();
     
     // 触发 Canvas 视图重绘以刷新协同高亮状态
@@ -144,6 +167,10 @@ export class CollaborativeCursorPlugin {
       this._updateSharedState();
       if (this._workbook && typeof this._workbook.requestRender === 'function') {
         this._workbook.requestRender();
+      }
+      // 已无活跃光标 → 停止轮询，等下一个 setRemoteCursor 时再启动
+      if (this._cursors.size === 0) {
+        this._stopCleanupTimer();
       }
     }
   }
@@ -183,6 +210,11 @@ export class CollaborativeCursorPlugin {
       if (this._workbook && typeof this._workbook.requestRender === 'function') {
         this._workbook.requestRender();
       }
+    }
+
+    // 清空后停止轮询，避免空 map 上反复 wakeup
+    if (this._cursors.size === 0) {
+      this._stopCleanupTimer();
     }
   }
 

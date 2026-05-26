@@ -470,15 +470,42 @@ export class LazyLoader {
     const preloadPages = this._options.preloadPages;
     const totalPages = this.getTotalPages();
 
-    // 异步预加载后续页面
+    // 先收集所有候选页，再用单次 idle 调度批量发起：
+    //   (1) 同一调度槽里把所有预加载 kick 出去，避免占用多个 task；
+    //   (2) 落到 requestIdleCallback 让出主线程给真正用户交互/数据请求（preload 是推测性的）；
+    //   (3) Safari/老环境用 setTimeout(fn, 0) 兜底，等价于「下一个 task」。
+    const pagesToPreload = [];
     for (let i = 1; i <= preloadPages; i++) {
       const nextPage = currentPage + i - 1;
-      if (nextPage < totalPages && !this._pageCache.has(nextPage)) {
-        // 不等待预加载完成
-        this._loadPage(nextPage).catch(() => {
+      if (nextPage < totalPages && !this._pageCache.has(nextPage) && !this._loadingPages.has(nextPage)) {
+        pagesToPreload.push(nextPage);
+      }
+    }
+
+    if (pagesToPreload.length === 0) return;
+
+    this._scheduleIdle(() => {
+      for (const page of pagesToPreload) {
+        // 调度时机点可能晚于此刻，再次校验避免重复触发
+        if (this._pageCache.has(page) || this._loadingPages.has(page)) continue;
+        this._loadPage(page).catch(() => {
           // 预加载失败不处理
         });
       }
+    });
+  }
+
+  /**
+   * 调度低优先级任务到浏览器空闲时间（带兜底）。
+   * @param {Function} fn
+   * @private
+   */
+  _scheduleIdle(fn) {
+    if (typeof requestIdleCallback === 'function') {
+      requestIdleCallback(fn, { timeout: 1000 });
+    } else {
+      // setTimeout(fn, 0) 在所有运行时都可用，落到下一个 task
+      setTimeout(fn, 0);
     }
   }
 

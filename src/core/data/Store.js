@@ -189,12 +189,30 @@ export class Store {
   }
  
   /**
+   * 判断 partial 中每个键的值是否都与当前 state 引用相等。
+   * 用于短路完全无变更的 setState / endBatch，避免：
+   *   (1) `{ ...prevState, ...partialState }` 的对象分配；
+   *   (2) `_freezeState` 在 deep/incremental 模式下的递归冻结开销；
+   *   (3) 所有订阅者的 notify 级联（即便订阅者自己会浅比较，函数调用本身仍有代价）。
+   * @param {Object} partial - 待应用的部分状态
+   * @returns {boolean} 是否存在任一值发生变化
+   * @private
+   */
+  _hasShallowDiff(partial) {
+    const state = this._state;
+    for (const key in partial) {
+      if (partial[key] !== state[key]) return true;
+    }
+    return false;
+  }
+
+  /**
    * 更新状态
    * @param {Updater|Object} updater - 更新器函数或部分状态对象
    */
   setState(updater) {
     const prevState = this._state;
-    
+
     // 计算新状态
     let partialState;
     if (typeof updater === 'function') {
@@ -202,16 +220,23 @@ export class Store {
     } else {
       partialState = updater;
     }
-    
+
+    if (partialState == null) return;
+
+    // 浅比较短路：所有键都与现状一致则直接返回
+    if (!this._batching && !this._hasShallowDiff(partialState)) {
+      return;
+    }
+
     // 如果在批量更新中，累积变更
     if (this._batching) {
       this._pendingState = { ...this._pendingState, ...partialState };
       return;
     }
-    
+
     // 合并状态
     const newState = { ...prevState, ...partialState };
-    
+
     // 根据冻结策略处理新状态
     if (this._freezeMode !== 'none') {
       const start = performance.now();
@@ -220,7 +245,7 @@ export class Store {
     } else {
       this._state = newState;
     }
-    
+
     // 通知监听器
     this._notify(prevState);
   }
@@ -239,35 +264,38 @@ export class Store {
    */
   endBatch() {
     if (!this._batching) return;
-    
+
     this._batching = false;
-    
-    if (this._pendingState && Object.keys(this._pendingState).length > 0) {
-      const prevState = this._state;
-      const newState = { ...prevState, ...this._pendingState };
-      
-      // 根据冻结策略处理新状态
-      if (this._freezeMode !== 'none') {
-        const start = performance.now();
-        this._state = this._freezeState(newState, this._pendingState);
-        
-        // 记录性能统计
-        const duration = performance.now() - start;
-        this._freezeStats.totalTime += duration;
-        if (this._freezeMode === 'deep') {
-          this._freezeStats.deepFreezeCalls++;
-        } else if (this._freezeMode === 'incremental') {
-          this._freezeStats.incrementalFreezeCalls++;
-        }
-        const totalCalls = this._freezeStats.deepFreezeCalls + this._freezeStats.incrementalFreezeCalls;
-        this._freezeStats.avgFreezeTime = totalCalls > 0 ? this._freezeStats.totalTime / totalCalls : 0;
-      } else {
-        this._state = newState;
-      }
-      
-      this._pendingState = null;
-      this._notify(prevState);
+
+    const pending = this._pendingState;
+    this._pendingState = null;
+    if (!pending || Object.keys(pending).length === 0 || !this._hasShallowDiff(pending)) {
+      return;
     }
+
+    const prevState = this._state;
+    const newState = { ...prevState, ...pending };
+
+    // 根据冻结策略处理新状态
+    if (this._freezeMode !== 'none') {
+      const start = performance.now();
+      this._state = this._freezeState(newState, pending);
+
+      // 记录性能统计
+      const duration = performance.now() - start;
+      this._freezeStats.totalTime += duration;
+      if (this._freezeMode === 'deep') {
+        this._freezeStats.deepFreezeCalls++;
+      } else if (this._freezeMode === 'incremental') {
+        this._freezeStats.incrementalFreezeCalls++;
+      }
+      const totalCalls = this._freezeStats.deepFreezeCalls + this._freezeStats.incrementalFreezeCalls;
+      this._freezeStats.avgFreezeTime = totalCalls > 0 ? this._freezeStats.totalTime / totalCalls : 0;
+    } else {
+      this._state = newState;
+    }
+
+    this._notify(prevState);
   }
  
   /**

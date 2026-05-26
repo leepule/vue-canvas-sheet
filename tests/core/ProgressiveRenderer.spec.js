@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { __TaskQueueForTest as TaskQueue } from '../../src/render/ProgressiveRenderer';
+import { __TaskQueueForTest as TaskQueue } from '../../src/core/render/ProgressiveRenderer';
 
 function makeTask(id) {
   return { id, _cancelled: false, onCancel: null, state: 'pending' };

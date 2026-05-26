@@ -21,7 +21,7 @@ import {
   makeTextBitmapCacheKey,
   measureTextWidth,
   parseFontSize
-} from '../render/TextLayout';
+} from '../core/render/TextLayout';
 
 // 缓存变量
 let offscreenCanvas = null;
@@ -215,6 +215,8 @@ function drawWrappedText(text, x, y, w, h, padding, align, valign, fSize, color,
     fSize,
     font,
     cache: wrappedTextCache,
+    ctx,
+    fontState: textFontState,
     measureText: measureTextWithCache
   });
 

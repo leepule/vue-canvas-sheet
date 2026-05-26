@@ -1448,22 +1448,54 @@ export class Workbook {
       formulaCoords.add(fc.key);
     }
 
+    // 惰性构建的空间索引：按行分桶、桶内按列升序排序，并保留有序的行索引数组。
+    // 大范围依赖（如整列 A:A）查询时不再线性扫描所有公式，而是按行范围 + 列二分定位。
+    let spatial = null;
+    const ensureSpatialIndex = () => {
+      if (spatial) return spatial;
+      const byRow = new Map();
+      for (const fc of formulaCells) {
+        let bucket = byRow.get(fc.r);
+        if (!bucket) {
+          bucket = [];
+          byRow.set(fc.r, bucket);
+        }
+        bucket.push(fc);
+      }
+      for (const bucket of byRow.values()) {
+        bucket.sort((a, b) => a.c - b.c);
+      }
+      const sortedRows = Array.from(byRow.keys()).sort((a, b) => a - b);
+      spatial = { byRow, sortedRows };
+      return spatial;
+    };
+    const lowerBound = (arr, target, keyFn) => {
+      let lo = 0;
+      let hi = arr.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >>> 1;
+        if (keyFn(arr[mid]) < target) lo = mid + 1;
+        else hi = mid;
+      }
+      return lo;
+    };
+
     for (const fc of formulaCells) {
       const deps = this.reverseDependencyMap.get(fc.key);
       if (deps) {
         const upstreamFormulaKeys = new Set();
-        
+
         // 1. 单元格依赖 (O(1) 查找)
         for (const dep of deps.cells || []) {
           if (cellMap.has(dep)) {
             upstreamFormulaKeys.add(dep);
           }
         }
-        
+
         // 2. 范围依赖 (优化：通过范围面积与公式数量对比选择最优策略)
         for (const range of deps.ranges || []) {
           const area = (range.endR - range.startR + 1) * (range.endC - range.startC + 1);
-          
+
           // 如果范围较小，遍历范围内的单元格更高效
           if (area < formulaCells.length) {
             for (let r = range.startR; r <= range.endR; r++) {
@@ -1476,10 +1508,19 @@ export class Workbook {
               }
             }
           } else {
-            // 如果范围巨大（如整列），则回退到遍历公式列表
-            for (const candidate of formulaCells) {
-              if (candidate.key !== fc.key && this._isCellInsideRange(candidate.r, candidate.c, range)) {
-                upstreamFormulaKeys.add(candidate.key);
+            // 范围巨大（如整列）：使用空间索引按行段 + 列二分定位，
+            // 复杂度从 O(公式数) 降至 O(范围内行数 × log(行内公式数) + 命中数)。
+            const { byRow, sortedRows } = ensureSpatialIndex();
+            let rowIdx = lowerBound(sortedRows, range.startR, v => v);
+            while (rowIdx < sortedRows.length && sortedRows[rowIdx] <= range.endR) {
+              const row = sortedRows[rowIdx++];
+              const bucket = byRow.get(row);
+              let colIdx = lowerBound(bucket, range.startC, cell => cell.c);
+              while (colIdx < bucket.length && bucket[colIdx].c <= range.endC) {
+                const candidate = bucket[colIdx++];
+                if (candidate.key !== fc.key) {
+                  upstreamFormulaKeys.add(candidate.key);
+                }
               }
             }
           }
@@ -2172,13 +2213,18 @@ export class Workbook {
     this.clipboard.paste(range);
   }
   toJSON() {
+    // 单次遍历直接写出字符串键格式，避免先 toObject(true) 再 _exportDataToStringKeys
+    // 造成的双倍 O(N) 临时对象分配。
+    const data = {};
+    this._dataMatrix.forEach((r, c, cell) => {
+      data[`${r}-${c}`] = cell;
+    });
     return {
       rowCount: this.rowCount,
       colCount: this.colCount,
       rowHeights: { ...this.rowHeights },
       colWidths: { ...this.colWidths },
-      // 导出时转换为字符串键格式（向后兼容）
-      data: this._exportDataToStringKeys(this._dataMatrix.toObject(true)),
+      data,
       merges: [...this.merges],
       freeze: { ...this.freeze }
     };
@@ -2581,15 +2627,17 @@ export class Workbook {
       this.activeCell = { r: startR, c: startC };
     }
     this._emit(Events.SELECTION_CHANGE, { selection: this.selection, activeCell: this.activeCell });
-    this.notify();
+    // 选区/活动单元格变化用 type:'selection' 标记，让 UI 订阅方只刷新 selection overlay 层
+    // 而非走 invalidate(null) 整表重绘。其他订阅者只是多看到一个 type 字段，行为不变。
+    this.notify({ type: 'selection' });
   }
   setCopyRange(range) {
     this.copyRange = cloneRange(range);
-    this.notify();
+    this.notify({ type: 'selection' });
   }
   clearCopyRange() {
     this.copyRange = null;
-    this.notify();
+    this.notify({ type: 'selection' });
   }
   mergeCells(range) {
     if (range.s.r === range.e.r && range.s.c === range.e.c) return;
@@ -3539,10 +3587,12 @@ export class Workbook {
       defaultRowHeight: this.defaultRowHeight
     };
 
-    await this._storage.importSheet(sheetId, {
-      data: this._dataMatrix.toObject(true),
-      config
+    // 避免 toObject(true) 的 O(N) 中间对象：直接 forEach 写出 importSheet 期望的字符串键格式。
+    const data = {};
+    this._dataMatrix.forEach((r, c, cell) => {
+      data[`${r}-${c}`] = cell;
     });
+    await this._storage.importSheet(sheetId, { data, config });
     
     console.log(`Workbook [${sheetId}] persisted to IndexedDB.`);
   }

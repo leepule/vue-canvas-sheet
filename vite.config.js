@@ -28,7 +28,7 @@ export default defineConfig({
     lib: {
       entry: {
         'core': import.meta.dirname + '/src/core/index.js',
-        'render': import.meta.dirname + '/src/render/index.js',
+        'render': import.meta.dirname + '/src/core/render/index.js',
         'designer': import.meta.dirname + '/src/index.js'
       },
       name: 'VueCanvasSheet',

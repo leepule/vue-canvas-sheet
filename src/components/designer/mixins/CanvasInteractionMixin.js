@@ -53,6 +53,34 @@ export default {
       if (this._throttledScrollIntoView) {
         this._throttledScrollIntoView.cancel();
       }
+      // 确保拖拽过程中组件被销毁时，挂在 window 上的 mousemove/mouseup 也一并解绑。
+      this._detachDragListeners();
+    },
+
+    /**
+     * 绑定全局拖拽监听器。
+     * 使用 AbortController 集中托管：
+     *   (1) 单次 abort() 即可一次性清理 mousemove + mouseup（及未来追加的任何 drag 期监听器）；
+     *   (2) 每次 mousedown 先 abort 上一次（如果残留），避免极端场景下监听器残留；
+     *   (3) 组件 beforeUnmount 走 `_cleanupThrottledMethods` 统一 abort，单一来源。
+     */
+    _attachDragListeners() {
+      this._detachDragListeners();
+      const controller = new AbortController();
+      this._dragAbortController = controller;
+      const { signal } = controller;
+      window.addEventListener('mousemove', this.handleThrottledMouseMove, { signal });
+      window.addEventListener('mouseup', this.handleWindowMouseUp, { signal });
+    },
+
+    /**
+     * 解绑全局拖拽监听器（幂等）。
+     */
+    _detachDragListeners() {
+      if (this._dragAbortController) {
+        this._dragAbortController.abort();
+        this._dragAbortController = null;
+      }
     },
 
     handleMouseDown(e) {
@@ -70,9 +98,8 @@ export default {
       const x = e.clientX - rect.left;
       const y = e.clientY - rect.top;
 
-      // Register global listeners for drag operations
-      window.addEventListener('mousemove', this.handleThrottledMouseMove);
-      window.addEventListener('mouseup', this.handleWindowMouseUp);
+      // Register global listeners for drag operations (AbortController 托管，统一解绑)
+      this._attachDragListeners();
 
       if (e.button === 2) {
         const c = this.getColAt(x);
@@ -117,7 +144,7 @@ export default {
           this.workbook.setSelection(0, c, this.workbook.rowCount - 1, c);
           this.isSelectingCol = true;
           this.dragColStartIndex = c;
-          this.invalidate(null, { selection: true });
+          // setSelection 已通过 notify({type:'selection'}) 触发 invalidateSelection，无需再调用
           return;
         }
       }
@@ -128,7 +155,7 @@ export default {
           this.workbook.setSelection(r, 0, r, this.workbook.colCount - 1);
           this.isSelectingRow = true;
           this.dragRowStartIndex = r;
-          this.invalidate(null, { selection: true });
+          // 同上，setSelection 已触发 selection overlay 刷新
           return;
         }
       }
@@ -154,9 +181,8 @@ export default {
     
     handleWindowMouseUp(e) {
         this.handleMouseUp(e);
-        // Clean up global listeners
-        window.removeEventListener('mousemove', this.handleThrottledMouseMove);
-        window.removeEventListener('mouseup', this.handleWindowMouseUp);
+        // 通过 AbortController 一次性解绑 mousemove + mouseup
+        this._detachDragListeners();
         this._ticking = false;
     },
 
@@ -184,7 +210,8 @@ export default {
           }
 
           this.fillTargetRange = target;
-          this.invalidate(null, { selection: true });
+          // fillTargetRange 仅影响 selection overlay 上的预览框，不需要整表 invalidate
+          this.invalidateSelection();
         }
         return;
       }

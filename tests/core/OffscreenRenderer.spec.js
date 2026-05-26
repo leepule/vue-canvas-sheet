@@ -71,17 +71,6 @@ describe('OffscreenRenderer', () => {
       postMessage(message) {
         this.messages.push(message);
         setTimeout(() => {
-          if (message.type === 'ping') {
-            this.listeners.message.forEach(listener => listener({
-              data: {
-                id: message.id,
-                success: true,
-                hasOffscreenCanvas: true
-              }
-            }));
-            return;
-          }
-
           this.listeners.message.forEach(listener => listener({
             data: {
               id: message.id,
@@ -105,8 +94,9 @@ describe('OffscreenRenderer', () => {
 
     expect(result).toBe(true);
     expect(transferSpy).toHaveBeenCalledTimes(1);
-    expect(renderer.worker.messages.map(message => message.type)).toEqual(['ping', 'init']);
-    expect(renderer.worker.messages[1].data.canvas).toBe(offscreen);
+    // ping 已合并进 init：冷启动只发一次消息，OffscreenCanvas 随 init 一并 transfer
+    expect(renderer.worker.messages.map(message => message.type)).toEqual(['init']);
+    expect(renderer.worker.messages[0].data.canvas).toBe(offscreen);
 
     renderer.destroy();
   });

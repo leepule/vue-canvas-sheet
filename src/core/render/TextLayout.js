@@ -1,3 +1,8 @@
+/**
+ * Vue-Canvas-Sheet
+ * (c) 2026-present
+ * Released under the Apache License, Version 2.0.
+ */
 class CacheNode {
   constructor(key, value) {
     this.key = key;
@@ -197,13 +202,34 @@ export function getSingleLineDecoration({ textX, textY, align, baseline, width, 
   };
 }
 
-export function wrapTextByWidth(text, availableWidth, font, measureText, cache) {
+export function wrapTextByWidth(text, availableWidth, font, measureText, cache, options) {
   const normalized = String(text ?? '');
   if (!normalized || availableWidth <= 0) return [];
 
   const cacheKey = makeWrappedTextCacheKey(font, availableWidth, normalized);
   const cached = cache?.get(cacheKey);
   if (cached) return cached;
+
+  // 快速路径：调用方提供 ctx 时，二分查找直接走 ctx.measureText，
+  // 跳过 measureText 适配层。好处：(1) 避免把每个二分候选子串
+  // 塞入 textCache 造成 LRU 污染；(2) 省去 cache key 字符串拼接；
+  // (3) 通过 fontState 保证 ctx.font 仅在变化时设置一次。
+  const ctx = options?.ctx;
+  let probe;
+  if (ctx) {
+    const fontState = options.fontState;
+    if (fontState) {
+      if (fontState.current !== font) {
+        ctx.font = font;
+        fontState.current = font;
+      }
+    } else {
+      ctx.font = font;
+    }
+    probe = (s) => ctx.measureText(s).width;
+  } else {
+    probe = (s) => measureText(s, font);
+  }
 
   const lines = [];
   let remainingText = normalized;
@@ -213,7 +239,7 @@ export function wrapTextByWidth(text, availableWidth, font, measureText, cache) 
     let high = remainingText.length;
     let splitIndex = 1;
 
-    if (measureText(remainingText, font) <= availableWidth) {
+    if (probe(remainingText) <= availableWidth) {
       lines.push(remainingText);
       break;
     }
@@ -221,7 +247,7 @@ export function wrapTextByWidth(text, availableWidth, font, measureText, cache) 
     while (low <= high) {
       const mid = (low + high) >> 1;
       const candidate = remainingText.substring(0, mid);
-      if (measureText(candidate, font) <= availableWidth) {
+      if (probe(candidate) <= availableWidth) {
         splitIndex = mid;
         low = mid + 1;
       } else {
@@ -255,11 +281,14 @@ export function getWrappedTextLayout(options) {
     fSize,
     font,
     measureText,
-    cache
+    cache,
+    ctx,
+    fontState
   } = options;
 
   const availableWidth = w - padding * 2;
-  const lines = wrapTextByWidth(text, availableWidth, font, measureText, cache);
+  const wrapOptions = ctx ? { ctx, fontState } : undefined;
+  const lines = wrapTextByWidth(text, availableWidth, font, measureText, cache, wrapOptions);
   const lineHeight = parseFontSize(fSize, parseFontSize(font)) * 1.2;
   const totalTextHeight = lines.length * lineHeight;
 

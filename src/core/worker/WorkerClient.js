@@ -98,7 +98,12 @@ export class WorkerClient {
 
   _handleError(error) {
     if (this.onError) {
-      this.onError(error);
+      // 用户回调抛错不应跳过 rejectAll —— 否则 pending tasks 只能等各自超时兜底
+      try {
+        this.onError(error);
+      } catch (callbackError) {
+        console.error(`[${this.name}] onError handler threw:`, callbackError);
+      }
     }
     this.rejectAll(new Error(`${this.name} worker error`));
   }

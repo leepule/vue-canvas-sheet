@@ -1,6 +1,11 @@
 /**
+ * Vue-Canvas-Sheet
+ * (c) 2026-present
+ * Released under the Apache License, Version 2.0.
+ */
+/**
  * OffscreenCanvas 渲染管理器
- * 
+ *
  * 管理 Worker 中的 Canvas 渲染，提供以下功能：
  * 1. Worker 生命周期管理
  * 2. 渲染命令发送和结果接收
@@ -241,11 +246,10 @@ export class OffscreenRenderer {
         const transfer = [];
 
         if (shouldInit) {
-          const support = await this._sendCommand('ping', {});
-          if (!support.hasOffscreenCanvas) {
-            throw new Error('Worker OffscreenCanvas not supported');
-          }
-
+          // 跳过此前的 `ping` 探测：`isOffscreenCanvasSupported()` 已在主线程同步检测过
+          // `OffscreenCanvas` 全局与 `transferControlToOffscreen`，浏览器在两个上下文
+          // 共享同一特性闸；worker 端的 `initCanvas` 自身仍保留 hasOffscreenCanvas 守卫
+          // 作为防御层。这样冷启动从 2 次 worker 往返合并为 1 次。
           try {
             this.offscreen = this.canvas.transferControlToOffscreen();
             this.canvasTransferred = true;

@@ -662,9 +662,14 @@ export class TransferableSerializer {
 
   /**
    * 序列化数据
+   *
+   * 每次调用都创建独立的 BufferWriter：
+   * (1) 消除实例间共享 writer 带来的重入/并发数据竞争；
+   * (2) 释放上一次序列化的 ArrayBuffer 高水位内存，避免大型数据后持续驻留；
+   * (3) 与 `getTransferable()` 的 slice 行为对称 —— 输入 buffer 与输出 buffer 互相独立。
    */
   serialize(data) {
-    this.writer.offset = 0; // 重置写入器
+    this.writer = new BufferWriter();
     this._serializeValue(data);
     return this.writer.getTransferable();
   }

@@ -473,8 +473,11 @@ export class SearchEngine {
         if (!query) return 0;
 
         const parsedQuery = this._parseQuery(query, options);
-        const { isRegex, regex, queryStr } = parsedQuery;
-        const { caseSensitive = false } = options;
+        const { regex, queryStr } = parsedQuery;
+        // 说明：_parseQuery 已经把 isRegex、wholeWord、!caseSensitive 三种场景统一封装为
+        // 同一个 `regex` 对象；仅在「caseSensitive 简单字符串」时 regex 为 null。所以
+        // 这里两分支即可覆盖全部情况，旧版本的 `else if (regex)` 与 caseInsensitive
+        // 字符串子分支都是不可达的。
 
         let count = 0;
         const updates = [];
@@ -490,30 +493,16 @@ export class SearchEngine {
             let matched = false;
             let newVal = valStr;
 
-            if (isRegex && regex) {
+            if (regex) {
+                regex.lastIndex = 0;
                 if (regex.test(valStr)) {
                     matched = true;
                     regex.lastIndex = 0;
                     newVal = valStr.replace(regex, replaceText);
                 }
-            } else if (regex) {
-                if (regex.test(valStr)) {
-                    matched = true;
-                    regex.lastIndex = 0;
-                    newVal = valStr.replace(regex, replaceText);
-                }
-            } else {
-                const searchStr = caseSensitive ? queryStr : queryStr.toLowerCase();
-                const targetStr = caseSensitive ? valStr : valStr.toLowerCase();
-                if (targetStr.includes(searchStr)) {
-                    matched = true;
-                    if (caseSensitive) {
-                        newVal = valStr.split(queryStr).join(replaceText);
-                    } else {
-                        const regexReplace = new RegExp(queryStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-                        newVal = valStr.replace(regexReplace, replaceText);
-                    }
-                }
+            } else if (valStr.includes(queryStr)) {
+                matched = true;
+                newVal = valStr.split(queryStr).join(replaceText);
             }
 
             if (matched) {
@@ -542,29 +531,21 @@ export class SearchEngine {
         if (!query || !position) return false;
 
         const cell = this._getCellAt(position.r, position.c);
-        
+
         if (!cell || cell.v === undefined || cell.v === null) return false;
 
         const parsedQuery = this._parseQuery(query, options);
-        const { regex, isRegex, queryStr } = parsedQuery;
-        const { caseSensitive = false } = options;
-        
+        const { regex, queryStr } = parsedQuery;
+
         const valStr = String(cell.v);
         let newVal = valStr;
 
-        if (isRegex && regex) {
-            regex.lastIndex = 0;
-            newVal = valStr.replace(regex, replaceText);
-        } else if (regex) {
+        if (regex) {
             regex.lastIndex = 0;
             newVal = valStr.replace(regex, replaceText);
         } else {
-            if (caseSensitive) {
-                newVal = valStr.split(queryStr).join(replaceText);
-            } else {
-                const regexReplace = new RegExp(queryStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
-                newVal = valStr.replace(regexReplace, replaceText);
-            }
+            // 仅 caseSensitive 简单字符串路径会落到这里（见 replaceAll 注释）
+            newVal = valStr.split(queryStr).join(replaceText);
         }
 
         if (newVal !== valStr) {

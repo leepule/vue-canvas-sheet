@@ -1,4 +1,9 @@
 /**
+ * Vue-Canvas-Sheet
+ * (c) 2026-present
+ * Released under the Apache License, Version 2.0.
+ */
+/**
  * 渐进式渲染器
  *
  * 优化策略：

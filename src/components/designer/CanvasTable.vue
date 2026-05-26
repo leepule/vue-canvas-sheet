@@ -253,18 +253,9 @@
 			this.destroyOffscreenRenderer();
 			// 清理渐进式渲染器
 			this.destroyProgressiveRenderer();
-			// 清理节流/防抖方法
+			// 清理节流/防抖方法（同时通过 AbortController 解绑 drag 期 window 监听器）
 			if (this._cleanupThrottledMethods) {
 				this._cleanupThrottledMethods();
-			}
-			// 清理可能残留的 window 事件监听器
-			// 这些监听器在 handleMouseDown 中添加，正常情况下在 handleWindowMouseUp 中移除
-			// 但如果组件在拖拽过程中被销毁，需要确保清理
-			if (typeof this.handleThrottledMouseMove === 'function') {
-				window.removeEventListener('mousemove', this.handleThrottledMouseMove);
-			}
-			if (typeof this.handleWindowMouseUp === 'function') {
-				window.removeEventListener('mouseup', this.handleWindowMouseUp);
 			}
 		},
 		methods: {
@@ -398,7 +389,13 @@
 					this.workbookUnsub = this.workbook.subscribe((data) => {
 						this.updateScrollbarSize();
 						this.updateEditorPosition();
-						
+
+						if (data && data.type === 'selection') {
+							// 纯选区/复制框变化：仅刷新 selection overlay 层，避免整表重渲
+							this.invalidateSelection();
+							return;
+						}
+
 						if (data && data.r !== undefined && data.c !== undefined) {
 							// 局部重绘优化：只重绘受影响的单元格区域
 							const rect = this.getCellScreenRect(data.r, data.c);

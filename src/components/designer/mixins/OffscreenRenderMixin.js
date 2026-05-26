@@ -5,10 +5,10 @@
  * 当 OffscreenCanvas 不可用时自动降级到主线程渲染
  */
 
-import { 
-  createOffscreenRenderer, 
-  isOffscreenCanvasSupported 
-} from '../../../render/OffscreenRenderer';
+import {
+  createOffscreenRenderer,
+  isOffscreenCanvasSupported
+} from '../../../core/render/OffscreenRenderer';
 
 export default {
   data() {

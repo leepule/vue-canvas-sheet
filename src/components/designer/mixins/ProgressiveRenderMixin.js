@@ -8,7 +8,7 @@
 import {
   createProgressiveRenderer,
   Priority,
-} from '../../../render/ProgressiveRenderer';
+} from '../../../core/render/ProgressiveRenderer';
 
 // 渐进式渲染配置
 const PROGRESSIVE_CONFIG = {

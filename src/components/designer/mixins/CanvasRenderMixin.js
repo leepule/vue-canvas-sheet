@@ -656,6 +656,8 @@ export default {
            fSize,
            font,
            cache: WrappedTextCache,
+           ctx,
+           fontState: textFontState,
            measureText: (value, activeFont) => this.measureTextWithCache(ctx, value, activeFont)
          });
 
