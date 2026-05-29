@@ -38,11 +38,13 @@ export class StyleCache {
   constructor() {
     this.styleMap = new Map(); // 样式哈希 -> 唯一ID
     this.styleStore = new Map(); // ID -> 样式对象
+    // 反向索引：ID -> 样式哈希。让 cleanup 删除时无需 O(N) 扫描 styleMap
+    this._hashByStyleId = new Map();
     this.nextId = 0;
-    
+
     // 样式使用统计
     this.usageCount = new Map();
-    
+
     // 属性映射优化
     this._propMap = new Map();
     STYLE_PROPS.forEach((prop, index) => this._propMap.set(prop, index));
@@ -65,6 +67,7 @@ export class StyleCache {
       const normalized = this._normalizeStyle(style);
       this.styleMap.set(hash, styleId);
       this.styleStore.set(styleId, normalized);
+      this._hashByStyleId.set(styleId, hash);
       this.usageCount.set(styleId, 0);
     }
     
@@ -133,58 +136,5 @@ export class StyleCache {
    */
   getStyle(styleId) {
     return this.styleStore.get(styleId);
-  }
-  
-  /**
-   * 清理未使用的样式
-   */
-  cleanup(threshold = 10) {
-    for (const [styleId, count] of this.usageCount) {
-      if (count < threshold) {
-        // 查找对应的hash
-        for (const [hash, id] of this.styleMap) {
-          if (id === styleId) {
-            this.styleMap.delete(hash);
-            break;
-          }
-        }
-        this.styleStore.delete(styleId);
-        this.usageCount.delete(styleId);
-      }
-    }
-  }
-  
-  /**
-   * 获取样式统计
-   */
-  getStats() {
-    return {
-      totalStyles: this.styleStore.size,
-      mostUsed: this._getMostUsedStyles(10)
-    };
-  }
-  
-  _getMostUsedStyles(limit) {
-    return Array.from(this.usageCount.entries())
-      .sort(([, a], [, b]) => b - a)
-      .slice(0, limit)
-      .map(([styleId, count]) => ({
-        styleId,
-        count,
-        style: this.getStyle(styleId)
-      }));
-  }
-
-  /**
-   * 获取当前的样式映射表（ID -> Style）
-   * 用于序列化并发送给 Worker
-   * @returns {Object}
-   */
-  getStyleMap() {
-    const map = {};
-    for (const [id, style] of this.styleStore) {
-      map[id] = style;
-    }
-    return map;
   }
 }

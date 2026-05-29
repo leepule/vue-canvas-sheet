@@ -24,6 +24,9 @@ import {
   measureTextWidth,
   parseFontSize
 } from '../../../core/render/TextLayout';
+import { formatCellText } from '../utils/formatCellText';
+import { getBorderProps } from '../utils/borderUtils';
+import { calcMergeSize } from '../utils/cellUtils';
 // ============================================================================
 // 边框绘制优化
 // ============================================================================
@@ -37,56 +40,6 @@ const BorderStyleCache = {
   dashed: { dash: [4, 4], width: 1 },
   dotted: { dash: [2, 2], width: 1 }
 };
-
-/**
- * 边框数据对象池
- * 复用边框批量数据对象，减少 GC 压力
- */
-class BorderBatchPool {
-  constructor(maxSize = 10) {
-    this.pool = [];
-    this.maxSize = maxSize;
-  }
-
-  /**
-   * 获取一个边框批量数据对象
-   * @returns {Object} 边框批量数据对象
-   */
-  acquire() {
-    if (this.pool.length > 0) {
-      const batch = this.pool.pop();
-      // 清空数据
-      for (const key in batch) {
-        batch[key].length = 0;
-      }
-      return batch;
-    }
-    return {};
-  }
-
-  /**
-   * 释放边框批量数据对象回池
-   * @param {Object} batch - 边框批量数据对象
-   */
-  release(batch) {
-    if (!batch) return;
-    
-    // 清空数据
-    for (const key in batch) {
-      if (Array.isArray(batch[key])) {
-        batch[key].length = 0;
-      }
-    }
-    
-    // 只保留有限数量的对象
-    if (this.pool.length < this.maxSize) {
-      this.pool.push(batch);
-    }
-  }
-}
-
-// 全局边框批量数据池
-const borderBatchPool = new BorderBatchPool(10);
 
 /**
  * 边框坐标数据收集器
@@ -160,13 +113,16 @@ const NumberCache = new LRUCache(500);
 const WrappedTextCache = new LRUCache(1000);
 
 // 短文本位图缓存：数字、表头、短状态文本会在滚动时高频重复出现
-const TextBitmapCache = new LRUCache(600);
+const TextBitmapCache = new LRUCache(600, (_key, bitmap) => {
+  if (bitmap && bitmap.canvas) {
+    bitmap.canvas.width = 0;
+    bitmap.canvas.height = 0;
+  }
+});
 
 // 当前字体状态缓存
 const textFontState = { current: null };
-
-// 默认缓冲区大小（预加载的额外行列数）
-const VIRTUAL_SCROLL_BUFFER = 3;
+const HEX_COLOR_RE = /^#([A-Fa-f0-9]{3}){1,2}$/;
 
 export default {
   methods: {
@@ -192,27 +148,6 @@ export default {
       this._virtualScrollManager.triggerPreload(range);
       
       return range;
-    },
-
-    /**
-     * 检查单元格是否在可见范围内
-     * @param {number} r - 行索引
-     * @param {number} c - 列索引
-     * @param {Object} visibleRange - 可见范围对象
-     * @returns {boolean}
-     */
-    _isCellVisible(r, c, visibleRange) {
-      if (!visibleRange) return true;
-      
-      const { freezeR, freezeC, freezeEndRow, freezeEndCol, startRow, endRow, startCol, endCol } = visibleRange;
-      
-      // 在冻结区域内
-      if (r < freezeR && c < freezeC) return true;
-      if (r <= freezeEndRow && c < freezeC) return true;
-      if (r < freezeR && c <= freezeEndCol) return true;
-      
-      // 在主体可见区域内
-      return r >= startRow && r <= endRow && c >= startCol && c <= endCol;
     },
 
     /**
@@ -314,7 +249,7 @@ export default {
      * 收集单元格渲染数据用于批量绘制
      * @returns {Object} 包含背景、文本、网格线数据的对象
      */
-    collectCellData(r, c, x, y, w, h) {
+    collectCellData(r, c, x, y, w, h, clipRect = null) {
       const val = this.workbook.getCellValue(r, c);
       const cell = this.workbook.getCell(r, c);
       const s = cell ? cell.s : null;
@@ -323,13 +258,12 @@ export default {
         r, c, x, y, w, h,
         bg: (s && (s.bg || s.bgcolor)) ? (s.bg || s.bgcolor) : null,
         text: null,
-        gridLine: true
+        gridLine: true,
+        clip: clipRect ? { x: clipRect.minX, y: clipRect.minY, w: clipRect.maxX - clipRect.minX, h: clipRect.maxY - clipRect.minY } : null
       };
 
       // 收集文本数据
       if (val !== null && val !== undefined && val !== '') {
-        const textVal = String(val);
-
         // Font & Style
         let fontFunc = '';
         if (s && (s.fw === 'bold' || s.bold)) fontFunc += 'bold ';
@@ -345,29 +279,7 @@ export default {
         const valign = (s && s.valign) ? s.valign : 'middle';
 
         // Handle Number Formatting
-        let formattedText = textVal;
-        if (s) {
-          const cleanVal = typeof val === 'string' ? val.replace(/,/g, '') : val;
-          let numVal = parseFloat(cleanVal);
-          if (!isNaN(numVal)) {
-            if (s.decimals !== undefined) {
-              numVal = Number(numVal.toFixed(s.decimals));
-              formattedText = numVal.toFixed(s.decimals);
-            }
-            if (s.fmt === 'percent') {
-              let pVal = parseFloat(cleanVal) * 100;
-              if (s.decimals !== undefined) pVal = Number(pVal.toFixed(s.decimals));
-              formattedText = pVal.toFixed(s.decimals !== undefined ? s.decimals : 2) + '%';
-            } else if (s.fmt === 'comma') {
-              const opts = {};
-              if (s.decimals !== undefined) {
-                opts.minimumFractionDigits = s.decimals;
-                opts.maximumFractionDigits = s.decimals;
-              }
-              formattedText = parseFloat(cleanVal).toLocaleString('en-US', opts);
-            }
-          }
-        }
+        const formattedText = formatCellText(val, s);
 
         const isWrap = s && s.wrap;
         const padding = 4;
@@ -402,32 +314,22 @@ export default {
     },
 
     /**
-     * 批量绘制网格线 - 一次性绘制所有网格线
-     */
-    _drawBatchedGridLines(ctx, gridLines) {
-      if (!gridLines.length) return;
-      ctx.lineWidth = 1;
-      ctx.strokeStyle = this.tableTheme.borderColor;
-      ctx.beginPath();
-      for (let i = 0; i < gridLines.length; i += 4) {
-        // 水平线
-        ctx.moveTo(gridLines[i] + 0.5, gridLines[i+1] + 0.5);
-        ctx.lineTo(gridLines[i] + gridLines[i+2] - 0.5, gridLines[i+1] + 0.5);
-        // 垂直线
-        ctx.moveTo(gridLines[i] + 0.5, gridLines[i+1] + 0.5);
-        ctx.lineTo(gridLines[i] + 0.5, gridLines[i+1] + gridLines[i+3] - 0.5);
-      }
-      ctx.stroke();
-    },
-
-    /**
      * 批量绘制文本 - 按字体分组减少状态切换
      */
     _drawBatchedTexts(ctx, textGroups, cellDataList) {
       for (const cellData of cellDataList) {
         if (!cellData.text) continue;
-        const { text, x, y, w, h } = cellData;
+        const { text, x, y, w, h, clip } = cellData;
         
+        // 应用区域的物理裁剪保护（解决主线程异步渐进式渲染没有全局裁剪而越界叠字的问题）
+        const hasGlobalClip = !!clip;
+        if (hasGlobalClip) {
+          ctx.save();
+          ctx.beginPath();
+          ctx.rect(clip.x, clip.y, clip.w, clip.h);
+          ctx.clip();
+        }
+
         // 性能优化：检查是否真的需要裁剪
         // 自动换行文本由于高度不确定，始终建议裁剪
         let needsClip = true;
@@ -467,6 +369,10 @@ export default {
         }
 
         if (needsClip) {
+          ctx.restore();
+        }
+
+        if (hasGlobalClip) {
           ctx.restore();
         }
       }
@@ -713,15 +619,6 @@ export default {
       const bxw = bx + w;
       const byh = by + h;
 
-      // 内联边框属性获取，避免函数调用开销
-      const getBorderProps = (b) => {
-        if (typeof b === 'string') return { color: b, style: 'solid' };
-        return {
-          color: (b && b.color) ? b.color : '#000000',
-          style: (b && b.style) ? b.style : 'solid'
-        };
-      };
-
       // 绘制各边
       if (batchAccumulator) {
         const addLine = (x1, y1, x2, y2, color, style) => {
@@ -849,22 +746,6 @@ export default {
         ctx.restore();
     },
 
-    /**
-     * 获取边框批量数据对象（从对象池）
-     * @returns {Object} 边框批量数据对象
-     */
-    _acquireBorderBatch() {
-      return borderBatchPool.acquire();
-    },
-
-    /**
-     * 释放边框批量数据对象（回对象池）
-     * @param {Object} batch - 边框批量数据对象
-     */
-    _releaseBorderBatch(batch) {
-      borderBatchPool.release(batch);
-    },
-
     drawColHeader(ctx, c, x, w, h) {
       ctx.fillStyle = this.tableTheme.headerBg;
       ctx.fillRect(x, 0, w, h);
@@ -880,14 +761,7 @@ export default {
       ctx.textAlign = 'center';
       ctx.font = `${this.tableTheme.headerFontSize} ${this.tableTheme.fontFamily}`;
 
-      let colName = '';
-      let n = c + 1;
-      while (n > 0) {
-        let m = (n - 1) % 26;
-        colName = String.fromCharCode(65 + m) + colName;
-        n = Math.floor((n - m) / 26);
-      }
-      ctx.fillText(colName, x + w / 2, h / 2);
+      ctx.fillText(this.workbook._indexToColStr(c), x + w / 2, h / 2);
     },
 
     /**
@@ -906,6 +780,19 @@ export default {
       const CH = Math.floor(this.colHeaderHeight);
 
       ctx.clearRect(0, 0, W, H);
+
+      // 绘制左上角全选方块（在选区层，确保不被内容层遮挡）
+      const theme = this.tableTheme || TableTheme;
+      ctx.fillStyle = theme.headerBg;
+      ctx.fillRect(0, 0, RW, CH);
+      // 三角形指示器
+      ctx.beginPath();
+      ctx.moveTo(RW - 10, CH - 2);
+      ctx.lineTo(RW - 2, CH - 2);
+      ctx.lineTo(RW - 2, CH - 10);
+      ctx.closePath();
+      ctx.fillStyle = theme.borderColor;
+      ctx.fill();
 
       const freezeC = wb.freeze.c || 0;
       const freezeR = wb.freeze.r || 0;
@@ -1072,16 +959,6 @@ export default {
       this.invalidateCore(rect);
     },
 
-    invalidateSelection() {
-        this.renderSelectionRequested = true;
-        this.render();
-    },
-
-    invalidateAnimation() {
-        this.renderAnimationRequested = true;
-        this.render();
-    },
-
     render() {
       if ((!this.ctx && !this.isOffscreenActive) || !this.workbook) return;
 
@@ -1194,8 +1071,42 @@ export default {
       const RW = Math.floor(this.rowHeaderWidth);
       const CH = Math.floor(this.colHeaderHeight);
 
+      const visibleRange = this._getVisibleRange();
+      if (!visibleRange) return;
+
+      const {
+        freezeR, freezeC, frozenWidth, frozenHeight,
+        startRow, endRow, startCol, endCol,
+        freezeEndRow, freezeEndCol,
+        bodyStartX, bodyStartY
+      } = visibleRange;
+
       const isPartial = !this.fullRedraw && this.dirtyRect;
-      const renderRect = isPartial ? this.dirtyRect : { x: 0, y: 0, w: W, h: H };
+      const renderRect = isPartial ? { ...this.dirtyRect } : { x: 0, y: 0, w: W, h: H };
+
+      // 部分重绘时把冻结区域并入脏矩形，保证冻结区的清屏+裁剪+不透明底色生效
+      if (isPartial && (frozenWidth > 0 || frozenHeight > 0)) {
+        let x1 = renderRect.x;
+        let y1 = renderRect.y;
+        let x2 = renderRect.x + renderRect.w;
+        let y2 = renderRect.y + renderRect.h;
+        if (frozenWidth > 0) {
+          x1 = Math.min(x1, RW);
+          x2 = Math.max(x2, RW + frozenWidth);
+          y1 = Math.min(y1, CH);
+          y2 = Math.max(y2, H);
+        }
+        if (frozenHeight > 0) {
+          x1 = Math.min(x1, RW);
+          x2 = Math.max(x2, W);
+          y1 = Math.min(y1, CH);
+          y2 = Math.max(y2, CH + frozenHeight);
+        }
+        renderRect.x = x1;
+        renderRect.y = y1;
+        renderRect.w = x2 - x1;
+        renderRect.h = y2 - y1;
+      }
 
       this.fullRedraw = false;
       this.dirtyRect = null;
@@ -1208,7 +1119,7 @@ export default {
       } else {
         ctx.clearRect(renderRect.x, renderRect.y, renderRect.w, renderRect.h);
       }
-      
+
       // 2. 核心裁剪：确保内容不会溢出到表头
       ctx.beginPath();
       if (isPartial) {
@@ -1225,32 +1136,22 @@ export default {
       ctx.textBaseline = 'middle';
       ctx.font = `${this.tableTheme.fontSize} ${this.tableTheme.fontFamily}`;
 
-      const visibleRange = this._getVisibleRange();
-      if (!visibleRange) {
-        ctx.restore();
-        return;
-      }
-
-      const {
-        freezeR, freezeC, frozenWidth, frozenHeight,
-        startRow, endRow, startCol, endCol,
-        freezeEndRow, freezeEndCol,
-        bodyStartX, bodyStartY
-      } = visibleRange;
-
       const intersects = (r1, r2) => {
         return !(r2.x > r1.x + r1.w || r2.x + r2.w < r1.x || r2.y > r1.y + r1.h || r2.y + r2.h < r1.y);
       };
 
-      const drawRangeBatched = (rStart, rEnd, cStart, cEnd, offsetX, offsetY) => {
+      const drawRangeBatched = (rStart, rEnd, cStart, cEnd, offsetX, offsetY, clipRect = null, forceFull = false, drawEmptyBorders = false) => {
         const cellDataList = [];
         const borderBatch = {};
-        
+        // 冻结区域不滚动，始终需要完整重绘（背景填充会先擦除整个区域）
+        const usePartial = isPartial && !forceFull;
+        const cellRenderRect = forceFull ? { x: 0, y: 0, w: W, h: H } : renderRect;
+
         let vy = offsetY;
         for (let r = rStart; r <= rEnd; r++) {
           const h = wb.getRowHeight(r);
           if (vy + h > 0 && vy < H) {
-            if (isPartial && (vy + h < renderRect.y || vy > renderRect.y + renderRect.h)) {
+            if (usePartial && (vy + h < renderRect.y || vy > renderRect.y + renderRect.h)) {
               vy += h;
               continue;
             }
@@ -1259,7 +1160,7 @@ export default {
             for (let c = cStart; c <= cEnd; c++) {
               const w = wb.getColWidth(c);
               if (cx + w > 0 && cx < W) {
-                if (isPartial && (cx + w < renderRect.x || cx > renderRect.x + renderRect.w)) {
+                if (usePartial && (cx + w < renderRect.x || cx > renderRect.x + renderRect.w)) {
                   cx += w;
                   continue;
                 }
@@ -1271,16 +1172,23 @@ export default {
 
                 if (merge) {
                   if (merge.s.r === r && merge.s.c === c) {
-                    let mw = 0; for (let i = c; i <= merge.e.c; i++) mw += wb.getColWidth(i);
-                    let mh = 0; for (let i = r; i <= merge.e.r; i++) mh += wb.getRowHeight(i);
-                    if (intersects({x: cx, y: vy, w: mw, h: mh}, renderRect)) {
-                      cellDataList.push(this.collectCellData(r, c, cx, vy, mw, mh));
-                      this.drawCellBorders(ctx, r, c, cx, vy, mw, mh, borderBatch);
+                    const { mw, mh } = calcMergeSize(wb, merge, r, c);
+                    if (intersects({x: cx, y: vy, w: mw, h: mh}, cellRenderRect)) {
+                      // 物理裁剪过滤，防止滚动时边缘有微小溢出单元格越界画到冻结区域内
+                      if (!clipRect || (cx + mw > clipRect.minX && cx < clipRect.maxX && vy + mh > clipRect.minY && vy < clipRect.maxY)) {
+                        cellDataList.push(this.collectCellData(r, c, cx, vy, mw, mh, clipRect));
+                        this.drawCellBorders(ctx, r, c, cx, vy, mw, mh, borderBatch);
+                      }
                     }
                   }
-                } else if (!isEmpty) {
-                  cellDataList.push(this.collectCellData(r, c, cx, vy, w, h));
-                  this.drawCellBorders(ctx, r, c, cx, vy, w, h, borderBatch);
+                } else if (!isEmpty || drawEmptyBorders) {
+                  // 物理裁剪过滤
+                  if (!clipRect || (cx + w > clipRect.minX && cx < clipRect.maxX && vy + h > clipRect.minY && vy < clipRect.maxY)) {
+                    if (!isEmpty) {
+                      cellDataList.push(this.collectCellData(r, c, cx, vy, w, h, clipRect));
+                    }
+                    this.drawCellBorders(ctx, r, c, cx, vy, w, h, borderBatch);
+                  }
                 }
               }
               cx += w;
@@ -1290,10 +1198,13 @@ export default {
           vy += h;
           if (vy > H) break;
         }
-        
-        this.drawCellsBatched(ctx, cellDataList, null); 
+
+        this.drawCellsBatched(ctx, cellDataList, null);
         this._drawBatchedBorders(ctx, borderBatch);
       };
+
+      // 冻结区域底色：优先使用 frozenBg 配置，否则不填充（使用普通单元格默认背景）
+      const frozenBg = this.tableTheme.frozenBg || null;
 
       const rowPos = wb.getRowPos(startRow);
       const colPos = wb.getColPos(startCol);
@@ -1305,7 +1216,12 @@ export default {
       ctx.beginPath();
       ctx.rect(bodyStartX, bodyStartY, W - bodyStartX, H - bodyStartY);
       ctx.clip();
-      drawRangeBatched(startRow, endRow, startCol, endCol, vxBody, vyBody);
+      drawRangeBatched(startRow, endRow, startCol, endCol, vxBody, vyBody, {
+        minX: bodyStartX,
+        minY: bodyStartY,
+        maxX: W,
+        maxY: H
+      });
       ctx.restore();
 
       // 2. 绘制冻结列
@@ -1314,7 +1230,16 @@ export default {
         ctx.beginPath();
         ctx.rect(RW, bodyStartY, frozenWidth, H - bodyStartY);
         ctx.clip();
-        drawRangeBatched(startRow, endRow, 0, freezeEndCol, RW, vyBody);
+        if (frozenBg) {
+          ctx.fillStyle = frozenBg;
+          ctx.fillRect(RW, bodyStartY, frozenWidth, H - bodyStartY);
+        }
+        drawRangeBatched(startRow, endRow, 0, freezeEndCol, RW, vyBody, {
+          minX: RW,
+          minY: bodyStartY,
+          maxX: bodyStartX,
+          maxY: H
+        }, true, true);
         ctx.restore();
       }
 
@@ -1324,7 +1249,16 @@ export default {
         ctx.beginPath();
         ctx.rect(bodyStartX, CH, W - bodyStartX, frozenHeight);
         ctx.clip();
-        drawRangeBatched(0, freezeEndRow, startCol, endCol, vxBody, CH);
+        if (frozenBg) {
+          ctx.fillStyle = frozenBg;
+          ctx.fillRect(bodyStartX, CH, W - bodyStartX, frozenHeight);
+        }
+        drawRangeBatched(0, freezeEndRow, startCol, endCol, vxBody, CH, {
+          minX: bodyStartX,
+          minY: CH,
+          maxX: W,
+          maxY: bodyStartY
+        }, true, true);
         ctx.restore();
       }
 
@@ -1334,7 +1268,16 @@ export default {
         ctx.beginPath();
         ctx.rect(RW, CH, frozenWidth, frozenHeight);
         ctx.clip();
-        drawRangeBatched(0, freezeEndRow, 0, freezeEndCol, RW, CH);
+        if (frozenBg) {
+          ctx.fillStyle = frozenBg;
+          ctx.fillRect(RW, CH, frozenWidth, frozenHeight);
+        }
+        drawRangeBatched(0, freezeEndRow, 0, freezeEndCol, RW, CH, {
+          minX: RW,
+          minY: CH,
+          maxX: bodyStartX,
+          maxY: bodyStartY
+        }, true, true);
         ctx.restore();
       }
 
@@ -1366,6 +1309,22 @@ export default {
 
       if (startRow === -1 || startCol === -1) return;
 
+      // 缓存上次的范围，仅在真正变化时才重建数组触发 Vue diff
+      const prevStartRow = this._ariaStartRow;
+      const prevEndRow = this._ariaEndRow;
+      const prevStartCol = this._ariaStartCol;
+      const prevEndCol = this._ariaEndCol;
+
+      if (startRow === prevStartRow && endRow === prevEndRow &&
+          startCol === prevStartCol && endCol === prevEndCol) {
+        return;
+      }
+
+      this._ariaStartRow = startRow;
+      this._ariaEndRow = endRow;
+      this._ariaStartCol = startCol;
+      this._ariaEndCol = endCol;
+
       const rows = [];
       for (let r = startRow; r <= endRow && r < wb.rowCount; r++) {
         rows.push({ index: r });
@@ -1376,16 +1335,8 @@ export default {
         cols.push({ index: c });
       }
 
-      // 仅在范围变化时更新
-      const rowsChanged = this.ariaRows.length !== rows.length || 
-                          (rows.length > 0 && (this.ariaRows[0].index !== rows[0].index || this.ariaRows[rows.length-1].index !== rows[rows.length-1].index));
-      const colsChanged = this.ariaCols.length !== cols.length || 
-                          (cols.length > 0 && (this.ariaCols[0].index !== cols[0].index || this.ariaCols[cols.length-1].index !== cols[cols.length-1].index));
-
-      if (rowsChanged || colsChanged) {
-        this.ariaRows = rows;
-        this.ariaCols = cols;
-      }
+      this.ariaRows = rows;
+      this.ariaCols = cols;
     },
 
     drawRowHeader(ctx, r, y, w, h) {
@@ -1617,16 +1568,12 @@ export default {
     },
 
     _hexToRgba(hex, alpha) {
-      let c;
-      if(/^#([A-Fa-f0-9]{3}){1,2}$/.test(hex)){
-        c= hex.substring(1).split('');
-        if(c.length== 3){
-          c= [c[0], c[0], c[1], c[1], c[2], c[2]];
-        }
-        c= '0x' + c.join('');
-        return 'rgba('+[(c>>16)&255, (c>>8)&255, c&255].join(',')+','+alpha+')';
-      }
-      return hex;
+      if (!HEX_COLOR_RE.test(hex)) return hex;
+      const h = hex.substring(1);
+      const n = parseInt(h.length === 3
+        ? h[0] + h[0] + h[1] + h[1] + h[2] + h[2]
+        : h, 16);
+      return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
     },
 
     _drawRoundedRect(ctx, x, y, width, height, radius) {
@@ -1643,34 +1590,27 @@ export default {
       ctx.closePath();
     },
 
-    _getGridRenderSignature(range, theme) {
+    _getGridRenderSignature(range) {
       const wb = this.workbook;
-      const selection = wb.selection
-        ? `${wb.selection.s.r},${wb.selection.s.c},${wb.selection.e.r},${wb.selection.e.c}`
-        : 'none';
-      const rowHeights = [];
-      for (let r = range.startRow; r <= range.endRow; r++) {
-        rowHeights.push(wb.getRowHeight(r));
-      }
-      const colWidths = [];
-      for (let c = range.startCol; c <= range.endCol; c++) {
-        colWidths.push(wb.getColWidth(c));
-      }
 
-      const gv = this.gridVersion || 0;
+      // 数值哈希：仅包含影响网格线和表头的字段（不含选区，选区在 selectionCanvas 渲染）
+      let h = 0;
+      const mix = (v) => { h = (h * 31 + (v | 0)) | 0; };
 
-      return [
-        this.width, this.height,
-        this.rowHeaderWidth, this.colHeaderHeight,
-        this.scrollX, this.scrollY,
-        range.startRow, range.endRow, range.startCol, range.endCol,
-        selection,
-        theme.borderColor, theme.headerBg, theme.headerHoverBg, theme.textColor,
-        theme.headerFontSize, theme.fontFamily,
-        rowHeights.join(','),
-        colWidths.join(','),
-        gv
-      ].join('|');
+      mix(this.width); mix(this.height);
+      mix(this.rowHeaderWidth); mix(this.colHeaderHeight);
+      mix(this.scrollX); mix(this.scrollY);
+      mix(range.startRow); mix(range.endRow);
+      mix(range.startCol); mix(range.endCol);
+
+      // 行高/列宽哈希：累加各行列尺寸（结构变化时自动失效）
+      for (let r = range.startRow; r <= range.endRow; r++) mix(wb.getRowHeight(r));
+      for (let c = range.startCol; c <= range.endCol; c++) mix(wb.getColWidth(c));
+
+      // 冻结位置变化时失效
+      if (wb.freeze) { mix(wb.freeze.r); mix(wb.freeze.c); }
+
+      return h;
     },
 
     _getGridCacheContext(width, height) {
@@ -1709,7 +1649,7 @@ export default {
       const range = this._getVisibleRange();
       if (!range) return;
 
-      const signature = this._getGridRenderSignature(range, theme);
+      const signature = this._getGridRenderSignature(range);
       const cache = this._getGridCacheContext(W, H);
 
       if (cache && cache.signature === signature) {
@@ -1752,42 +1692,120 @@ export default {
       }
 
       // 2. 绘制数据区域内的垂直线段 (按行分段，跳过合并单元格内部的线)
+      // 限制在主体区域内，避免主体行的线段越界画入冻结行/列区域，
+      // 否则在异步 Worker 重绘冻结区前会有一帧出现"主体内容穿透冻结区"的视觉残留
+      const bodyStartY = (range.bodyStartY != null) ? range.bodyStartY : CH;
+      const bodyStartX = (range.bodyStartX != null) ? range.bodyStartX : RW;
       let vy = CH + wb.getRowPos(range.startRow) - this.scrollY;
       for (let r = range.startRow; r <= range.endRow; r++) {
         const h = wb.getRowHeight(r);
-        const yStart = Math.floor(vy);
-        const yEnd = Math.floor(vy + h);
+        const yStart = Math.max(Math.floor(vy), bodyStartY);
+        const yEnd = Math.max(Math.floor(vy + h), bodyStartY);
 
-        let cx = RW + wb.getColPos(range.startCol) - this.scrollX;
-        for (let c = range.startCol; c <= range.endCol; c++) {
-          const w = wb.getColWidth(c);
-          const x = Math.floor(cx + w) + 0.5;
+        if (yEnd > yStart) {
+          let cx = RW + wb.getColPos(range.startCol) - this.scrollX;
+          for (let c = range.startCol; c <= range.endCol; c++) {
+            const w = wb.getColWidth(c);
+            const x = Math.floor(cx + w) + 0.5;
 
-          if (x > RW) {
-            const merge = wb.getMerge(r, c);
-            let shouldDraw = true;
-            if (merge) {
-              // 只有当该列是合并区域的最右列时才绘制右边线
-              shouldDraw = (c === merge.e.c);
+            if (x >= bodyStartX) {
+              const merge = wb.getMerge(r, c);
+              let shouldDraw = true;
+              if (merge) {
+                // 只有当该列是合并区域的最右列时才绘制右边线
+                shouldDraw = (c === merge.e.c);
+              }
+              if (shouldDraw) {
+                drawCtx.moveTo(x, yStart);
+                drawCtx.lineTo(x, yEnd);
+              }
             }
-            if (shouldDraw) {
-              drawCtx.moveTo(x, yStart);
-              drawCtx.lineTo(x, yEnd);
-            }
+            cx += w;
           }
-          cx += w;
         }
         vy += h;
+      }
+
+      // 3. 绘制冻结区域的垂直网格线
+      const freezeR = range.freezeR || 0;
+      const freezeC = range.freezeC || 0;
+      const headerSepY = CH + 0.5; // 列标与数据区分隔线 y 坐标
+      if (freezeR > 0) {
+        // 冻结行区域的垂直线：从 CH 到 bodyStartY
+        let vx_fr = RW + wb.getColPos(range.startCol) - this.scrollX;
+        for (let c = range.startCol; c <= range.endCol + 1; c++) {
+          const x = Math.floor(vx_fr) + 0.5;
+          if (x > RW) {
+            drawCtx.moveTo(x, CH);
+            drawCtx.lineTo(x, bodyStartY);
+          }
+          if (c <= range.endCol) vx_fr += wb.getColWidth(c);
+        }
+      }
+      if (freezeC > 0) {
+        // 冻结列区域的垂直线：从 CH 到 H（贯穿冻结行区域和主体区域）
+        let vx_fc = RW;
+        for (let c = 0; c <= range.freezeEndCol; c++) {
+          const w = wb.getColWidth(c);
+          const x = Math.floor(vx_fc + w) + 0.5;
+          if (x > RW && x < bodyStartX) {
+            drawCtx.moveTo(x, CH);
+            drawCtx.lineTo(x, H);
+          }
+          vx_fc += w;
+        }
       }
 
       // --- 绘制水平线 (按需绘制，避开合并单元格) ---
       // 顶边界线 (贯穿)
       drawCtx.moveTo(0, 0.5);
       drawCtx.lineTo(W, 0.5);
-      
+
       // 分隔线：列标与数据区之间 (贯穿)
-      drawCtx.moveTo(0, CH + 0.5);
-      drawCtx.lineTo(W, CH + 0.5);
+      drawCtx.moveTo(0, headerSepY);
+      drawCtx.lineTo(W, headerSepY);
+
+      // 4. 绘制冻结区域的水平网格线
+      if (freezeR > 0) {
+        // 冻结行区域的水平线：每个冻结行的底边
+        // 跳过与列标分隔线重合的 y 坐标，避免双线
+        // 从 RW 开始绘制，避免穿过行号列区域
+        let vy_fr = CH;
+        for (let r = 0; r <= Math.min(freezeR, range.endRow + 1); r++) {
+          const y = Math.floor(vy_fr) + 0.5;
+          if (y > CH && Math.abs(y - headerSepY) > 0.01) {
+            drawCtx.moveTo(RW, y);
+            drawCtx.lineTo(W, y);
+          }
+          if (r <= range.endRow) vy_fr += wb.getRowHeight(r);
+        }
+        // 行号列内的冻结行分隔线
+        let vy_rh = CH;
+        for (let r = 0; r <= Math.min(freezeR, range.endRow + 1); r++) {
+          const y = Math.floor(vy_rh) + 0.5;
+          if (y > CH && Math.abs(y - headerSepY) > 0.01) {
+            drawCtx.moveTo(0, y);
+            drawCtx.lineTo(RW, y);
+          }
+          if (r <= range.endRow) vy_rh += wb.getRowHeight(r);
+        }
+        // 重画行号列右侧垂直边框，防止被冻结行内容覆盖
+        drawCtx.moveTo(RW + 0.5, CH);
+        drawCtx.lineTo(RW + 0.5, bodyStartY);
+      }
+      if (freezeC > 0) {
+        // 冻结列区域的水平线：从 RW 到 bodyStartX
+        // 跳过与行号分隔线重合的 x 坐标，避免双线
+        let vy_fc = CH + wb.getRowPos(range.startRow) - this.scrollY;
+        for (let r = range.startRow; r <= range.endRow + 1; r++) {
+          const y = Math.floor(vy_fc) + 0.5;
+          if (y > CH && y < bodyStartY) {
+            drawCtx.moveTo(RW, y);
+            drawCtx.lineTo(bodyStartX, y);
+          }
+          if (r <= range.endRow) vy_fc += wb.getRowHeight(r);
+        }
+      }
 
       // 1. 绘制行号区域内的水平分隔线 (仅在行号区域 0 到 RW 贯穿)
       let vy2 = CH + wb.getRowPos(range.startRow) - this.scrollY;
@@ -1801,27 +1819,30 @@ export default {
       }
 
       // 2. 绘制数据区域内的水平线段 (按列分段，跳过合并单元格内部的线)
+      // 与垂直线段同理，限制在主体区域内，避免越界进入冻结区
       let vy3 = CH + wb.getRowPos(range.startRow) - this.scrollY;
       for (let r = range.startRow; r <= range.endRow; r++) {
         const h = wb.getRowHeight(r);
         const y = Math.floor(vy3 + h) + 0.5;
 
-        if (y > CH) {
+        if (y >= bodyStartY) {
           let cx = RW + wb.getColPos(range.startCol) - this.scrollX;
           for (let c = range.startCol; c <= range.endCol; c++) {
             const w = wb.getColWidth(c);
-            const xStart = Math.floor(cx);
-            const xEnd = Math.floor(cx + w);
+            const xStart = Math.max(Math.floor(cx), bodyStartX);
+            const xEnd = Math.max(Math.floor(cx + w), bodyStartX);
 
-            const merge = wb.getMerge(r, c);
-            let shouldDraw = true;
-            if (merge) {
-              // 只有当该行是合并区域的最底行时才绘制下边线
-              shouldDraw = (r === merge.e.r);
-            }
-            if (shouldDraw) {
-              drawCtx.moveTo(xStart, y);
-              drawCtx.lineTo(xEnd, y);
+            if (xEnd > xStart) {
+              const merge = wb.getMerge(r, c);
+              let shouldDraw = true;
+              if (merge) {
+                // 只有当该行是合并区域的最底行时才绘制下边线
+                shouldDraw = (r === merge.e.r);
+              }
+              if (shouldDraw) {
+                drawCtx.moveTo(xStart, y);
+                drawCtx.lineTo(xEnd, y);
+              }
             }
             cx += w;
           }
@@ -1856,57 +1877,75 @@ export default {
       const H = this.height;
 
       ctx.save();
-      
+
       // 设置文字样式
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillStyle = theme.textColor;
       ctx.font = `${theme.headerFontSize} ${theme.fontFamily}`;
 
-      // --- 1. 渲染左上角全选标识 (三角形) ---
+      // --- 1. 渲染行号文字 ---
+      const frozenHeight = range.frozenHeight || 0;
+
+      // A. 绘制冻结行的行号 (固定在最顶端，不受scrollY影响)
+      if (range.freezeR > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, CH, RW, frozenHeight);
+        ctx.clip();
+        let curFrozenY = CH;
+        for (let r = 0; r < range.freezeR; r++) {
+          const h = wb.getRowHeight(r);
+          const y = Math.floor(curFrozenY);
+          ctx.fillText(String(r + 1), RW / 2, y + h / 2);
+          curFrozenY += h;
+        }
+        ctx.restore();
+      }
+
+      // B. 绘制滚动主体的行号 (裁剪到冻结区域下方，让边界处的行号随其单元格自然裁剪)
       ctx.save();
       ctx.beginPath();
-      ctx.rect(0, 0, RW, CH);
+      ctx.rect(0, CH + frozenHeight, RW, H - CH - frozenHeight);
       ctx.clip();
-      ctx.beginPath();
-      ctx.moveTo(RW - 10, CH - 2);
-      ctx.lineTo(RW - 2, CH - 2);
-      ctx.lineTo(RW - 2, CH - 10);
-      ctx.closePath();
-      ctx.fillStyle = theme.borderColor;
-      ctx.fill();
-      ctx.restore();
-
-      // --- 2. 渲染行号文字 ---
-      ctx.save();
-      ctx.beginPath();
-      ctx.rect(0, CH, RW, H - CH);
-      ctx.clip();
-
       let curY = CH + wb.getRowPos(range.startRow) - this.scrollY;
       for (let r = range.startRow; r <= range.endRow; r++) {
         const h = wb.getRowHeight(r);
         const y = Math.floor(curY);
-        
-        // 仅绘制文字，背景和边框已由 _renderGrid 处理
         ctx.fillText(String(r + 1), RW / 2, y + h / 2);
         curY += h;
       }
       ctx.restore();
 
-      // --- 2. 渲染列标文字 ---
+      // --- 3. 渲染列标文字 ---
+      const frozenWidth = range.frozenWidth || 0;
+
+      // A. 绘制冻结列的列标 (固定在最左侧，不受scrollX影响)
+      if (range.freezeC > 0) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(RW, 0, frozenWidth, CH);
+        ctx.clip();
+        let curFrozenX = RW;
+        for (let c = 0; c < range.freezeC; c++) {
+          const w = wb.getColWidth(c);
+          const x = Math.floor(curFrozenX);
+          ctx.fillText(wb._indexToColStr(c), x + w / 2, CH / 2);
+          curFrozenX += w;
+        }
+        ctx.restore();
+      }
+
+      // B. 绘制滚动主体的列标 (裁剪到冻结区域右侧)
       ctx.save();
       ctx.beginPath();
-      ctx.rect(RW, 0, W - RW, CH);
+      ctx.rect(RW + frozenWidth, 0, W - RW - frozenWidth, CH);
       ctx.clip();
-
       let curX = RW + wb.getColPos(range.startCol) - this.scrollX;
       for (let c = range.startCol; c <= range.endCol; c++) {
         const w = wb.getColWidth(c);
         const x = Math.floor(curX);
-        
-        // 仅绘制文字
-        ctx.fillText(wb.getColName(c), x + w / 2, CH / 2);
+        ctx.fillText(wb._indexToColStr(c), x + w / 2, CH / 2);
         curX += w;
       }
       ctx.restore();

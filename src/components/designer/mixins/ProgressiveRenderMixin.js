@@ -9,6 +9,7 @@ import {
   createProgressiveRenderer,
   Priority,
 } from '../../../core/render/ProgressiveRenderer';
+import { calcMergeSize } from '../utils/cellUtils';
 
 // 渐进式渲染配置
 const PROGRESSIVE_CONFIG = {
@@ -82,10 +83,7 @@ export default {
         this.progressiveState.isRendering = false;
         this.progressiveState.phase = 'complete';
         this.progressiveState.progress = 1;
-        
-        // 触发最终绘制
-        this._flushCollectedData();
-        
+
         // 触发完成事件
         this.$emit('progressive-render-complete');
       };
@@ -227,7 +225,8 @@ export default {
             y: CH,
             w: frozenWidth,
             h: frozenHeight
-          }
+          },
+          fillBg: true
         }));
       }
 
@@ -247,7 +246,8 @@ export default {
             y: CH,
             w: this.width - bodyStartX,
             h: frozenHeight
-          }
+          },
+          fillBg: true
         }));
       }
 
@@ -267,7 +267,8 @@ export default {
             y: bodyStartY,
             w: frozenWidth,
             h: this.height - bodyStartY
-          }
+          },
+          fillBg: true
         }));
       }
 
@@ -321,7 +322,8 @@ export default {
         endCol,
         offsetX,
         offsetY,
-        clipRect
+        clipRect,
+        fillBg
       } = options;
 
       return {
@@ -331,55 +333,8 @@ export default {
         execute: (context) => {
           // 执行区域渲染
           this._renderAreaProgressive(
-            startRow, endRow, startCol, endCol, offsetX, offsetY, clipRect
+            startRow, endRow, startCol, endCol, offsetX, offsetY, clipRect, fillBg
           );
-          return { done: true, progress: 1 };
-        }
-      };
-    },
-
-    /**
-     * 创建表头渲染任务
-     * @param {Object} options
-     * @returns {Object}
-     */
-    _createHeaderRenderTask(options) {
-      const { id, priority, type, startCol, endCol, startRow, endRow, offsetX, offsetY, clipRect } = options;
-      const wb = this.workbook;
-
-      return {
-        id,
-        priority,
-        estimatedTime: 1,
-        execute: (context) => {
-          const ctx = this.ctx;
-
-          ctx.save();
-          if (clipRect) {
-            ctx.beginPath();
-            ctx.rect(clipRect.x, clipRect.y, clipRect.w, clipRect.h);
-            ctx.clip();
-            ctx.clearRect(clipRect.x, clipRect.y, clipRect.w, clipRect.h);
-          }
-          
-          if (type === 'col') {
-            let cx = offsetX;
-            for (let c = startCol; c <= endCol; c++) {
-              const w = wb.getColWidth(c);
-              this.drawColHeader(ctx, c, cx, w, this.colHeaderHeight);
-              cx += w;
-            }
-          } else if (type === 'row') {
-            let ry = offsetY;
-            for (let r = startRow; r <= endRow; r++) {
-              const h = wb.getRowHeight(r);
-              this.drawRowHeader(ctx, r, ry, this.rowHeaderWidth, h);
-              ry += h;
-            }
-          }
-
-          ctx.restore();
-          
           return { done: true, progress: 1 };
         }
       };
@@ -389,7 +344,7 @@ export default {
      * 渐进式区域渲染
      * 收集数据并立即绘制
      */
-    _renderAreaProgressive(startRow, endRow, startCol, endCol, offsetX, offsetY, clipRect = null) {
+    _renderAreaProgressive(startRow, endRow, startCol, endCol, offsetX, offsetY, clipRect = null, fillBg = false) {
       const ctx = this.ctx;
       const wb = this.workbook;
       const W = this.width;
@@ -403,6 +358,11 @@ export default {
         ctx.beginPath();
         ctx.rect(clipRect.x, clipRect.y, clipRect.w, clipRect.h);
         ctx.clip();
+        // 冻结区域需要不透明底色，避免滚动时主体内容透过冻结区
+        if (fillBg) {
+          ctx.fillStyle = (this.tableTheme && this.tableTheme.cellBg) || '#ffffff';
+          ctx.fillRect(clipRect.x, clipRect.y, clipRect.w, clipRect.h);
+        }
       }
 
       let vy = offsetY;
@@ -416,9 +376,8 @@ export default {
               const merge = wb.getMerge(r, c);
               if (merge) {
                 if (merge.s.r === r && merge.s.c === c) {
-                  let mw = 0; for (let i = c; i <= merge.e.c; i++) mw += wb.getColWidth(i);
-                  let mh = 0; for (let i = r; i <= merge.e.r; i++) mh += wb.getRowHeight(i);
-                  
+                  const { mw, mh } = calcMergeSize(wb, merge, r, c);
+
                   cellDataList.push(this.collectCellData(r, c, cx, vy, mw, mh));
                   this.drawCellBorders(ctx, r, c, cx, vy, mw, mh, borderBatch);
                 }
@@ -454,45 +413,6 @@ export default {
         texts: [],
         borders: {}
       };
-    },
-
-    /**
-     * 刷新收集的数据到画布
-     */
-    _flushCollectedData() {
-      // 用于批量模式（当前未使用，保留扩展）
-    },
-
-    /**
-     * 获取渐进式渲染状态
-     * @returns {Object}
-     */
-    getProgressiveState() {
-      return {
-        ...this.progressiveState,
-        rendererStats: this.progressiveRenderer ? this.progressiveRenderer.getStats() : null
-      };
-    },
-
-    /**
-     * 智能渲染 - 根据数据量自动选择渲染模式
-     * 替代原有的 render 方法
-     */
-    smartRender() {
-      if (!this.ctx || !this.workbook) return;
-
-      // 检查是否应该使用渐进式渲染
-      const useProgressive = this.shouldUseProgressiveRender();
-
-      if (useProgressive) {
-        // 使用渐进式渲染
-        if (!this.progressiveState.isRendering) {
-          this.startProgressiveRender();
-        }
-      } else {
-        // 使用传统渲染
-        this._renderContent();
-      }
     }
   }
 };

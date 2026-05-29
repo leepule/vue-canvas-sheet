@@ -218,7 +218,7 @@ describe('SparseMatrix', () => {
     });
 
     test('entries 应该返回所有条目', () => {
-      const entries = matrix.entries();
+      const entries = Array.from(matrix.entries());
       expect(entries).toHaveLength(3);
       expect(entries[0]).toHaveProperty('r');
       expect(entries[0]).toHaveProperty('c');
@@ -226,7 +226,7 @@ describe('SparseMatrix', () => {
     });
 
     test('keys 应该返回所有键', () => {
-      const keys = matrix.keys();
+      const keys = Array.from(matrix.keys());
       expect(keys).toHaveLength(3);
       expect(keys).toContainEqual({ r: 0, c: 0 });
       expect(keys).toContainEqual({ r: 0, c: 1 });
@@ -234,7 +234,7 @@ describe('SparseMatrix', () => {
     });
 
     test('values 应该返回所有值', () => {
-      const values = matrix.values();
+      const values = Array.from(matrix.values());
       expect(values).toHaveLength(3);
       expect(values.map(v => v.v)).toContain('A');
       expect(values.map(v => v.v)).toContain('B');

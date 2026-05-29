@@ -73,7 +73,12 @@ import { PoolManager, CellPool } from './utils/ObjectPool.js';
 import { createSparseMatrix } from './data/SparseMatrix.js';
 
 import { IncrementalCalculationEngine } from './data/IncrementalCalculation.js';
-import { MemoryManager } from './utils/MemoryManager.js';
+import { PersistenceManager } from './PersistenceManager.js';
+import { LayoutEngine } from './LayoutEngine.js';
+import { MergeManager } from './MergeManager.js';
+import { StyleManager } from './StyleManager.js';
+import { colStrToIndex } from './utils/CellUtils.js';
+import { SheetStructure } from './SheetStructure.js';
 import { StyleCache } from './render/StyleCache.js';
 import { RangeDependencyIndex } from './data/RangeDependencyIndex.js';
 import { IndexedDBStorage } from './utils/IndexedDBStorage.js';
@@ -86,6 +91,10 @@ import { formulaCompiler } from './data/FormulaCompiler.js';
 const MAX_FORMULA_ROWS = 1048576;
 const MAX_FORMULA_COLS = 16384;
 const MAX_INLINE_RANGE_SNAPSHOT_CELLS = 5000;
+
+// 公式依赖提取正则（模块级常量，避免每次调用 getDependencies 时重新编译）
+const DEP_RANGE_REGEX = /\$?(?:[A-Z]+\$?[0-9]+|[A-Z]+|[0-9]+):\$?(?:[A-Z]+\$?[0-9]+|[A-Z]+|[0-9]+)/g;
+const DEP_CELL_REGEX = /\$?[A-Z]+\$?[0-9]+/g;
 
 /**
  * 工作簿核心数据模型
@@ -158,39 +167,79 @@ export class Workbook {
     /** @type {HeadPointerQueue<Function>} Worker 回调队列 */
     this._workerQueue = new HeadPointerQueue();
     
-    // ========== 偏移量缓存 ==========
-    this._rowOffsets = [];
-    this._colOffsets = [];
-    
+    // ========== 布局引擎 ==========
+    this._layoutEngine = new LayoutEngine({
+      getRowCount: () => this.rowCount,
+      getColCount: () => this.colCount,
+      getDefaultRowHeight: () => this.defaultRowHeight,
+      getDefaultColWidth: () => this.defaultColWidth,
+      getRowHeights: () => this.rowHeights,
+      getColWidths: () => this.colWidths,
+      getFreeze: () => this.freeze,
+      getColWidth: (c) => this.getColWidth(c),
+      getRowHeight: (r) => this.getRowHeight(r),
+      getDataMatrix: () => this._dataMatrix,
+    });
+
     // ========== WASM 共享内存支持 ==========
-    this._sharedRows = 100000;
-    this._sharedCols = 256;
-    this._sharedBuffer = null;
-    this._sharedView = null;
-    this._offsetsDirty = true;
-    this._frozenSize = null;
-    this._frozenSizeDirty = true;
     
     // ========== 增量计算引擎 ==========
     /** @type {IncrementalCalculationEngine} 增量计算引擎 */
     this.calcEngine = new IncrementalCalculationEngine(this);
     
-    // ========== 内存与样式管理 ==========
-    /** @type {MemoryManager} 内存管理器 */
-    this.memoryManager = new MemoryManager();
+    // ========== 样式管理 ==========
     /** @type {StyleCache} 样式缓存管理器 */
     this.styleCache = new StyleCache();
 
-    // ========== 合并单元格空间索引 ==========
-    /** @type {Map<number, Array>} 行索引到合并区域的映射 */
-    this._mergeRowIndex = new Map();
-    /** @type {boolean} 合并索引是否需要重建 */
-    this._mergeIndexDirty = true;
-    
-    this._dataMatrix = createSparseMatrix({ 
+    this._dataMatrix = createSparseMatrix({
       onDeleteCell: (cell) => {
         this._cellPool.releaseCell(cell);
       }
+    });
+
+    // ========== 合并单元格管理器 ==========
+    this._mergeManager = new MergeManager({
+      getMerges: () => this.merges,
+      setMerges: (v) => { this.merges = v; },
+      getMergeMap: () => this.mergeMap,
+      getCellKey: (r, c) => this._cellKey(r, c),
+      iterateRange: (range, cb) => this.iterateRange(range, cb),
+      getDataMatrix: () => this._dataMatrix,
+      getHistory: () => this.history,
+      emit: (...a) => this._emit(...a),
+      notify: (...a) => this.notify(...a),
+    });
+
+    // ========== 样式管理器 ==========
+    this._styleManager = new StyleManager({
+      iterateRange: (range, cb) => this.iterateRange(range, cb),
+      setCellData: (r, c, v) => this._setCellData(r, c, v),
+      getCell: (r, c) => this.getCell(r, c),
+      getCellKey: (r, c) => this._cellKey(r, c),
+      getDataMatrix: () => this._dataMatrix,
+      getHistory: () => this.history,
+      emit: (...a) => this._emit(...a),
+      notify: (...a) => this.notify(...a),
+      syncSharedValue: (r, c, v) => this._syncSharedValue(r, c, v),
+      updateDependencyMap: (id, f) => this._updateDependencyMap(id, f),
+      markCellChanged: (r, c) => this._markCellChanged(r, c),
+    });
+
+    // ========== 表格结构管理器 ==========
+    this._sheetStructure = new SheetStructure({
+      getDataMatrix: () => this._dataMatrix,
+      getRowCount: () => this.rowCount,
+      setRowCount: (v) => { this.rowCount = v; },
+      getColCount: () => this.colCount,
+      setColCount: (v) => { this.colCount = v; },
+      getDataVersion: () => this.dataVersion,
+      setDataVersion: (v) => { this.dataVersion = v; },
+      markDirty: () => this._layoutEngine.markDirty(),
+      markFrozenDirty: () => this._layoutEngine.markFrozenDirty(),
+      getHistory: () => this.history,
+      getCell: (r, c) => this.getCell(r, c),
+      bulkSetCells: (updates) => this.bulkSetCells(updates),
+      notify: (...a) => this.notify(...a),
     });
 
     // ========== 共享数值存储 ==========
@@ -206,7 +255,10 @@ export class Workbook {
     // 初始化公式引擎 (异步加载 WASM，不阻塞主线程)
     this.wasmBridge = wasmBridge;
     this.initWasm().catch(err => {
-      console.warn('[Workbook] WASM initialization failed:', err);
+      this.errorHandler.handle(
+        new SheetError(ErrorCodes.OPERATION_FAILED, 'WASM initialization failed', { originalError: err.message }),
+        { phase: 'init' }
+      );
     });
     
     // 初始化插件系统
@@ -227,13 +279,57 @@ export class Workbook {
       this._storage = new IndexedDBStorage();
       this._dirtyCells = new Map();
       this._persistTimer = null;
-      // 异步加载历史数据，实现秒开
-      this.loadFromStorage(this._sheetId).catch(err => {
-        console.warn('Failed to auto-load from storage:', err);
-      });
     } else {
       this._storage = null;
     }
+
+    // ========== 持久化管理器 ==========
+    this._persistenceManager = new PersistenceManager({
+      getStorage: () => this._storage,
+      setStorage: (s) => { this._storage = s; },
+      getDirtyCells: () => this._dirtyCells,
+      setDirtyCells: (m) => { this._dirtyCells = m; },
+      getSheetId: () => this._sheetId,
+      setSheetId: (id) => { this._sheetId = id; },
+      getEnablePersistence: () => this._enablePersistence,
+      setEnablePersistence: (v) => { this._enablePersistence = v; },
+      getRowCount: () => this.rowCount,
+      setRowCount: (v) => { this.rowCount = v; },
+      getColCount: () => this.colCount,
+      setColCount: (v) => { this.colCount = v; },
+      getColWidths: () => this.colWidths,
+      setColWidths: (v) => { this.colWidths = v; },
+      getRowHeights: () => this.rowHeights,
+      setRowHeights: (v) => { this.rowHeights = v; },
+      getMerges: () => this.merges,
+      setMerges: (v) => { this.merges = v; },
+      getMergeMap: () => this.mergeMap,
+      setMergeMap: (v) => { this.mergeMap = v; },
+      getDefaultColWidth: () => this.defaultColWidth,
+      setDefaultColWidth: (v) => { this.defaultColWidth = v; },
+      getDefaultRowHeight: () => this.defaultRowHeight,
+      setDefaultRowHeight: (v) => { this.defaultRowHeight = v; },
+      getDataMatrix: () => this._dataMatrix,
+      parseKey: (k) => this._parseKey(k),
+      setCell: (r, c, v) => this.setCell(r, c, v),
+      markOffsetsDirty: () => { this._layoutEngine.markDirty(); },
+      notify: (...a) => this.notify(...a),
+      getPersistTimer: () => this._persistTimer,
+      setPersistTimer: (t) => { this._persistTimer = t; },
+    });
+
+    // 异步加载历史数据，实现秒开
+    if (this._enablePersistence) {
+      this.loadFromStorage(this._sheetId).catch(err => {
+        this.errorHandler.handle(
+          new SheetError(ErrorCodes.DATA_LOAD_ERROR, 'Failed to auto-load from storage', { originalError: err.message }),
+          { sheetId: this._sheetId }
+        );
+      });
+    }
+
+    // ========== 销毁标记 ==========
+    this._destroyed = false;
     
     this._autoPersist = false;
     this._persistTimer = null;
@@ -258,48 +354,6 @@ export class Workbook {
    */
   _parseKey(key) {
     return parseCellKey(key);
-  }
-
-  /**
-   * 检查键是否为旧版压缩格式
-   * @param {number|string} key - 单元格键
-   * @returns {boolean} 是否为旧版压缩格式
-   */
-  _isCompactKey(key) {
-    return typeof key === 'number' || (typeof key === 'string' && key.indexOf('-') === -1);
-  }
-
-  /**
-   * 迁移旧格式数据到新格式
-   * @param {Object} data - 旧格式数据
-   * @returns {Object} 新格式数据
-   */
-  _migrateData(data) {
-    const newData = {};
-    const keys = Object.keys(data);
-    for (let i = 0; i < keys.length; i++) {
-      const oldKey = keys[i];
-      const { r, c } = this._parseKey(oldKey);
-      const newKey = this._cellKey(r, c);
-      newData[newKey] = data[oldKey];
-    }
-    return newData;
-  }
-
-  /**
-   * 导出数据为字符串键格式（用于 JSON 序列化）
-   * @param {Object} data - 内部数据
-   * @returns {Object} 字符串键格式数据
-   */
-  _exportDataToStringKeys(data) {
-    const result = {};
-    const keys = Object.keys(data);
-    for (let i = 0; i < keys.length; i++) {
-      const key = keys[i];
-      const { r, c } = this._parseKey(key);
-      result[`${r}-${c}`] = data[key];
-    }
-    return result;
   }
 
   // ========== 向后兼容属性访问器 ==========
@@ -361,7 +415,7 @@ export class Workbook {
   
   set rowCount(val) { 
     this._dataStore.setState({ rowCount: val });
-    this._offsetsDirty = true; 
+    this._layoutEngine.markDirty();
   }
 
   /**
@@ -377,7 +431,7 @@ export class Workbook {
   }
   set colCount(val) { 
     this._dataStore.setState({ colCount: val });
-    this._offsetsDirty = true; 
+    this._layoutEngine.markDirty();
   }
 
   /**
@@ -387,7 +441,7 @@ export class Workbook {
   set readOnly(val) {
     if (this._readOnly !== val) {
       this._readOnly = val;
-      this._offsetsDirty = true;
+      this._layoutEngine.markDirty();
       this.notify();
     }
   }
@@ -427,211 +481,55 @@ export class Workbook {
   /** @type {SearchEngine} 搜索引擎（别名） */
   get search() { return this.searchEngine; }
 
-  _ensureOffsets() {
-    if (!this._offsetsDirty) return;
-    
-    // 使用预分配数组 + 直接索引赋值，比 push 更快
-    const rowCount = this.rowCount;
-    const colCount = this.colCount;
-    const defaultRowH = this.defaultRowHeight;
-    const defaultColW = this.defaultColWidth;
-    const rowHeights = this.rowHeights;
-    const colWidths = this.colWidths;
-    
-    // 行偏移
-    this._rowOffsets = new Array(rowCount + 1);
-    let currentY = 0;
-    for (let r = 0; r < rowCount; r++) {
-      this._rowOffsets[r] = currentY;
-      currentY += (rowHeights[r] !== undefined ? rowHeights[r] : defaultRowH);
-    }
-    this._rowOffsets[rowCount] = currentY;
+  /** @type {boolean} 偏移量是否需要重建（代理到 LayoutEngine） */
+  get _offsetsDirty() { return this._layoutEngine._offsetsDirty; }
+  set _offsetsDirty(val) { if (!val) this._layoutEngine._offsetsDirty = false; else this._layoutEngine.markDirty(); }
 
-    // 列偏移
-    this._colOffsets = new Array(colCount + 1);
-    let currentX = 0;
-    for (let c = 0; c < colCount; c++) {
-      this._colOffsets[c] = currentX;
-      currentX += (colWidths[c] !== undefined ? colWidths[c] : defaultColW);
-    }
-    this._colOffsets[colCount] = currentX;
+  /** @type {Array} 行偏移量数组（代理到 LayoutEngine） */
+  get _rowOffsets() { return this._layoutEngine._rowOffsets; }
+  set _rowOffsets(val) { this._layoutEngine._rowOffsets = val; }
 
-    this._offsetsDirty = false;
-  }
+  /** @type {Array} 列偏移量数组（代理到 LayoutEngine） */
+  get _colOffsets() { return this._layoutEngine._colOffsets; }
+  set _colOffsets(val) { this._layoutEngine._colOffsets = val; }
 
-  /**
-   * 增量更新行偏移量
-   * @param {number} startIndex - 开始更新的行索引
-   * @private
-   */
-  _updateRowOffsetsFrom(startIndex) {
-    if (this._offsetsDirty) {
-      this._ensureOffsets();
-      return;
-    }
-    
-    const rowCount = this.rowCount;
-    if (startIndex < 0) startIndex = 0;
-    if (startIndex > rowCount) return;
+  /** @type {boolean} 冻结尺寸是否需要重建（代理到 LayoutEngine） */
+  get _frozenSizeDirty() { return this._layoutEngine._frozenSizeDirty; }
+  set _frozenSizeDirty(val) { if (!val) this._layoutEngine._frozenSizeDirty = false; else this._layoutEngine.markFrozenDirty(); }
 
-    // 确保数组长度正确，同时保留已计算的前缀偏移量
-    if (this._rowOffsets.length !== rowCount + 1) {
-      const oldLen = this._rowOffsets.length;
-      const newOffsets = new Array(rowCount + 1);
-      // 这种方式复制大数组通常比 length 扩容+填充更稳定
-      const copyLen = Math.min(oldLen, newOffsets.length);
-      for (let i = 0; i < copyLen; i++) newOffsets[i] = this._rowOffsets[i];
-      this._rowOffsets = newOffsets;
-      
-      // 如果是追加行，且起始点在旧末尾之后，需要补齐中间的偏移量
-      if (startIndex >= oldLen) {
-        startIndex = Math.max(0, oldLen - 1);
-      }
-    }
+  /** @type {Object|null} 冻结尺寸缓存（代理到 LayoutEngine） */
+  get _frozenSize() { return this._layoutEngine._frozenSize; }
+  set _frozenSize(val) { this._layoutEngine._frozenSize = val; }
 
-    const defaultRowH = this.defaultRowHeight;
-    const rowHeights = this.rowHeights;
-    let currentY = startIndex > 0
-      ? this._rowOffsets[startIndex - 1] + (rowHeights[startIndex - 1] !== undefined ? rowHeights[startIndex - 1] : defaultRowH)
-      : 0;
-    
-    for (let r = startIndex; r < rowCount; r++) {
-      this._rowOffsets[r] = currentY;
-      currentY += (rowHeights[r] !== undefined ? rowHeights[r] : defaultRowH);
-    }
-    this._rowOffsets[rowCount] = currentY;
-  }
+  /** @type {Map} 合并索引（代理到 MergeManager） */
+  get _mergeRowIndex() { return this._mergeManager._mergeRowIndex; }
 
-  /**
-   * 增量更新列偏移量
-   * @param {number} startIndex - 开始更新的列索引
-   * @private
-   */
-  _updateColOffsetsFrom(startIndex) {
-    if (this._offsetsDirty) {
-      this._ensureOffsets();
-      return;
-    }
-    
-    const colCount = this.colCount;
-    if (startIndex < 0) startIndex = 0;
-    if (startIndex > colCount) return;
+  /** @type {boolean} 合并索引是否需要重建（代理到 MergeManager） */
+  get _mergeIndexDirty() { return this._mergeManager._mergeIndexDirty; }
+  set _mergeIndexDirty(val) { this._mergeManager._mergeIndexDirty = val; }
 
-    if (this._colOffsets.length !== colCount + 1) {
-      const oldLen = this._colOffsets.length;
-      const newOffsets = new Array(colCount + 1);
-      const copyLen = Math.min(oldLen, newOffsets.length);
-      for (let i = 0; i < copyLen; i++) newOffsets[i] = this._colOffsets[i];
-      this._colOffsets = newOffsets;
-      
-      if (startIndex >= oldLen) {
-        startIndex = Math.max(0, oldLen - 1);
-      }
-    }
+  _ensureOffsets() { this._layoutEngine._ensureOffsets(); }
 
-    const defaultColW = this.defaultColWidth;
-    const colWidths = this.colWidths;
-    let currentX = startIndex > 0
-      ? this._colOffsets[startIndex - 1] + (colWidths[startIndex - 1] !== undefined ? colWidths[startIndex - 1] : defaultColW)
-      : 0;
-    
-    for (let c = startIndex; c < colCount; c++) {
-      this._colOffsets[c] = currentX;
-      currentX += (colWidths[c] !== undefined ? colWidths[c] : defaultColW);
-    }
-    this._colOffsets[colCount] = currentX;
-  }
+  _updateRowOffsetsFrom(startIndex) { this._layoutEngine._updateRowOffsetsFrom(startIndex); }
 
-  /**
-   * 获取冻结区域尺寸（带缓存）
-   * @returns {{ w: number, h: number }}
-   */
-  getFrozenSize() {
-    if (!this._frozenSizeDirty && this._frozenSize) {
-      return this._frozenSize;
-    }
-    
-    let w = 0, h = 0;
-    const freezeC = this.freeze.c || 0;
-    const freezeR = this.freeze.r || 0;
-    
-    for (let i = 0; i < freezeC; i++) {
-      w += this.getColWidth(i);
-    }
-    for (let i = 0; i < freezeR; i++) {
-      h += this.getRowHeight(i);
-    }
-    
-    this._frozenSize = { w, h };
-    this._frozenSizeDirty = false;
-    return this._frozenSize;
-  }
+  _updateColOffsetsFrom(startIndex) { this._layoutEngine._updateColOffsetsFrom(startIndex); }
 
-  /**
-   * 批量删除指定行范围内的单元格数据
-   * @param {number} startRow - 起始行（包含）
-   * @param {number} endRow - 结束行（包含），-1 表示删除到末尾
-   */
-  _clearRowRange(startRow, endRow = -1) {
-    if (startRow < 0) return;
-    
-    // 使用稀疏矩阵的范围删除
-    const maxRow = endRow === -1 ? this.rowCount : Math.min(endRow, this.rowCount - 1);
-    
-    for (let r = startRow; r <= maxRow; r++) {
-      this._dataMatrix.deleteRow(r);
-    }
-  }
+  getFrozenSize() { return this._layoutEngine.getFrozenSize(); }
 
-  getRowPos(r) {
-    this._ensureOffsets();
-    return this._rowOffsets[r] !== undefined ? this._rowOffsets[r] : 0;
-  }
+  _clearRowRange(startRow, endRow = -1) { this._layoutEngine._clearRowRange(startRow, endRow); }
 
-  getColPos(c) {
-    this._ensureOffsets();
-    return this._colOffsets[c] !== undefined ? this._colOffsets[c] : 0;
-  }
+  getRowPos(r) { return this._layoutEngine.getRowPos(r); }
 
-  getRowIndexAt(y) {
-    if (y < 0) return 0;
-    this._ensureOffsets();
-    let low = 0, high = this.rowCount - 1;
-    while (low <= high) {
-      let mid = (low + high) >> 1;
-      let start = this._rowOffsets[mid];
-      let end = this._rowOffsets[mid + 1];
-      if (y >= start && y < end) return mid;
-      if (y < start) high = mid - 1;
-      else low = mid + 1;
-    }
-    return this.rowCount;
-  }
+  getColPos(c) { return this._layoutEngine.getColPos(c); }
 
-  getColIndexAt(x) {
-    if (x < 0) return 0;
-    this._ensureOffsets();
-    let low = 0, high = this.colCount - 1;
-    while (low <= high) {
-      let mid = (low + high) >> 1;
-      let start = this._colOffsets[mid];
-      let end = this._colOffsets[mid + 1];
-      if (x >= start && x < end) return mid;
-      if (x < start) high = mid - 1;
-      else low = mid + 1;
-    }
-    return this.colCount;
-  }
-  get totalWidth() {
-    this._ensureOffsets();
-    return this._colOffsets[this.colCount] + 15;
-  }
-  get totalHeight() {
-    this._ensureOffsets();
-    return this._rowOffsets[this.rowCount] + 15;
-  }
-  _initData() {
-  }
+  getRowIndexAt(y) { return this._layoutEngine.getRowIndexAt(y); }
+
+  getColIndexAt(x) { return this._layoutEngine.getColIndexAt(x); }
+
+  get totalWidth() { return this._layoutEngine.totalWidth; }
+
+  get totalHeight() { return this._layoutEngine.totalHeight; }
+
   setData(data) {
     return this._performanceMonitor.measure(MetricTypes.DATA_SET, () => {
       this._setDataInternal(data);
@@ -650,7 +548,7 @@ export class Workbook {
         // 优化：使用行范围批量删除，避免遍历所有键
         this._clearRowRange(startRow);
         this.rowCount = Math.max(startRow, 1000);
-        this._offsetsDirty = true;
+        this._layoutEngine.markDirty();
         this.dataVersion++;
         this._emit(Events.DATA_LOAD, { action: 'clear' });
         this.notify();
@@ -678,17 +576,17 @@ export class Workbook {
           // 性能优化：预先获取引用，减少查找开销
           const matrix = this._dataMatrix;
           const pool = this._cellPool;
-          const sharedStore = this._ensureSharedStore();
-          
+
           for (let r = 0; r < data.length; r++) {
             const row = data[r];
             for (let c = 0; c < row.length; c++) {
               const val = row[c];
               if (val === null || val === undefined) continue;
 
-              // 零拷贝优化：对于纯数字，直接存储原始值或简单包装
+              // 统一走对象池：确保所有单元格 hidden class 一致，便于 V8 inline-cache
+              // 并使删除时通过 onDeleteCell 回收复用；避免与公式/富文本路径产生两套对象形状
               if (typeof val === 'number') {
-                matrix.set(r, c, { v: val });
+                matrix.set(r, c, pool.acquireCell(val));
                 if (sharedStore) sharedStore.set(r, c, val);
               } else if (val && typeof val === 'object' && (val.f || val.v !== undefined || val.s)) {
                 // 富文本/公式/样式单元格：需要拆解对象
@@ -736,33 +634,50 @@ export class Workbook {
         this.notify({ type: 'all' });
       } else {
         // 有表头模式：增量更新
+
+        // 关键：清理旧依赖图，后续按需重建
+        this.dependencyMap.clear();
+        this.reverseDependencyMap.clear();
+        if (this.rangeDependencyIndex) this.rangeDependencyIndex.clear();
+        if (this._dirtyCells) this._dirtyCells.clear();
+        if (this.calcEngine) this.calcEngine.reset();
+
         // 1. 批量更新数据行
         const fieldMapKeys = this.fieldMap ? Object.keys(this.fieldMap) : [];
-        
+
         // 使用缓存减少 this.fieldMap 查找次数
         const fieldColMap = this.fieldMap || {};
-        
+
         data.forEach((rowObj, rIndex) => {
           const tr = startRow + rIndex;
           // 只遍历实际存在的字段，而不是所有字段
           for (const field of fieldMapKeys) {
             const c = fieldColMap[field];
             const val = rowObj[field];
-            
+
             const existingCell = this._dataMatrix.get(tr, c);
             if (!existingCell) {
               this._dataMatrix.set(tr, c, this._cellPool.acquireCell(val));
             } else {
               existingCell.v = val;
             }
+
+            // 重建公式单元格的依赖
+            const cellId = this._cellKey(tr, c);
+            const cell = this._dataMatrix.get(tr, c);
+            if (cell && cell.f) {
+              cell.dirty = true;
+              this._updateDependencyMap(cellId, cell.f);
+            }
+
             this._syncSharedValue(tr, c, val);
           }
         });
-        
+
         // 2. 清除超出新数据长度的行（使用优化的批量删除）
         const maxDataRow = startRow + data.length - 1;
         this._clearRowRange(maxDataRow + 1);
-        
+
         this.rowCount = Math.max(startRow + data.length, 1000);
       }
     } else {
@@ -785,7 +700,7 @@ export class Workbook {
     
     this.dataVersion++;
     this.recalcAll();
-    this._offsetsDirty = true;
+    this._layoutEngine.markDirty();
     this._emit(Events.DATA_LOAD, { action: 'setData', count: Array.isArray(data) ? data.length : Object.keys(data).length });
     this.notify();
   }
@@ -823,7 +738,7 @@ export class Workbook {
     // 根据实际列数更新 colCount
     this.colCount = Math.max(totalCols, 1);
     this.dataVersion++;
-    this._offsetsDirty = true;
+    this._layoutEngine.markDirty();
     this._emit(Events.STRUCTURE_CHANGE, { action: 'setColumns', count: columns.length });
     this.notify();
   }
@@ -1018,7 +933,7 @@ export class Workbook {
       this._schedulePersistence();
     }
     
-    this._offsetsDirty = true;
+    this._layoutEngine.markDirty();
     this.notify();
   }
 
@@ -1110,8 +1025,8 @@ export class Workbook {
   async _recalcAllWithWorker() {
     // 如果正在计算，等待完成
     if (this._workerCalculating) {
-      return new Promise((resolve) => {
-        this._workerQueue.push(resolve);
+      return new Promise((resolve, reject) => {
+        this._workerQueue.push({ resolve, reject });
       });
     }
     
@@ -1163,10 +1078,7 @@ export class Workbook {
       this._processWorkerQueue();
       
       if (this.calcEngine) {
-        this.calcEngine.stats.formulasEvaluated += formulas.length;
-        this.calcEngine.stats.lastResultCount = formulas.length;
-        this.calcEngine.stats.batches++;
-        this.calcEngine.stats.lastDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startTime;
+        this._recordCalcStats(formulas.length, startTime);
         this.calcEngine.recordWorkerPayloadStats({
           formulaCount: formulas.length,
           cellCount: Object.keys(nonNumericData).length,
@@ -1180,7 +1092,10 @@ export class Workbook {
       
       this.notify();
     } catch (error) {
-      console.error('[Workbook] Worker recalc failed, falling back to main thread:', error);
+      this.errorHandler.handle(
+        new SheetError(ErrorCodes.OPERATION_FAILED, 'Worker recalc failed, falling back to main thread', { originalError: error.message }),
+        { phase: 'recalc' }
+      );
       this._workerCalculating = false;
       this._processWorkerQueue();
       // 降级回主线程计算
@@ -1306,20 +1221,47 @@ export class Workbook {
   }
 
   _estimateWorkerPayloadBytes(formulas, data) {
-    try {
-      return JSON.stringify({ formulas, data }).length;
-    } catch {
-      return 0;
-    }
+    // 启发式估算：keys 数量 × 平均每条记录估算字节数
+    const formulaBytes = formulas.length * 64;
+    const dataKeys = data ? Object.keys(data).length : 0;
+    const dataBytes = dataKeys * 48;
+    return formulaBytes + dataBytes;
   }
   
+  /**
+   * 记录公式计算统计信息
+   * @private
+   */
+  _recordCalcStats(count, startTime) {
+    if (!this.calcEngine) return;
+    this.calcEngine.stats.formulasEvaluated += count;
+    this.calcEngine.stats.lastResultCount = count;
+    this.calcEngine.stats.batches++;
+    this.calcEngine.stats.lastDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startTime;
+  }
+
+  /**
+   * 清空 calcEngine 脏标记队列，阻止增量引擎重复计算
+   * @private
+   */
+  _clearCalcEngineDirty() {
+    if (!this.calcEngine) return;
+    if (this.calcEngine.dirtyBitset) {
+      this.calcEngine.dirtyBitset.clear();
+    }
+    if (this.calcEngine.batchTimeout) {
+      clearTimeout(this.calcEngine.batchTimeout);
+      this.calcEngine.batchTimeout = null;
+    }
+  }
+
   /**
    * 处理 Worker 队列
    * @private
    */
   _processWorkerQueue() {
     while (this._workerQueue.length > 0) {
-      const resolve = this._workerQueue.shift();
+      const { resolve } = this._workerQueue.shift();
       resolve();
     }
   }
@@ -1386,19 +1328,8 @@ export class Workbook {
       }
       
       if (this.calcEngine) {
-        this.calcEngine.stats.formulasEvaluated += sortedCells.length;
-        this.calcEngine.stats.lastResultCount = sortedCells.length;
-        this.calcEngine.stats.batches++;
-        this.calcEngine.stats.lastDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startTime;
-        
-        // 【核心漏洞修复】全量计算完成后，必须清空脏标记队列，阻止即将到来的 IncrementalCalculation JS 引擎的重复计算
-        if (this.calcEngine.dirtyBitset) {
-          this.calcEngine.dirtyBitset.clear();
-        }
-        if (this.calcEngine.batchTimeout) {
-          clearTimeout(this.calcEngine.batchTimeout);
-          this.calcEngine.batchTimeout = null;
-        }
+        this._recordCalcStats(sortedCells.length, startTime);
+        this._clearCalcEngineDirty();
       }
     } else {
       // JS 引擎回退
@@ -1407,21 +1338,10 @@ export class Workbook {
         cell.v = this._evaluateFormulaInternal(cell.f, r, c);
         cell.dirty = false;
       }
-      
+
       if (this.calcEngine) {
-        this.calcEngine.stats.formulasEvaluated += sortedCells.length;
-        this.calcEngine.stats.lastResultCount = sortedCells.length;
-        this.calcEngine.stats.batches++;
-        this.calcEngine.stats.lastDuration = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - startTime;
-        
-        // 同理，JS 回退路径也需要清空
-        if (this.calcEngine.dirtyBitset) {
-          this.calcEngine.dirtyBitset.clear();
-        }
-        if (this.calcEngine.batchTimeout) {
-          clearTimeout(this.calcEngine.batchTimeout);
-          this.calcEngine.batchTimeout = null;
-        }
+        this._recordCalcStats(sortedCells.length, startTime);
+        this._clearCalcEngineDirty();
       }
     }
   }
@@ -1629,19 +1549,6 @@ export class Workbook {
     this._markCellChanged(r, c);
   }
 
-  /**
-   * 触发特定单元格的重算
-   * @private
-   */
-  _triggerCellRecalc(cellId, stack) {
-    if (stack.includes(cellId)) return;
-    const { r, c } = this._parseKey(cellId);
-    const cell = this._dataMatrix.get(r, c);
-    if (cell && cell.f) {
-      cell.dirty = true;
-      this._markCellChanged(r, c);
-    }
-  }
   _refToRC(ref) {
     let letter = '';
     let numStr = '';
@@ -1730,8 +1637,10 @@ export class Workbook {
        const coveredRanges = [];
        
        // 使用正则简单提取引用（作为过渡方案，未来可由 WASM 提供 AST 分析）
-       const rangeRegex = /\$?(?:[A-Z]+\$?[0-9]+|[A-Z]+|[0-9]+):\$?(?:[A-Z]+\$?[0-9]+|[A-Z]+|[0-9]+)/g;
-       const cellRegex = /\$?[A-Z]+\$?[0-9]+/g;
+       DEP_RANGE_REGEX.lastIndex = 0;
+       DEP_CELL_REGEX.lastIndex = 0;
+       const rangeRegex = DEP_RANGE_REGEX;
+       const cellRegex = DEP_CELL_REGEX;
        
        let match;
        while ((match = rangeRegex.exec(expression)) !== null) {
@@ -1987,51 +1896,8 @@ export class Workbook {
     }
     return cell.v;
   }
-  _colStrToIndex(str) {
-    let val = 0;
-    for (let i = 0; i < str.length; i++) {
-      val *= 26;
-      val += str.charCodeAt(i) - 64;
-    }
-    return val - 1;
-  }
-  findRowIndexAtHeight(y) {
-    let cy = 0;
-    for (let r = 0; r < this.rowCount; r++) {
-      const h = this.getRowHeight(r);
-      if (y >= cy && y < cy + h) return r;
-      cy += h;
-    }
-    return -1;
-  }
-  /**
-   * 设置范围样式
-   * @param {Range} range - 范围对象
-   * @param {Partial<CellStyle>} style - 样式属性
-   */
-  setStyle(range, style) {
-    const changes = [];
-    this.iterateRange(range, (r, c, cell) => {
-      const oldVal = cloneCell(cell);
-      // oldVal 可能是 null（单元格不存在），需要处理
-      const oldStyle = oldVal ? (oldVal.s || {}) : {};
-      const newStyle = { ...oldStyle, ...style };
-      Object.keys(style).forEach(k => {
-        if (style[k] === undefined) delete newStyle[k];
-      });
-      const newVal = oldVal ? { ...oldVal, s: newStyle } : { s: newStyle };
-      changes.push({ r: r, c, oldValue: oldVal, newValue: newVal });
-      this._setCellData(r, c, { s: newStyle });
-    });
-    if (changes.length > 0) {
-      this.history.execute({
-        type: 'batch-set-cell',
-        changes
-      });
-      this._emit(Events.STYLE_CHANGE, { range, style, changes });
-      this.notify();
-    }
-  }
+  _colStrToIndex(str) { return colStrToIndex(str); }
+  setStyle(range, style) { this._styleManager.setStyle(range, style); }
   /**
    * 设置边框
    * @param {Range} range - 范围对象
@@ -2039,173 +1905,24 @@ export class Workbook {
    * @param {string} [color='#000000'] - 边框颜色
    * @param {string} [style='solid'] - 边框样式
    */
-  setBorder(range, type, color, style = 'solid') {
-    if (!range) return;
-    const changes = [];
-    const getStyle = (r, c) => {
-      const cell = this.getCell(r, c);
-      if (cell && cell.s) return { ...cell.s };
-      return {};
-    };
-    const getBorder = (s) => {
-      if (s.border) return { ...s.border };
-      return {};
-    };
-    for (let r = range.s.r; r <= range.e.r; r++) {
-      for (let c = range.s.c; c <= range.e.c; c++) {
-        const oldVal = cloneCell(this.getCell(r, c));
-        let changeNeeded = false;
-        let s = getStyle(r, c);
-        let b = getBorder(s);
-        const isTop = r === range.s.r;
-        const isBottom = r === range.e.r;
-        const isLeft = c === range.s.c;
-        const isRight = c === range.e.c;
-        const safeColor = color || '#000000';
-        const bStyle = { color: safeColor, style };
-        if (type === 'all') {
-          b.top = { ...bStyle }; b.bottom = { ...bStyle }; b.left = { ...bStyle }; b.right = { ...bStyle };
-          changeNeeded = true;
-        } else if (type === 'color') {
-          if (b.top) { b.top = { ...b.top, color: safeColor }; changeNeeded = true; }
-          if (b.bottom) { b.bottom = { ...b.bottom, color: safeColor }; changeNeeded = true; }
-          if (b.left) { b.left = { ...b.left, color: safeColor }; changeNeeded = true; }
-          if (b.right) { b.right = { ...b.right, color: safeColor }; changeNeeded = true; }
-        } else if (type === 'none') {
-          b.top = undefined; b.bottom = undefined; b.left = undefined; b.right = undefined;
-          changeNeeded = true;
-        } else if (type === 'outer') {
-          if (isTop) { b.top = { ...bStyle }; changeNeeded = true; }
-          if (isBottom) { b.bottom = { ...bStyle }; changeNeeded = true; }
-          if (isLeft) { b.left = { ...bStyle }; changeNeeded = true; }
-          if (isRight) { b.right = { ...bStyle }; changeNeeded = true; }
-        } else if (type === 'left') {
-          if (isLeft) { b.left = { ...bStyle }; changeNeeded = true; }
-        } else if (type === 'right') {
-          if (isRight) { b.right = { ...bStyle }; changeNeeded = true; }
-        } else if (type === 'top') {
-          if (isTop) { b.top = { ...bStyle }; changeNeeded = true; }
-        } else if (type === 'bottom') {
-          if (isBottom) { b.bottom = { ...bStyle }; changeNeeded = true; }
-        } else if (type === 'inner') {
-          if (!isTop) { b.top = { ...bStyle }; changeNeeded = true; }
-          if (!isBottom) { b.bottom = { ...bStyle }; changeNeeded = true; }
-          if (!isLeft) { b.left = { ...bStyle }; changeNeeded = true; }
-          if (!isRight) { b.right = { ...bStyle }; changeNeeded = true; }
-        }
-        if (changeNeeded) {
-          s.border = b;
-          const newVal = { ...oldVal, s };
-          changes.push({ r: r, c, oldValue: oldVal, newValue: newVal });
-          this._setCellData(r, c, { s });
-        }
-      }
-    }
-    if (changes.length > 0) {
-      this.history.execute({
-        type: 'batch-set-cell',
-        changes
-      });
-      this._emit(Events.STYLE_CHANGE, { range, borderType: type, color, changes });
-      this.notify();
-    }
-  }
+  setBorder(range, type, color, style = 'solid') { this._styleManager.setBorder(range, type, color, style); }
   /**
    * 设置数字格式
    * @param {Range} range - 范围对象
    * @param {'comma'|'percent'|'normal'} fmt - 格式类型
    */
-  setFormat(range, fmt) {
-    if (!range) return;
-    const changes = [];
-    this.iterateRange(range, (r, c, cell) => {
-      const oldVal = cloneCell(cell);
-      // oldVal 可能是 null（单元格不存在），需要处理
-      const oldStyle = oldVal ? (oldVal.s || {}) : {};
-      const s = { ...oldStyle };
-      s.fmt = fmt;
-      if (fmt === 'percent' && s.decimals === undefined) s.decimals = 0;
-      const newVal = oldVal ? { ...oldVal, s } : { s };
-      changes.push({ r: r, c, oldValue: oldVal, newValue: newVal });
-      this._setCellData(r, c, { s });
-    });
-    if (changes.length > 0) {
-      this.history.execute({ type: 'batch-set-cell', changes });
-      this.notify();
-    }
-  }
+  setFormat(range, fmt) { this._styleManager.setFormat(range, fmt); }
   /**
    * 调整小数位数
    * @param {Range} range - 范围对象
    * @param {number} delta - 变化量（+1 或 -1）
    */
-  setDecimals(range, delta) {
-    if (!range) return;
-    const changes = [];
-    this.iterateRange(range, (r, c, cell) => {
-      const oldVal = cloneCell(cell);
-      // oldVal 可能是 null（单元格不存在），需要处理
-      const oldStyle = oldVal ? (oldVal.s || {}) : {};
-      const s = { ...oldStyle };
-      let dec = (s.decimals !== undefined) ? s.decimals : 2;
-      dec += delta;
-      if (dec < 0) dec = 0;
-      if (dec > 10) dec = 10;
-      s.decimals = dec;
-      const newVal = oldVal ? { ...oldVal, s } : { s };
-      changes.push({ r: r, c, oldValue: oldVal, newValue: newVal });
-      this._setCellData(r, c, { s });
-    });
-    if (changes.length > 0) {
-      this.history.execute({ type: 'batch-set-cell', changes });
-      this.notify();
-    }
-  }
+  setDecimals(range, delta) { this._styleManager.setDecimals(range, delta); }
   /**
    * 清除单元格内容（保留样式）
    * @param {Range} range - 范围对象
    */
-  clearContent(range) {
-    if (!range) return;
-    const changes = [];
-    this.iterateRange(range, (r, c, cell) => {
-      // 只有当单元格存在且有内容时才需要清除
-      if (!cell) return;
-      
-      const oldVal = cloneCell(cell);
-      // 检查是否有需要清除的内容（值或公式）
-      if (oldVal.v !== undefined || oldVal.f !== undefined || oldVal.m !== undefined) {
-        const cellId = this._cellKey(r, c);
-        const newVal = { ...oldVal };
-        delete newVal.v;
-        delete newVal.f;
-        delete newVal.m;
-        delete newVal.dirty;
-        changes.push({ r: r, c, oldValue: oldVal, newValue: newVal });
-        
-        // 直接操作单元格数据，而不是使用 _setCellData
-        // 因为 _setCellData 不支持删除属性
-        const targetCell = this._dataMatrix.get(r, c);
-        if (targetCell) {
-          delete targetCell.v;
-          delete targetCell.f;
-          delete targetCell.m;
-          delete targetCell.dirty;
-
-          this._syncSharedValue(r, c, null);
-          // 清理依赖图
-          this._updateDependencyMap(cellId, null);
-        }
-
-        this._markCellChanged(r, c);
-      }
-    });
-    if (changes.length > 0) {
-      this.history.execute({ type: 'batch-set-cell', changes });
-      this.dataVersion++;
-      this.notify();
-    }
-  }
+  clearContent(range) { this._styleManager.clearContent(range); }
   copy(range) {
     this.clipboard.copy(range);
   }
@@ -2217,7 +1934,7 @@ export class Workbook {
     // 造成的双倍 O(N) 临时对象分配。
     const data = {};
     this._dataMatrix.forEach((r, c, cell) => {
-      data[`${r}-${c}`] = cell;
+      data[cellKey(r, c)] = cell;
     });
     return {
       rowCount: this.rowCount,
@@ -2287,13 +2004,14 @@ export class Workbook {
       this.history.endBatch();
       // 清除历史记录
       this.history.clear();
-      this._offsetsDirty = true;
+      this._layoutEngine.markDirty();
       this.notify();
     } catch (e) {
-      this.errorHandler.handle(
+      const err = this.errorHandler.handle(
         new SheetError(ErrorCodes.DATA_LOAD_ERROR, '从 JSON 加载数据失败', { originalError: e.message }),
         { json }
       );
+      throw err;
     }
   }
   rebuildDependencyMap() {
@@ -2328,13 +2046,13 @@ export class Workbook {
       if (isUndo) this.colWidths[cmd.c] = cmd.oldValue;
       else this.colWidths[cmd.c] = cmd.newValue;
       if (cmd.c < (this.freeze.c || 0)) {
-        this._frozenSizeDirty = true;
+        this._layoutEngine.markFrozenDirty();
       }
     } else if (cmd.type === 'set-row-height') {
       if (isUndo) this.rowHeights[cmd.r] = cmd.oldValue;
       else this.rowHeights[cmd.r] = cmd.newValue;
       if (cmd.r < (this.freeze.r || 0)) {
-        this._frozenSizeDirty = true;
+        this._layoutEngine.markFrozenDirty();
       }
     } else if (cmd.type === 'merge') {
       if (isUndo) this.removeMerge(cmd.range);
@@ -2377,7 +2095,7 @@ export class Workbook {
         this._deleteColumn(cmd.c);
       }
     }
-    this._offsetsDirty = true;
+    this._layoutEngine.markDirty();
     this.notify();
   }
   undo() {
@@ -2412,7 +2130,7 @@ export class Workbook {
     this._updateColOffsetsFrom(c);
     // 如果冻结区域受影响，标记冻结尺寸为脏
     if (c < (this.freeze.c || 0)) {
-      this._frozenSizeDirty = true;
+      this._layoutEngine.markFrozenDirty();
     }
     this.notify();
   }
@@ -2442,7 +2160,7 @@ export class Workbook {
     this._updateRowOffsetsFrom(r);
     // 如果冻结区域受影响，标记冻结尺寸为脏
     if (r < (this.freeze.r || 0)) {
-      this._frozenSizeDirty = true;
+      this._layoutEngine.markFrozenDirty();
     }
     this.notify();
   }
@@ -2454,7 +2172,7 @@ export class Workbook {
   setFreeze(r, c) {
     this.freeze = { r, c };
     // 冻结区域变化，标记缓存为脏
-    this._frozenSizeDirty = true;
+    this._layoutEngine.markFrozenDirty();
     this._emit(Events.FREEZE_CHANGE, { r, c });
     this.notify();
   }
@@ -2498,98 +2216,18 @@ export class Workbook {
     if (wA) this.colWidths[toC] = wA;
     else delete this.colWidths[toC];
 
-    this._offsetsDirty = true;
+    this._layoutEngine.markDirty();
   }
-  /**
-   * 重建合并单元格空间索引
-   * @private
-   */
-  _rebuildMergeIndex() {
-    if (!this._mergeIndexDirty) return;
-    
-    this._mergeRowIndex.clear();
-    
-    for (let i = 0; i < this.merges.length; i++) {
-      const m = this.merges[i];
-      // 为每一行建立索引
-      for (let r = m.s.r; r <= m.e.r; r++) {
-        if (!this._mergeRowIndex.has(r)) {
-          this._mergeRowIndex.set(r, []);
-        }
-        this._mergeRowIndex.get(r).push(m);
-      }
-    }
-    
-    this._mergeIndexDirty = false;
-  }
-  
-  /**
-   * 查找与指定范围相交的合并单元格（使用空间索引优化）
-   * @param {Object} range - 范围对象 { s: {r, c}, e: {r, c} }
-   * @returns {Array} 相交的合并区域数组
-   */
-  getIntersectingMerges(range) {
-    // 使用空间索引快速查找
-    this._rebuildMergeIndex();
-    
-    const result = [];
-    const seen = new Set();
-    
-    // 只遍历范围内的行
-    for (let r = range.s.r; r <= range.e.r; r++) {
-      const mergesInRow = this._mergeRowIndex.get(r);
-      if (mergesInRow) {
-        for (let i = 0; i < mergesInRow.length; i++) {
-          const m = mergesInRow[i];
-          // 使用对象的引用作为唯一标识
-          const key = `${m.s.r}-${m.s.c}-${m.e.r}-${m.e.c}`;
-          if (seen.has(key)) continue;
-          seen.add(key);
-          
-          // 检查是否相交
-          const intersects = !(range.e.c < m.s.c || range.s.c > m.e.c ||
-                              range.e.r < m.s.r || range.s.r > m.e.r);
-          if (intersects) {
-            result.push(m);
-          }
-        }
-      }
-    }
-    
-    return result;
-  }
-  
-  addMerge(range) {
-    this.merges.push(range);
-    this.iterateRange(range, (r, c) => {
-      this.mergeMap[this._cellKey(r, c)] = range;
-    });
-    // 标记索引为脏
-    this._mergeIndexDirty = true;
-    this._emit(Events.MERGE_CHANGE, { action: 'add', range });
-    this.notify();
-  }
-  removeMerge(range) {
-    const toRemove = this.merges.filter(m => {
-      const intersects = !(range.e.c < m.s.c || range.s.c > m.e.c || range.e.r < m.s.r || range.s.r > m.e.r);
-      return intersects;
-    });
-    toRemove.forEach(m => {
-      for (let r = m.s.r; r <= m.e.r; r++) {
-        for (let c = m.s.c; c <= m.e.c; c++) {
-          delete this.mergeMap[this._cellKey(r, c)];
-        }
-      }
-    });
-    this.merges = this.merges.filter(m => !toRemove.includes(m));
-    // 标记索引为脏
-    this._mergeIndexDirty = true;
-    this._emit(Events.MERGE_CHANGE, { action: 'remove', range, removed: toRemove });
-    this.notify();
-  }
-  getMerge(r, c) {
-    return this.mergeMap[this._cellKey(r, c)] || null;
-  }
+  _rebuildMergeIndex() { this._mergeManager._rebuildMergeIndex(); }
+
+  getIntersectingMerges(range) { return this._mergeManager.getIntersectingMerges(range); }
+
+  addMerge(range) { this._mergeManager.addMerge(range); }
+
+  removeMerge(range) { this._mergeManager.removeMerge(range); }
+
+  getMerge(r, c) { return this._mergeManager.getMerge(r, c); }
+
   setSelection(startR, startC, endR, endC) {
     let s = { r: Math.min(startR, endR), c: Math.min(startC, endC) };
     let e = { r: Math.max(startR, endR), c: Math.max(startC, endC) };
@@ -2639,267 +2277,59 @@ export class Workbook {
     this.copyRange = null;
     this.notify({ type: 'selection' });
   }
-  mergeCells(range) {
-    if (range.s.r === range.e.r && range.s.c === range.e.c) return;
+
+  /**
+   * 批量范围操作：startBatch → 执行变更 → 记录历史 → notify → endBatch
+   * @param {Function} mutatorFn - 执行变更并返回 CellChange[] 的回调
+   * @private
+   */
+  _applyBatchRange(mutatorFn) {
     this.history.startBatch();
-    const changes = [];
-    this.iterateRange(range, (r, c, cell) => {
-      if (r === range.s.r && c === range.s.c) return;
-      const oldVal = cell ? cloneCell(cell) : null;
-      if (oldVal) {
-        this._dataMatrix.delete(r, c);
-        changes.push({
-          r, c,
-          oldValue: oldVal,
-          newValue: null
-        });
-      }
-    });
+    const changes = mutatorFn();
     if (changes.length > 0) {
-      this.history.execute({
-        type: 'batch-set-cell',
-        changes
-      });
-    }
-    const r = cloneRange(range);
-    this.addMerge(r);
-    this.history.execute({
-      type: 'merge',
-      range: r
-    });
-    this.history.endBatch();
-  }
-  clearCells(range) {
-    if (!range) return;
-    this.history.startBatch();
-    const changes = [];
-    this.iterateRange(range, (r, c, cell) => {
-      const oldVal = cell ? cloneCell(cell) : null;
-      if (oldVal) {
-        // 使用 _updateCellContent 确保触发重算、依赖更新和 WASM 同步
-        this._updateCellContent(r, c, null);
-        changes.push({
-          r, c,
-          oldValue: oldVal,
-          newValue: null
-        });
-      }
-    });
-    if (changes.length > 0) {
-      this.history.execute({
-        type: 'batch-set-cell',
-        changes
-      });
+      this.history.execute({ type: 'batch-set-cell', changes });
       this.notify();
     }
     this.history.endBatch();
   }
-  unmergeCells(range) {
-    const sel = range;
-    const toRemove = this.merges.filter(m => {
-      const intersects = !(sel.e.c < m.s.c || sel.s.c > m.e.c || sel.e.r < m.s.r || sel.s.r > m.e.r);
-      return intersects;
-    });
-    if (toRemove.length > 0) {
-      this.history.startBatch();
-      toRemove.forEach(m => {
-        this.removeMerge(m);
-        this.history.execute({
-          type: 'unmerge',
-          range: m
-        });
+
+  mergeCells(range) { this._mergeManager.mergeCells(range); }
+  clearCells(range) {
+    if (!range) return;
+    this._applyBatchRange(() => {
+      const changes = [];
+      this.iterateRange(range, (r, c, cell) => {
+        const oldVal = cell ? cloneCell(cell) : null;
+        if (oldVal) {
+          this._updateCellContent(r, c, null);
+          changes.push({ r, c, oldValue: oldVal, newValue: null });
+        }
       });
-      this.history.endBatch();
-    }
-  }
-  allowsMerge(range) {
-    if (!range) return false;
-    return range.s.r !== range.e.r || range.s.c !== range.e.c;
-  }
-  allowsUnmerge(range) {
-    if (!range) return false;
-    // 使用空间索引优化查找
-    const intersecting = this.getIntersectingMerges(range);
-    return intersecting.length > 0;
-  }
-  fillAuto(sourceRange, targetRange) {
-    const s = sourceRange;
-    const t = targetRange;
-    const srcH = s.e.r - s.s.r + 1;
-    const srcW = s.e.c - s.s.c + 1;
-    const isVert = (t.e.r > s.e.r);
-    const isHorz = (t.e.c > s.e.c);
-    const updates = [];
-
-    if (isVert) {
-      for (let c = t.s.c; c <= t.e.c; c++) {
-        let nums = [];
-        let allNum = true;
-        const srcC = s.s.c + ((c - t.s.c) % srcW);
-        for (let r = s.s.r; r <= s.e.r; r++) {
-          const cell = this.getCell(r, srcC);
-          const val = cell ? cell.v : null;
-          if (typeof val === 'number') {
-            nums.push(val);
-          } else if (val && !isNaN(parseFloat(String(val).replace(/,/g, ''))) && String(val).trim() !== '') {
-            nums.push(parseFloat(String(val).replace(/,/g, '')));
-          } else {
-            allNum = false;
-            nums.push(val);
-          }
-        }
-        let step = 0;
-        let isSequence = false;
-        if (allNum && nums.length >= 2) {
-          const d1 = nums[1] - nums[0];
-          let constantDiff = true;
-          for (let i = 1; i < nums.length; i++) {
-            if (Math.abs(nums[i] - nums[i - 1] - d1) > 1e-9) {
-              constantDiff = false;
-              break;
-            }
-          }
-          if (constantDiff) {
-            step = d1;
-            isSequence = true;
-          }
-        }
-        for (let r = s.e.r + 1; r <= t.e.r; r++) {
-          let newVal;
-          const srcCycleR = s.s.r + ((r - s.e.r - 1) % srcH);
-          const srcCell = this.getCell(srcCycleR, srcC);
-          const newStyle = srcCell ? srcCell.s : undefined;
-          if (isSequence) {
-            const index = r - s.s.r;
-            newVal = nums[0] + step * index;
-          } else {
-            const patternIdx = (r - s.e.r - 1) % nums.length;
-            newVal = nums[patternIdx];
-          }
-          updates.push({ r, c, val: { v: newVal, s: newStyle } });
-        }
-      }
-    } else if (isHorz) {
-      for (let r = t.s.r; r <= t.e.r; r++) {
-        let nums = [];
-        let allNum = true;
-        const srcH = s.e.r - s.s.r + 1;
-        const srcR = s.s.r + ((r - t.s.r) % srcH);
-        for (let c = s.s.c; c <= s.e.c; c++) {
-          const cell = this.getCell(srcR, c);
-          const val = cell ? cell.v : null;
-          if (typeof val === 'number') {
-            nums.push(val);
-          } else if (val && !isNaN(parseFloat(String(val).replace(/,/g, ''))) && String(val).trim() !== '') {
-            nums.push(parseFloat(String(val).replace(/,/g, '')));
-          } else {
-            allNum = false;
-            nums.push(val);
-          }
-        }
-        let step = 0;
-        let isSequence = false;
-        if (allNum && nums.length >= 2) {
-          const d1 = nums[1] - nums[0];
-          let constantDiff = true;
-          for (let i = 1; i < nums.length; i++) {
-            if (Math.abs(nums[i] - nums[i - 1] - d1) > 1e-9) {
-              constantDiff = false;
-              break;
-            }
-          }
-          if (constantDiff) {
-            step = d1;
-            isSequence = true;
-          }
-        }
-        for (let c = s.e.c + 1; c <= t.e.c; c++) {
-          let newVal;
-          const srcCycleC = s.s.c + ((c - s.e.c - 1) % srcW);
-          const srcCell = this.getCell(srcR, srcCycleC);
-          const newStyle = srcCell ? srcCell.s : undefined;
-          if (isSequence) {
-            const index = c - s.s.c;
-            newVal = nums[0] + step * index;
-          } else {
-            const patternIdx = (c - s.e.c - 1) % nums.length;
-            newVal = nums[patternIdx];
-          }
-          updates.push({ r, c, val: { v: newVal, s: newStyle } });
-        }
-      }
-    }
-
-    if (updates.length > 0) {
-      this.bulkSetCells(updates);
-    }
-  }
-  insertRow(rowIndex) {
-    this._insertRow(rowIndex);
-    this.history.execute({ type: 'insert-row', r: rowIndex });
-  }
-  deleteRow(rowIndex) {
-    // 保存被删除行的数据用于撤销
-    const deletedCells = [];
-    const rowData = this._dataMatrix.getRow(rowIndex);
-    if (rowData) {
-      for (const [col, cell] of rowData) {
-        deletedCells.push({ c: col, cell: cloneCell(cell) });
-      }
-    }
-    
-    this._deleteRow(rowIndex);
-    this.history.execute({ type: 'delete-row', r: rowIndex, deletedCells });
-  }
-  insertColumn(colIndex) {
-    this._insertColumn(colIndex);
-    this.history.execute({ type: 'insert-col', c: colIndex });
-  }
-  deleteColumn(colIndex) {
-    // 保存被删除列的数据用于撤销
-    const deletedCells = [];
-    const colData = this._dataMatrix.getCol(colIndex);
-    if (colData) {
-      for (const [row, cell] of colData) {
-        deletedCells.push({ r: row, cell: cloneCell(cell) });
-      }
-    }
-    
-    this._deleteColumn(colIndex);
-    this.history.execute({ type: 'delete-col', c: colIndex, deletedCells });
-  }
-  _insertRow(r) {
-    // 使用稀疏矩阵的行操作优化
-    // 收集需要移动的行（从大到小排序）
-    const rowsToMoveSet = new Set();
-    
-    this._dataMatrix.forEach((rowIdx, c, cell) => {
-      if (rowIdx >= r) {
-        rowsToMoveSet.add(rowIdx);
-      }
+      return changes;
     });
-    const rowsToMove = Array.from(rowsToMoveSet);
-    
-    // 按行号降序排序，确保从后向前移动，避免键冲突
-    rowsToMove.sort((a, b) => b - a);
-    
-    // 移动每一行的数据
-    for (const rowIdx of rowsToMove) {
-      const rowData = this._dataMatrix.getRow(rowIdx);
-      if (rowData) {
-        for (const [col, cell] of rowData) {
-          this._dataMatrix.delete(rowIdx, col, true);
-          this._dataMatrix.set(rowIdx + 1, col, cell, true);
-        }
-      }
-    }
-    
-    this.rowCount++;
-    this.dataVersion++;
-    this._offsetsDirty = true;
-    this._frozenSizeDirty = true;
-    this.notify();
   }
+  unmergeCells(range) { this._mergeManager.unmergeCells(range); }
+
+  allowsMerge(range) { return this._mergeManager.allowsMerge(range); }
+
+  allowsUnmerge(range) { return this._mergeManager.allowsUnmerge(range); }
+  fillAuto(sourceRange, targetRange) { this._sheetStructure.fillAuto(sourceRange, targetRange); }
+
+  insertRow(rowIndex) { this._sheetStructure.insertRow(rowIndex); }
+
+  deleteRow(rowIndex) { this._sheetStructure.deleteRow(rowIndex); }
+
+  insertColumn(colIndex) { this._sheetStructure.insertColumn(colIndex); }
+
+  deleteColumn(colIndex) { this._sheetStructure.deleteColumn(colIndex); }
+
+  _shiftDimension(isRow, index, delta) { this._sheetStructure._shiftDimension(isRow, index, delta); }
+
+  _insertRow(r) { this._sheetStructure._insertRow(r); }
+  _deleteRow(r) { this._sheetStructure._deleteRow(r); }
+  _insertColumn(c) { this._sheetStructure._insertColumn(c); }
+  _deleteColumn(c) { this._sheetStructure._deleteColumn(c); }
+
   getAddress(r, c) {
     const colStr = this._indexToColStr(c);
     return `${colStr}${r + 1}`;
@@ -2921,106 +2351,6 @@ export class Workbook {
    */
   _rcToA1(r, c) {
     return this._indexToColStr(c) + (r + 1);
-  }
-  _deleteRow(r) {
-    // 使用稀疏矩阵的行操作优化
-    // 1. 删除目标行的所有单元格
-    this._dataMatrix.deleteRow(r);
-    
-    // 2. 收集需要移动的行（按行号升序排序）
-    const rowsToMoveSet = new Set();
-    this._dataMatrix.forEach((rowIdx, c, cell) => {
-      if (rowIdx > r) {
-        rowsToMoveSet.add(rowIdx);
-      }
-    });
-    const rowsToMove = Array.from(rowsToMoveSet);
-    
-    // 按行号升序排序，确保从前向后移动
-    rowsToMove.sort((a, b) => a - b);
-    
-    // 3. 移动每一行的数据
-    for (const rowIdx of rowsToMove) {
-      const rowData = this._dataMatrix.getRow(rowIdx);
-      if (rowData) {
-        for (const [col, cell] of rowData) {
-          this._dataMatrix.delete(rowIdx, col, true);
-          this._dataMatrix.set(rowIdx - 1, col, cell, true);
-        }
-      }
-    }
-    
-    this.rowCount = Math.max(1, this.rowCount - 1);
-    this.dataVersion++;
-    this._offsetsDirty = true;
-    this._frozenSizeDirty = true;
-    this.notify();
-  }
-  _insertColumn(c) {
-    // 使用稀疏矩阵的列操作优化
-    // 收集需要移动的列（从大到小排序）
-    const colsToMoveSet = new Set();
-    
-    this._dataMatrix.forEach((r, colIdx, cell) => {
-      if (colIdx >= c) {
-        colsToMoveSet.add(colIdx);
-      }
-    });
-    const colsToMove = Array.from(colsToMoveSet);
-    
-    // 按列号降序排序，确保从后向前移动
-    colsToMove.sort((a, b) => b - a);
-    
-    // 移动每一列的数据
-    for (const colIdx of colsToMove) {
-      const colData = this._dataMatrix.getCol(colIdx);
-      if (colData) {
-        for (const [row, cell] of colData) {
-          this._dataMatrix.delete(row, colIdx, true);
-          this._dataMatrix.set(row, colIdx + 1, cell, true);
-        }
-      }
-    }
-    
-    this.colCount++;
-    this.dataVersion++;
-    this._offsetsDirty = true;
-    this._frozenSizeDirty = true;
-    this.notify();
-  }
-  _deleteColumn(c) {
-    // 使用稀疏矩阵的列操作优化
-    // 1. 删除目标列的所有单元格
-    this._dataMatrix.deleteCol(c);
-    
-    // 2. 收集需要移动的列（按列号升序排序）
-    const colsToMoveSet = new Set();
-    this._dataMatrix.forEach((r, colIdx, cell) => {
-      if (colIdx > c) {
-        colsToMoveSet.add(colIdx);
-      }
-    });
-    const colsToMove = Array.from(colsToMoveSet);
-    
-    // 按列号升序排序，确保从前向后移动
-    colsToMove.sort((a, b) => a - b);
-    
-    // 3. 移动每一列的数据
-    for (const colIdx of colsToMove) {
-      const colData = this._dataMatrix.getCol(colIdx);
-      if (colData) {
-        for (const [row, cell] of colData) {
-          this._dataMatrix.delete(row, colIdx, true);
-          this._dataMatrix.set(row, colIdx - 1, cell, true);
-        }
-      }
-    }
-    
-    this.colCount = Math.max(1, this.colCount - 1);
-    this.dataVersion++;
-    this._offsetsDirty = true;
-    this._frozenSizeDirty = true;
-    this.notify();
   }
   /**
    * 订阅数据变化（旧版 API，向后兼容）
@@ -3190,7 +2520,10 @@ export class Workbook {
       
       this._useWorker = true;
     } catch (error) {
-      console.error('[Workbook] Failed to enable Worker:', error);
+      this.errorHandler.handle(
+        new SheetError(ErrorCodes.OPERATION_FAILED, 'Failed to enable Worker', { originalError: error.message }),
+        { phase: 'worker-init' }
+      );
     }
     
     return this;
@@ -3230,13 +2563,8 @@ export class Workbook {
     }
   }
   
-  /**
-   * 获取 Worker 状态
-   * @returns {Object|null} Worker 状态
-   */
   getWorkerStats() {
-    if (!this._workerManager) return null;
-    return this._workerManager.getStats();
+    return this._workerManager ? this._workerManager.getStats() : null;
   }
 
   getCalculationStats() {
@@ -3244,23 +2572,9 @@ export class Workbook {
   }
 
   resetCalculationStats() {
-    if (this.calcEngine) {
-      this.calcEngine.resetStats();
-    }
-  }
-  
-  /**
-   * 检查 Worker 是否启用
-   * @returns {boolean}
-   */
-  isWorkerEnabled() {
-    return this._useWorker && this._workerManager !== null;
+    if (this.calcEngine) this.calcEngine.resetStats();
   }
 
-  /**
-   * 启用性能监控
-   * @param {Object} [options] - 配置选项
-   */
   enablePerformanceMonitoring(options = {}) {
     this._performanceMonitor.enable();
     if (options.thresholds) {
@@ -3272,11 +2586,28 @@ export class Workbook {
     }
   }
 
-  /**
-   * 禁用性能监控
-   */
   disablePerformanceMonitoring() {
     this._performanceMonitor.disable();
+  }
+
+  isWorkerEnabled() {
+    return this._useWorker && this._workerManager !== null;
+  }
+
+  getPerformanceReport() {
+    return this._performanceMonitor.generateReport();
+  }
+
+  exportPerformanceJSON() {
+    return this._performanceMonitor.exportJSON();
+  }
+
+  exportPerformanceCSV() {
+    return this._performanceMonitor.exportCSV();
+  }
+
+  printPerformanceSummary() {
+    this._performanceMonitor.printSummary();
   }
 
   /**
@@ -3285,28 +2616,6 @@ export class Workbook {
    */
   getPerformanceMonitor() {
     return this._performanceMonitor;
-  }
-
-  async init() {
-    // 加载持久化数据
-    if (this._enablePersistence) {
-      try {
-        const data = await this._storage.loadSheet(this._sheetId);
-        if (data && data.cells) {
-          for (const key in data.cells) {
-            const [r, c] = key.split('-').map(Number);
-            this._setCellData(r, c, data.cells[key]);
-          }
-        }
-      } catch (e) {
-        console.error('[Persistence] Load failed:', e);
-      }
-    }
-    
-    // 初始化 WASM (如果还未初始化)
-    await this.initWasm();
-    
-    return this;
   }
 
   /**
@@ -3326,6 +2635,7 @@ export class Workbook {
    * 初始化 WASM 计算引擎并绑定内存
    */
   async initWasm() {
+    if (this._destroyed) return;
     const success = await wasmBridge.init();
     if (!success) return;
 
@@ -3335,8 +2645,6 @@ export class Workbook {
       const sharedBuffer = sharedStore?.getBuffer(); // 这里会触发连续内存分配
       
       if (sharedBuffer) {
-        this._sharedBuffer = sharedBuffer;
-        this._sharedView = new Float64Array(sharedBuffer);
         this._sharedRows = sharedStore.maxRows;
         this._sharedCols = sharedStore.maxCols;
         const sharedMemoryBound = wasmBridge.bindSharedMemory(sharedBuffer, this._sharedRows, this._sharedCols);
@@ -3349,45 +2657,6 @@ export class Workbook {
     } else {
       wasmBridge.markSharedMemoryUnavailable('SharedArrayBuffer is unavailable. Configure COOP/COEP headers to enable shared memory.');
     }
-  }
-
-  /**
-   * 获取 WASM 与共享内存运行状态
-   * @returns {Object}
-   */
-  getWasmStatus() {
-    return wasmBridge.getStatus();
-  }
-
-  /**
-   * 获取性能报告
-   * @returns {Object} 性能报告
-   */
-  getPerformanceReport() {
-    return this._performanceMonitor.generateReport();
-  }
-
-  /**
-   * 打印性能摘要到控制台
-   */
-  printPerformanceSummary() {
-    this._performanceMonitor.printSummary();
-  }
-
-  /**
-   * 导出性能数据为 JSON
-   * @returns {string} JSON 字符串
-   */
-  exportPerformanceJSON() {
-    return this._performanceMonitor.exportJSON();
-  }
-
-  /**
-   * 导出性能数据为 CSV
-   * @returns {string} CSV 字符串
-   */
-  exportPerformanceCSV() {
-    return this._performanceMonitor.exportCSV();
   }
 
   /**
@@ -3406,6 +2675,17 @@ export class Workbook {
    * 销毁工作簿，清理所有资源
    */
   destroy() {
+    this._destroyed = true;
+
+    // 清理持久化管理器（定时器等）
+    this._persistenceManager.destroy();
+
+    // 清理布局引擎
+    this._layoutEngine.destroy();
+
+    // 清理合并管理器
+    this._mergeManager.destroy();
+
     // 销毁插件系统
     this.plugins.destroy();
     
@@ -3423,6 +2703,12 @@ export class Workbook {
     if (this._workerManager) {
       this._workerManager.terminate(); // Use terminate for the worker itself
       this._workerManager = null;
+    }
+    // reject 所有等待中的 worker 队列 Promise
+    const err = new Error('Workbook destroyed');
+    while (this._workerQueue.length > 0) {
+      const { reject } = this._workerQueue.shift();
+      reject(err);
     }
     this._workerQueue.clear();
     this._useWorker = false;
@@ -3453,7 +2739,17 @@ export class Workbook {
     if (this._poolManager) {
       this._poolManager.destroy();
     }
-    
+
+    // 清理样式缓存
+    if (this.styleCache) {
+      this.styleCache.styleMap.clear();
+      this.styleCache.styleStore.clear();
+    }
+
+    // 关闭 IndexedDB 连接
+    if (this._storage) {
+      this._storage.close();
+    }
   }
 
   // ========== Store 订阅方法 ==========
@@ -3543,15 +2839,6 @@ export class Workbook {
   }
 
   /**
-   * 打印对象池统计信息
-   */
-  printPoolStats() {
-    const stats = this.getPoolStats();
-    for (const [name, poolStats] of Object.entries(stats)) {
-    }
-  }
-
-  /**
    * 预热对象池
    * @param {number} [cellCount=1000] - 预创建单元格数量
    */
@@ -3569,151 +2856,27 @@ export class Workbook {
 
   // ========== 持久化方法 ==========
 
-  /**
-   * 将当前工作簿状态持久化到 IndexedDB
-   * @param {string} [sheetId='default'] - 工作表唯一标识
-   */
   async persist(sheetId = 'default') {
-    if (!this._storage) return;
-
-    const config = {
-      rowCount: this.rowCount,
-      colCount: this.colCount,
-      colWidths: this.colWidths,
-      rowHeights: this.rowHeights,
-      merges: this.merges,
-      mergeMap: this.mergeMap,
-      defaultColWidth: this.defaultColWidth,
-      defaultRowHeight: this.defaultRowHeight
-    };
-
-    // 避免 toObject(true) 的 O(N) 中间对象：直接 forEach 写出 importSheet 期望的字符串键格式。
-    const data = {};
-    this._dataMatrix.forEach((r, c, cell) => {
-      data[`${r}-${c}`] = cell;
-    });
-    await this._storage.importSheet(sheetId, { data, config });
-    
-    console.log(`Workbook [${sheetId}] persisted to IndexedDB.`);
+    return this._persistenceManager.persist(sheetId);
   }
 
   enablePersistenceStorage(options = {}) {
-    if (!this._storage) {
-      this._storage = new IndexedDBStorage(options.storageOptions || {});
-    }
-    if (!this._dirtyCells) {
-      this._dirtyCells = new Map();
-    }
-    if (options.sheetId) {
-      this._sheetId = options.sheetId;
-    }
-    this._enablePersistence = true;
-    return this._storage;
+    return this._persistenceManager.enablePersistenceStorage(options);
   }
 
-  /**
-   * 从 IndexedDB 加载工作簿状态
-   * @param {string} [sheetId='default'] - 工作表唯一标识
-   */
   async loadFromStorage(sheetId = 'default') {
-    if (!this._storage) return false;
-
-    const sheetData = await this._storage.exportSheet(sheetId);
-    if (!sheetData || !sheetData.config) return false;
-
-    const { config, data } = sheetData;
-    
-    // 恢复配置
-    this.rowCount = config.rowCount;
-    this.colCount = config.colCount;
-    this.colWidths = config.colWidths || {};
-    this.rowHeights = config.rowHeights || {};
-    this.merges = config.merges || [];
-    this.mergeMap = config.mergeMap || {};
-    this.defaultColWidth = config.defaultColWidth || 80;
-    this.defaultRowHeight = config.defaultRowHeight || 25;
-
-    // 恢复数据
-    this._dataMatrix.clear();
-    if (data) {
-      for (const [key, cellData] of Object.entries(data)) {
-        const { r, c } = this._parseKey(key);
-        // 使用 setCell 确保触发所有内部钩子（如公式重算标记）
-        this.setCell(r, c, cellData, false);
-      }
-    }
-
-    this._offsetsDirty = true;
-    this.notify();
-    
-    console.log(`Workbook [${sheetId}] loaded from IndexedDB.`);
-    return true;
+    return this._persistenceManager.loadFromStorage(sheetId);
   }
 
-  /**
-   * 将列索引转换为 Excel 字母名称 (如 0 -> A, 26 -> AA)
-   * @param {number} c - 列索引
-   * @returns {string}
-   */
-  getColName(c) {
-    let name = '';
-    let i = c;
-    while (i >= 0) {
-      name = String.fromCharCode((i % 26) + 65) + name;
-      i = Math.floor(i / 26) - 1;
-    }
-    return name;
-  }
-
-  /**
-   * 调度增量保存 (Delta Sync)
-   * @private
-   */
   _schedulePersistence() {
-    if (!this._storage) return;
-    if (this._persistTimer) clearTimeout(this._persistTimer);
-    this._persistTimer = setTimeout(() => this.flushPersistence(), 1000);
+    this._persistenceManager._schedulePersistence();
   }
 
-  /**
-   * 强制刷入持久化存储
-   */
   async flushPersistence() {
-    if (!this._storage || this._dirtyCells.size === 0) return;
-    
-    const diffs = new Map(this._dirtyCells);
-    this._dirtyCells.clear();
-    
-    try {
-      await this._storage.saveDiffs(this._sheetId, diffs);
-    } catch (e) {
-      console.error('[Persistence] Sync failed:', e);
-      // 失败后将数据还回，待下次重试
-      diffs.forEach((v, k) => {
-        if (!this._dirtyCells.has(k)) this._dirtyCells.set(k, v);
-      });
-    }
+    return this._persistenceManager.flushPersistence();
   }
 
-  async savePendingChanges(sheetId = this._sheetId) {
-    if (!this._storage) {
-      this.enablePersistenceStorage({ sheetId });
-    } else if (sheetId) {
-      this._sheetId = sheetId;
-    }
-
-    if (this._persistTimer) {
-      clearTimeout(this._persistTimer);
-      this._persistTimer = null;
-    }
-
-    if (this._dirtyCells && this._dirtyCells.size > 0) {
-      const dirtyCount = this._dirtyCells.size;
-      await this.flushPersistence();
-      return { mode: 'diff', sheetId: this._sheetId, dirtyCount };
-    }
-
-    await this.persist(this._sheetId);
-    return { mode: 'snapshot', sheetId: this._sheetId, dirtyCount: 0 };
+  async savePendingChanges(sheetId) {
+    return this._persistenceManager.savePendingChanges(sheetId);
   }
 }

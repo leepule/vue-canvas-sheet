@@ -144,7 +144,13 @@
 				ariaRows: [],
 				ariaCols: [],
 				totalRowCount: 0,
-				totalColCount: 0
+				totalColCount: 0,
+
+				// ARIA 范围缓存，避免重复重建
+				_ariaStartRow: -1,
+				_ariaEndRow: -1,
+				_ariaStartCol: -1,
+				_ariaEndCol: -1
 			};
 		},
 		computed: {
@@ -257,6 +263,12 @@
 			if (this._cleanupThrottledMethods) {
 				this._cleanupThrottledMethods();
 			}
+			// 清理 workbook 上的 requestRender 回调，避免组件销毁后仍被外部调用
+			if (this.workbook) {
+				delete this.workbook.requestRender;
+			}
+			// 释放离屏网格缓存 canvas
+			this._gridLayerCache = null;
 		},
 		methods: {
 			invalidateSelection() {
@@ -459,28 +471,27 @@
 			 * 垂直滚动事件处理
 			 * 支持懒加载模式
 			 */
-			async onScrollV(e) {
+			onScrollV(e) {
 				if (this.isSyncingScroll) return;
 				const maxScrollY = Math.max(0, this.totalHeight - this.height);
 				this.scrollY = Math.min(e.target.scrollTop, maxScrollY);
-				
-				// 触发懒加载
-				if (this.dataController && this.dataController._scrollLoader) {
-					try {
-						await this.dataController.handleScroll(
-							this.scrollY,
-							this.height,
-							this.totalHeight,
-							DEFAULT_ROW_HEIGHT
-						);
-					} catch (err) {
-						console.error('Lazy load error:', err);
-					}
-				}
-				
+
+				// 先渲染，确保 canvas 立即响应滚动
 				this.updateEditorPosition();
 				this.invalidate();
 				this._preloadTextMetricsDebounced();
+
+				// 懒加载 fire-and-forget
+				if (this.dataController && this.dataController._scrollLoader) {
+					this.dataController.handleScroll(
+						this.scrollY,
+						this.height,
+						this.totalHeight,
+						DEFAULT_ROW_HEIGHT
+					).catch(err => {
+						console.error('Lazy load error:', err);
+					});
+				}
 			},
 
 			handleResize() {
@@ -556,7 +567,7 @@
 			 * 鼠标滚轮事件处理
 			 * 支持懒加载模式
 			 */
-			async handleWheel(e) {
+			handleWheel(e) {
 				e.preventDefault();
 
 				const dx = e.deltaX;
@@ -571,24 +582,23 @@
 				this.scrollX = newX;
 				this.scrollY = newY;
 
-				// 触发懒加载
-				if (this.dataController && this.dataController._scrollLoader) {
-					try {
-						await this.dataController.handleScroll(
-							this.scrollY,
-							this.height,
-							this.totalHeight,
-							DEFAULT_ROW_HEIGHT
-						);
-					} catch (err) {
-						console.error('Lazy load error:', err);
-					}
-				}
-
+				// 先渲染，确保 canvas 立即响应滚动
 				this.syncScrollbars();
 				this.updateEditorPosition();
 				this.render();
 				this._preloadTextMetricsDebounced();
+
+				// 懒加载 fire-and-forget：数据到达后会触发额外渲染
+				if (this.dataController && this.dataController._scrollLoader) {
+					this.dataController.handleScroll(
+						this.scrollY,
+						this.height,
+						this.totalHeight,
+						DEFAULT_ROW_HEIGHT
+					).catch(err => {
+						console.error('Lazy load error:', err);
+					});
+				}
 			},
 
 			focus() {
@@ -931,8 +941,8 @@
 				this.contextMenuVisible = false;
 				const { r, c } = this.contextMenuTarget || {};
 
-				const targetR = r !== -1 ? r : this.workbook.activeCell.r;
-				const targetC = c !== -1 ? c : this.workbook.activeCell.c;
+				const targetR = r !== -1 ? r : (this.workbook.activeCell?.r ?? 0);
+				const targetC = c !== -1 ? c : (this.workbook.activeCell?.c ?? 0);
 
 				switch (action) {
 					case 'insertRow': this.workbook.insertRow(targetR); break;

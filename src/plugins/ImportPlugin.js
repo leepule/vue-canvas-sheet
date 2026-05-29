@@ -30,7 +30,9 @@ function detectFileKind(file) {
 let _xlsxPromise = null;
 function loadXLSX() {
   if (!_xlsxPromise) {
-    _xlsxPromise = import('xlsx-js-style').then(m => m.default || m);
+    _xlsxPromise = import('xlsx-js-style')
+      .then(m => m.default || m)
+      .catch(err => { _xlsxPromise = null; throw err; });
   }
   return _xlsxPromise;
 }

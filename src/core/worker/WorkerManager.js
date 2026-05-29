@@ -92,6 +92,7 @@ export class WorkerManager {
   }
 
   _enableFallback(reason) {
+    if (this.useFallback) return;
     if (!this.fallbackEnabled) {
       throw new Error(reason);
     }

@@ -27,7 +27,9 @@ function downloadBlob(blob, filename) {
 let _xlsxPromise = null;
 function loadXLSX() {
   if (!_xlsxPromise) {
-    _xlsxPromise = import('xlsx-js-style').then(m => m.default || m);
+    _xlsxPromise = import('xlsx-js-style')
+      .then(m => m.default || m)
+      .catch(err => { _xlsxPromise = null; throw err; });
   }
   return _xlsxPromise;
 }
@@ -50,11 +52,17 @@ function createExportWorker() {
   }
 }
 
-function runExportWorker(snapshot, fileName, onProgress) {
+function runExportWorker(snapshot, fileName, onProgress, activeWorkers) {
   const worker = createExportWorker();
   if (!worker) return null;
 
+  if (activeWorkers) activeWorkers.add(worker);
+
   return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      if (activeWorkers) activeWorkers.delete(worker);
+    };
+
     worker.onmessage = (e) => {
       const message = e.data || {};
       if (message.type === 'progress') {
@@ -67,6 +75,7 @@ function runExportWorker(snapshot, fileName, onProgress) {
           new Blob([message.buffer], { type: XLSX_MIME }),
           message.fileName || fileName
         );
+        cleanup();
         worker.terminate();
         resolve({
           duration: message.duration,
@@ -75,12 +84,14 @@ function runExportWorker(snapshot, fileName, onProgress) {
           snapshot
         });
       } else {
+        cleanup();
         worker.terminate();
         reject(new Error(message.error || 'Export worker failed'));
       }
     };
 
     worker.onerror = (error) => {
+      cleanup();
       worker.terminate();
       reject(error instanceof Error ? error : new Error(error?.message || 'Export worker failed'));
     };
@@ -120,6 +131,7 @@ export class ExportPlugin {
     this.onError = options.onError || null;
     this._workbook = null;
     this._registry = null;
+    this._activeWorkers = new Set();
   }
 
   onInit(workbook, registry) {
@@ -142,6 +154,11 @@ export class ExportPlugin {
       this._registry.deleteSharedState('export:json');
       this._registry.deleteSharedState('export:csv');
     }
+    // 终止所有正在运行的导出 Worker
+    for (const worker of this._activeWorkers) {
+      worker.terminate();
+    }
+    this._activeWorkers.clear();
     this._workbook = null;
     this._registry = null;
   }
@@ -157,7 +174,7 @@ export class ExportPlugin {
     try {
       let result;
       if (wantWorker) {
-        const workerResult = runExportWorker(snapshot, fileName, progressCb);
+        const workerResult = runExportWorker(snapshot, fileName, progressCb, this._activeWorkers);
         if (workerResult) {
           try {
             result = await workerResult;
@@ -165,7 +182,12 @@ export class ExportPlugin {
             // Worker setup succeeded but execution failed (transfer error, xlsx
             // throw, etc). Fall back to the main thread so the user still gets
             // their file; surface the cause on the console for debugging.
-            console.warn('[ExportPlugin] worker export failed, falling back to main thread:', workerErr);
+            // workerErr may be an ErrorEvent (from Worker.onerror) rather than
+            // an Error — extract the real error when available.
+            const cause = (workerErr instanceof ErrorEvent && workerErr.error)
+              ? workerErr.error
+              : workerErr;
+            console.warn('[ExportPlugin] worker export failed, falling back to main thread:', cause);
           }
         }
       }

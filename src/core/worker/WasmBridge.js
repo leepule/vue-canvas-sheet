@@ -201,6 +201,19 @@ export class WasmBridge {
     }
     return `WASM engine failed to initialize; using JS fallback. Original error: ${message}`;
   }
+
+  /**
+   * 销毁 WASM 引擎并释放资源
+   */
+  destroy() {
+    this.engine = null;
+    this.sharedView = null;
+    this.isLoaded = false;
+    this.sharedMemoryEnabled = false;
+    this.loadPromise = null;
+    this.fallbackReason = null;
+    this.lastError = null;
+  }
 }
 
 // 单例模式

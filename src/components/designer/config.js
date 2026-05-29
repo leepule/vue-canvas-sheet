@@ -7,6 +7,7 @@ export const TableTheme = {
   selectionBg: 'rgba(33, 115, 70, 0.1)',
   dragGuideColor: '#409eff',
   frozenLineColor: '#ccc',
+  frozenBg: null, // 冻结区域背景色，null 表示使用普通单元格默认背景
   fillHandleColor: '#217346',
   fillTargetBorder: '#666',
 

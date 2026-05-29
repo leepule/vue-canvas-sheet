@@ -255,15 +255,21 @@ export class Store {
    * 在 endBatch 之前，所有状态更新将被累积
    */
   beginBatch() {
-    this._batching = true;
-    this._pendingState = {};
+    this._batchDepth = (this._batchDepth || 0) + 1;
+    if (this._batchDepth === 1) {
+      this._batching = true;
+      this._pendingState = {};
+    }
   }
- 
+
   /**
    * 结束批量更新并通知监听器
    */
   endBatch() {
     if (!this._batching) return;
+
+    this._batchDepth = Math.max(0, (this._batchDepth || 1) - 1);
+    if (this._batchDepth > 0) return;
 
     this._batching = false;
 

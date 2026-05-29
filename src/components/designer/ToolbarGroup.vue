@@ -65,7 +65,7 @@
         this.showPopover = !this.showPopover;
       },
       handleCloseAll(e) {
-        if (e.detail !== this) {
+        if (e.detail !== this && e.detail !== this.$parent) {
           this.showPopover = false;
         }
       }
@@ -97,10 +97,6 @@
     justify-content: center;
     gap: 2px;
     height: 100%;
-  }
-
-  .group-footer {
-    display: none;
   }
 
   .group-separator {

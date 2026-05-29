@@ -182,7 +182,7 @@ function readTextStyle(reader) {
 /**
  * 缓冲区写入器
  */
-class BufferWriter {
+export class BufferWriter {
   constructor(initialSize = CONFIG.INITIAL_BUFFER_SIZE) {
     this.buffer = new ArrayBuffer(initialSize);
     this.view = new DataView(this.buffer);
@@ -280,7 +280,7 @@ class BufferWriter {
 /**
  * 缓冲区读取器
  */
-class BufferReader {
+export class BufferReader {
   constructor(buffer) {
     this.buffer = buffer;
     this.view = new DataView(buffer);
@@ -400,7 +400,7 @@ function serializeCellData(writer, key, cell) {
 /**
  * 反序列化单元格数据
  */
-function deserializeCellData(reader) {
+export function deserializeCellData(reader) {
   const key = readCellId(reader);
   const valueType = reader.readUint8();
 
@@ -551,14 +551,8 @@ export function serializeFormulaResults(results) {
       writer.writeUint8(DataType.NUMBER);
       writer.writeFloat64(value);
     } else if (typeof value === 'string') {
-      // 检查是否是错误值
-      if (value.startsWith('#') && value.endsWith('!')) {
-        writer.writeUint8(DataType.STRING);
-        writer.writeString(value);
-      } else {
-        writer.writeUint8(DataType.STRING);
-        writer.writeString(value);
-      }
+      writer.writeUint8(DataType.STRING);
+      writer.writeString(value);
     } else {
       writer.writeUint8(DataType.STRING);
       writer.writeString(String(value));
@@ -634,131 +628,6 @@ export function isTransferableSupported() {
 }
 
 /**
- * 创建高效的 Worker 消息
- * @param {string} type - 消息类型
- * @param {string} taskId - 任务 ID
- * @param {ArrayBuffer} buffer - 数据缓冲区
- * @returns {{message: Object, transferables: Transferable[]}}
- */
-export function createWorkerMessage(type, taskId, buffer) {
-  return {
-    message: {
-      type,
-      taskId,
-      useTransferable: true,
-      buffer
-    },
-    transferables: [buffer]
-  };
-}
-
-/**
- * 序列化工具类
- */
-export class TransferableSerializer {
-  constructor() {
-    this.writer = new BufferWriter();
-  }
-
-  /**
-   * 序列化数据
-   *
-   * 每次调用都创建独立的 BufferWriter：
-   * (1) 消除实例间共享 writer 带来的重入/并发数据竞争；
-   * (2) 释放上一次序列化的 ArrayBuffer 高水位内存，避免大型数据后持续驻留；
-   * (3) 与 `getTransferable()` 的 slice 行为对称 —— 输入 buffer 与输出 buffer 互相独立。
-   */
-  serialize(data) {
-    this.writer = new BufferWriter();
-    this._serializeValue(data);
-    return this.writer.getTransferable();
-  }
-
-  /**
-   * 序列化值
-   */
-  _serializeValue(value) {
-    if (value === null) {
-      this.writer.writeUint8(DataType.NULL);
-    } else if (value === undefined) {
-      this.writer.writeUint8(DataType.UNDEFINED);
-    } else if (typeof value === 'boolean') {
-      this.writer.writeUint8(DataType.BOOLEAN);
-      this.writer.writeUint8(value ? 1 : 0);
-    } else if (typeof value === 'number') {
-      this.writer.writeUint8(DataType.NUMBER);
-      this.writer.writeFloat64(value);
-    } else if (typeof value === 'string') {
-      this.writer.writeUint8(DataType.STRING);
-      this.writer.writeString(value);
-    } else if (Array.isArray(value)) {
-      this.writer.writeUint8(DataType.ARRAY);
-      this.writer.writeUint32(value.length);
-      for (const item of value) {
-        this._serializeValue(item);
-      }
-    } else if (typeof value === 'object') {
-      this.writer.writeUint8(DataType.OBJECT);
-      const keys = Object.keys(value);
-      this.writer.writeUint32(keys.length);
-      for (const key of keys) {
-        this.writer.writeString(key);
-        this._serializeValue(value[key]);
-      }
-    } else {
-      this.writer.writeUint8(DataType.STRING);
-      this.writer.writeString(String(value));
-    }
-  }
-
-  /**
-   * 反序列化数据
-   */
-  static deserialize(buffer) {
-    const reader = new BufferReader(buffer);
-    return TransferableSerializer._deserializeValue(reader);
-  }
-
-  /**
-   * 反序列化值
-   */
-  static _deserializeValue(reader) {
-    const type = reader.readUint8();
-    switch (type) {
-      case DataType.NULL:
-        return null;
-      case DataType.UNDEFINED:
-        return undefined;
-      case DataType.BOOLEAN:
-        return reader.readUint8() === 1;
-      case DataType.NUMBER:
-        return reader.readFloat64();
-      case DataType.STRING:
-        return reader.readString();
-      case DataType.ARRAY: {
-        const length = reader.readUint32();
-        const arr = new Array(length);
-        for (let i = 0; i < length; i++) {
-          arr[i] = TransferableSerializer._deserializeValue(reader);
-        }
-        return arr;
-      }
-      case DataType.OBJECT: {
-        const keyCount = reader.readUint32();
-        const obj = {};
-        for (let i = 0; i < keyCount; i++) {
-          const key = reader.readString();
-          obj[key] = TransferableSerializer._deserializeValue(reader);
-        }
-        return obj;
-      }
-      default:
-        return undefined;
-    }
-  }
-}
-
-/**
  * 序列化渲染数据
  */
 export function serializeRenderData(data) {
@@ -789,12 +658,23 @@ export function serializeRenderData(data) {
       writer.writeFloat64(cell.w);
       writer.writeFloat64(cell.h);
       writer.writeString(cell.bg || "");
-      
+
       if (cell.text) {
         writer.writeUint8(1);
         writer.writeString(cell.text.content || "");
         // 写入样式 ID 而不是全量属性字符串
         writer.writeUint32(cell.text.styleId !== undefined ? cell.text.styleId : 0xFFFFFFFF);
+      } else {
+        writer.writeUint8(0);
+      }
+
+      // 区域 clipRect：主体/冻结区域物理裁剪，丢失会导致主体文字越界画入冻结区
+      if (cell.clip) {
+        writer.writeUint8(1);
+        writer.writeFloat64(cell.clip.x);
+        writer.writeFloat64(cell.clip.y);
+        writer.writeFloat64(cell.clip.w);
+        writer.writeFloat64(cell.clip.h);
       } else {
         writer.writeUint8(0);
       }
@@ -856,6 +736,17 @@ export function serializeRenderData(data) {
       writer.writeFloat64(line.y2);
     }
 
+    // 冻结区域不透明底色矩形：缺失会导致 Worker 跳过冻结区底色填充，
+    // 滚动中主体单元格会从冻结区透出
+    const frozenRegions = data.frozenRegions || [];
+    writer.writeUint32(frozenRegions.length);
+    for (const region of frozenRegions) {
+      writer.writeFloat64(region.x);
+      writer.writeFloat64(region.y);
+      writer.writeFloat64(region.w);
+      writer.writeFloat64(region.h);
+    }
+
     const buffer = writer.getTransferable();
     return { buffer, transferables: [buffer] };
 }
@@ -903,7 +794,7 @@ export function deserializeRenderData(buffer) {
                 content,
                 style,
                 // 下面这些属性可以从 style 中提取，或者由 Worker 渲染逻辑动态生成
-                font: null, 
+                font: null,
                 color: style.color || '#000000',
                 align: style.align || 'left',
                 valign: style.valign || 'middle',
@@ -912,7 +803,18 @@ export function deserializeRenderData(buffer) {
                 padding: 4
             };
         }
-        cellDataList[i] = { r, c, x, y, w, h, bg, text };
+
+        let clip = null;
+        if (reader.readUint8() === 1) {
+            clip = {
+                x: reader.readFloat64(),
+                y: reader.readFloat64(),
+                w: reader.readFloat64(),
+                h: reader.readFloat64()
+            };
+        }
+
+        cellDataList[i] = { r, c, x, y, w, h, bg, text, clip };
     }
 
     const bgColorCount = reader.readUint32();
@@ -978,10 +880,21 @@ export function deserializeRenderData(buffer) {
       };
     }
 
+    const frozenRegionCount = reader.remaining > 0 ? reader.readUint32() : 0;
+    const frozenRegions = new Array(frozenRegionCount);
+    for (let i = 0; i < frozenRegionCount; i++) {
+      frozenRegions[i] = {
+        x: reader.readFloat64(),
+        y: reader.readFloat64(),
+        w: reader.readFloat64(),
+        h: reader.readFloat64()
+      };
+    }
+
     return {
       width, height, theme,
       cellDataList, bgGroups, gridLines, borderBatch,
-      renderRect, colHeaders, rowHeaders, frozenLines
+      renderRect, colHeaders, rowHeaders, frozenLines, frozenRegions
     };
 }
 
@@ -991,8 +904,6 @@ export default {
   serializeFormulaResults,
   deserializeFormulaResults,
   isTransferableSupported,
-  createWorkerMessage,
-  TransferableSerializer,
   BufferWriter,
   BufferReader,
   serializeRenderData,

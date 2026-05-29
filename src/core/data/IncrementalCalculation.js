@@ -17,20 +17,24 @@ export class IncrementalCalculationEngine {
     this.calcCache = new Map();
     this.cacheVersion = 0;
     this.maxCacheSize = 10000;
-    
-    // 待计算的队列（使用优先级队列）
-    this.calcQueue = [];
-    this.isCalculating = false;
-    
+
     // 依赖图优化
     // colHint 来自 workbook，用于让 DirtyBitset 行初始字数按实际列数预留，避免扩容
     this.dirtyBitset = new DirtyBitset({ colHint: workbook && workbook.colCount });
-    this.compacted = false;     // 是否已压缩依赖图
-    
-    // 批量计算缓冲
-    this.batchBuffer = [];
+
+    // 依赖图压缩节流：每累计 N 个批次调度一次孤儿条目清理，避免长会话累积
+    this._compactBatchInterval = 32;
+    this._batchesSinceCompact = 0;
+    this._compactIdleHandle = null;
+
     this.batchTimeout = null;
     this.batchDelay = 16;  // 16ms批量延迟
+    this._workerBusy = false;
+
+    // 可复用集合，避免频繁分配 GC 压力
+    this._reusableQueue = [];
+    this._reusableVisited = new Set();
+    this._reusablePriorityMap = new Map();
 
     this.stats = {
       cacheHits: 0,
@@ -51,16 +55,6 @@ export class IncrementalCalculationEngine {
   /**
    * 标记单元格为脏（优化版本：使用位图）
    */
-  markDirty(cellId) {
-    const { r, c } = this.workbook._parseKey(cellId);
-    if (!Number.isFinite(r) || !Number.isFinite(c) || r < 0 || c < 0) return;
-
-    const newDirty = this._markDirtyGraph([cellId]);
-    if (newDirty) {
-      this._scheduleBatchCalc();
-    }
-  }
-
   markDirtyRC(r, c) {
     if (!Number.isFinite(r) || !Number.isFinite(c) || r < 0 || c < 0) return;
 
@@ -69,71 +63,13 @@ export class IncrementalCalculationEngine {
       this._scheduleBatchCalc();
     }
   }
-  
-  /**
-   * 批量标记脏单元格
-   */
-  markDirtyBatch(cellIds) {
-    const newDirty = this._markDirtyGraph(cellIds);
-    
-    if (newDirty) {
-      this._scheduleBatchCalc();
-    }
-  }
-
-  _markDirtyGraph(cellIds) {
-    const wb = this.workbook;
-    const queue = [];
-    const visited = new Set();
-    let newDirty = false;
-
-    const enqueue = (cellId) => {
-      if (visited.has(cellId)) return;
-      visited.add(cellId);
-      queue.push(cellId);
-    };
-
-    for (const cellId of cellIds) {
-      enqueue(cellId);
-    }
-
-    let head = 0;
-    while (head < queue.length) {
-      const currentId = queue[head++];
-      const { r, c } = wb._parseKey(currentId);
-      if (!Number.isFinite(r) || !Number.isFinite(c) || r < 0 || c < 0) continue;
-
-      if (this.dirtyBitset.add(r, c)) {
-        newDirty = true;
-      }
-
-      const cell = wb._dataMatrix.get(r, c);
-      if (cell && cell.f) {
-        cell.dirty = true;
-      }
-
-      const directDependents = wb.dependencyMap.get(currentId);
-      if (directDependents) {
-        for (const depId of directDependents) {
-          enqueue(depId);
-        }
-      }
-
-      if (wb.rangeDependencyIndex) {
-        const rangeDependents = wb.rangeDependencyIndex.findDependents(r, c);
-        for (const depId of rangeDependents) {
-          enqueue(depId);
-        }
-      }
-    }
-
-    return newDirty;
-  }
 
   _markDirtyGraphNumeric(numericKeys) {
     const wb = this.workbook;
-    const queue = [];
-    const visited = new Set();
+    const queue = this._reusableQueue;
+    const visited = this._reusableVisited;
+    queue.length = 0;
+    visited.clear();
     let newDirty = false;
 
     const enqueue = (nk) => {
@@ -190,8 +126,8 @@ export class IncrementalCalculationEngine {
    * 调度批量计算
    */
   _scheduleBatchCalc() {
-    if (this.batchTimeout) return;
-    
+    if (this.batchTimeout || this._workerBusy) return;
+
     this.batchTimeout = setTimeout(() => {
       this.batchTimeout = null;
       this._processDirtyCells();
@@ -206,20 +142,59 @@ export class IncrementalCalculationEngine {
 
     const dirtyCount = this.dirtyBitset.size;
     const { queue } = this._collectDirtyGraph();
-    
+
     // 批量计算
-    this._calculateBatch(queue);
-    
-    // 清空位图
-    this.dirtyBitset.clear();
+    const dispatchedToWorker = this._calculateBatch(queue);
+
+    // Worker 路径不立即清空位图，等 Worker 完成后再清；主线程路径直接清
+    if (!dispatchedToWorker) {
+      this.dirtyBitset.clear();
+    }
     this.stats.lastDirtyCount = dirtyCount;
+
+    // 累计批次到阈值后，调度依赖图压缩（清理公式删改产生的孤儿反向依赖）
+    this._maybeScheduleCompact();
+  }
+
+  /**
+   * 节流调度依赖图压缩：达到批次阈值且无未触发任务时，推迟到空闲时段执行
+   */
+  _maybeScheduleCompact() {
+    this._batchesSinceCompact++;
+    if (this._batchesSinceCompact < this._compactBatchInterval) return;
+    if (this._compactIdleHandle !== null) return;
+
+    const useIdle = typeof requestIdleCallback === 'function';
+    const schedule = useIdle
+      ? (cb) => requestIdleCallback(cb, { timeout: 1000 })
+      : (cb) => setTimeout(cb, 0);
+
+    this._compactIdleHandle = schedule(() => {
+      this._compactIdleHandle = null;
+      this._batchesSinceCompact = 0;
+      this.compactDependencyGraph();
+    });
+  }
+
+  _cancelScheduledCompact() {
+    if (this._compactIdleHandle === null) return;
+    const useIdle = typeof cancelIdleCallback === 'function';
+    if (useIdle) {
+      cancelIdleCallback(this._compactIdleHandle);
+    } else {
+      clearTimeout(this._compactIdleHandle);
+    }
+    this._compactIdleHandle = null;
   }
 
   _collectDirtyGraph() {
     const wb = this.workbook;
-    const queue = [];
-    const visited = new Set();
-    const priorityMap = new Map();
+    const queue = this._reusableQueue;
+    const visited = this._reusableVisited;
+    const priorityMap = this._reusablePriorityMap;
+    queue.length = 0;
+    visited.clear();
+    priorityMap.clear();
 
     const enqueue = (nk, priority) => {
       if (!visited.has(nk)) {
@@ -315,6 +290,9 @@ export class IncrementalCalculationEngine {
         const { r, c } = decodeNumeric(nk);
         return cellKey(r, c);
       });
+      // 保存当前脏位图快照，Worker 完成后再清除
+      const dirtySnapshotSize = this.dirtyBitset.size;
+      this._workerBusy = true;
       wb._recalcDirtyWithWorker(uncachedIds)
         .then((workerResults) => {
           const workerResultList = Object.entries(workerResults || {}).map(([cellId, value]) => ({ cellId, value }));
@@ -326,20 +304,30 @@ export class IncrementalCalculationEngine {
             count: results.length + workerResultList.length,
             worker: true
           });
+          this._workerBusy = false;
+          // 检查是否有新增脏单元格需要处理
+          if (this.dirtyBitset.size > 0) {
+            this._scheduleBatchCalc();
+          }
         })
         .catch(() => {
           this._calculateBatchOnMainThread(uncachedNumeric, results);
           this.stats.lastResultCount = results.length;
           this.stats.lastDuration = this._now() - startTime;
           wb._emit(Events.FORMULAS_CALCULATED, { results, count: results.length, worker: false });
+          this._workerBusy = false;
+          if (this.dirtyBitset.size > 0) {
+            this._scheduleBatchCalc();
+          }
         });
-      return;
+      return true;
     }
 
     this._calculateBatchOnMainThread(uncachedNumeric, results);
     this.stats.lastResultCount = results.length;
     this.stats.lastDuration = this._now() - startTime;
     wb._emit(Events.FORMULAS_CALCULATED, { results, count: results.length, worker: false });
+    return false;
   }
 
    _calculateBatchOnMainThread(numericKeys, results) {
@@ -506,15 +494,17 @@ export class IncrementalCalculationEngine {
   }
   
   /**
-   * 压缩依赖图（定期执行）
+   * 压缩依赖图（清理无效的依赖关系，可重入）
+   *
+   * 长会话中公式被反复增删时，workbook 的 dependencyMap / reverseDependencyMap
+   * 会累积指向已不存在公式的孤儿条目。本方法按需扫描清理，
+   * 由 _maybeScheduleCompact 节流触发，也可显式调用。
    */
   compactDependencyGraph() {
-    if (this.compacted) return;
-    
-    // 清理无效的依赖关系
     const depMap = this.workbook.dependencyMap;
     const reverseDepMap = this.workbook.reverseDependencyMap;
-    
+    if (!depMap) return;
+
     // 移除不存在的单元格的依赖
     for (const [srcId, dependents] of depMap) {
       const { r, c } = this.workbook._parseKey(srcId);
@@ -543,10 +533,8 @@ export class IncrementalCalculationEngine {
         depMap.delete(srcId);
       }
     }
-    
-    this.compacted = true;
   }
-  
+
   /**
    * 重置计算引擎状态
    */
@@ -554,8 +542,8 @@ export class IncrementalCalculationEngine {
     this.clearCache();
     this.dirtyBitset.clear();
     this.resetStats();
-    this.calcQueue = [];
-    this.isCalculating = false;
+    this._batchesSinceCompact = 0;
+    this._cancelScheduledCompact();
   }
   
   /**
@@ -613,7 +601,9 @@ export class IncrementalCalculationEngine {
   destroy() {
     if (this.batchTimeout) {
       clearTimeout(this.batchTimeout);
+      this.batchTimeout = null;
     }
+    this._cancelScheduledCompact();
     this.clearCache();
   }
 }

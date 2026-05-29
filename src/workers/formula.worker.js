@@ -11,11 +11,10 @@
  * 支持 Transferable Objects 实现零拷贝数据传输
  */
 
-let wasmBridge = null;
+import { BufferWriter, BufferReader, deserializeCellData } from '../core/worker/TransferableSerializer.js';
+import { cellKey, parseCellKey } from '../core/data/CellKey.js';
 
-function makeCellKey(r, c) {
-  return `${Number(r)}-${Number(c)}`;
-}
+let wasmBridge = null;
 
 // ========== 常量定义 ==========
 
@@ -123,41 +122,6 @@ function updateSharedChunks(data) {
 }
 
 // ========== 工具函数 ==========
-
-/**
- * 生成稳定字符串格式的单元格键
- * @param {number} r - 行索引
- * @param {number} c - 列索引
- * @returns {string} 单元格键
- */
-function cellKey(r, c) {
-  return makeCellKey(r, c);
-}
-
-/**
- * 解析单元格键（支持数字和字符串格式）
- * @param {number|string} key - 单元格键
- * @returns {{r: number, c: number}} 行列索引
- */
-function parseCellKey(key) {
-  const str = String(key);
-  if (/^-?\d+$/.test(str)) {
-    const compact = parseInt(str, 10);
-    return {
-      r: compact >>> 16,
-      c: compact & 0xFFFF
-    };
-  }
-
-  const idx = str.indexOf('-');
-  if (idx > 0) {
-    const r = parseInt(str.slice(0, idx), 10);
-    const c = parseInt(str.slice(idx + 1), 10);
-    return Number.isFinite(r) && Number.isFinite(c) ? { r, c } : { r: -1, c: -1 };
-  }
-
-  return { r: -1, c: -1 };
-}
 
 /**
  * 创建 Excel 风格错误值
@@ -1124,7 +1088,7 @@ function handleEvaluateBatch(task) {
   initEvaluator(dataProvider);
 
   // 按拓扑顺序计算
-  const sortedFormulas = topologicalSort(formulas, data);
+  const sortedFormulas = topologicalSort(formulas, data, evaluator.parser);
 
   for (const { cellId, formula } of sortedFormulas) {
     let result = evaluator.evaluate(formula, { stack: [cellId] });
@@ -1145,8 +1109,8 @@ function handleEvaluateBatch(task) {
 /**
  * 拓扑排序
  */
-function topologicalSort(formulas, data) {
-  const parser = new FormulaWorkerParser();
+function topologicalSort(formulas, data, parser) {
+  if (!parser) parser = new FormulaWorkerParser();
   const cellMap = new Map();
   const inDegree = new Map();
   const reverseDeps = new Map(); // 逆向依赖映射: A -> [B, C] 表示 B 和 C 都依赖 A
@@ -1220,156 +1184,34 @@ function topologicalSort(formulas, data) {
 
 // ========== Transferable 序列化辅助 ==========
 
-/**
- * 缓冲区写入器（简化版，用于 Worker 内部）
- */
-class BufferWriter {
-  constructor(initialSize = 64 * 1024) {
-    this.buffer = new ArrayBuffer(initialSize);
-    this.view = new DataView(this.buffer);
-    this.uint8View = new Uint8Array(this.buffer);
-    this.offset = 0;
-    this.textEncoder = new TextEncoder();
-  }
-
-  ensureCapacity(bytes) {
-    const required = this.offset + bytes;
-    if (required > this.buffer.byteLength) {
-      const newSize = Math.max(required * 2, 64 * 1024);
-      const newBuffer = new ArrayBuffer(newSize);
-      new Uint8Array(newBuffer).set(this.uint8View);
-      this.buffer = newBuffer;
-      this.view = new DataView(this.buffer);
-      this.uint8View = new Uint8Array(this.buffer);
-    }
-  }
-
-  writeUint8(value) {
-    this.ensureCapacity(1);
-    this.view.setUint8(this.offset++, value);
-  }
-
-  writeUint32(value) {
-    this.ensureCapacity(4);
-    this.view.setUint32(this.offset, value, true);
-    this.offset += 4;
-  }
-
-  writeFloat64(value) {
-    this.ensureCapacity(8);
-    this.view.setFloat64(this.offset, value, true);
-    this.offset += 8;
-  }
-
-  writeString(str) {
-    const encoded = this.textEncoder.encode(str);
-    this.ensureCapacity(4 + encoded.length);
-    this.writeUint32(encoded.length);
-    this.uint8View.set(encoded, this.offset);
-    this.offset += encoded.length;
-  }
-
-  getTransferable() {
-    return this.buffer.slice(0, this.offset);
-  }
-}
+// BufferWriter, BufferReader, deserializeCellData 均从 TransferableSerializer 统一导入
 
 /**
- * 缓冲区读取器
- */
-class BufferReader {
-  constructor(buffer) {
-    this.buffer = buffer;
-    this.view = new DataView(buffer);
-    this.uint8View = new Uint8Array(buffer);
-    this.offset = 0;
-    this.textDecoder = new TextDecoder();
-  }
-
-  readUint8() {
-    return this.view.getUint8(this.offset++);
-  }
-
-  readUint32() {
-    const value = this.view.getUint32(this.offset, true);
-    this.offset += 4;
-    return value;
-  }
-
-  readFloat64() {
-    const value = this.view.getFloat64(this.offset, true);
-    this.offset += 8;
-    return value;
-  }
-
-  readString() {
-    const length = this.readUint32();
-    const bytes = this.uint8View.slice(this.offset, this.offset + length);
-    this.offset += length;
-    return this.textDecoder.decode(bytes);
-  }
-}
-
-/**
- * 反序列化公式批量计算请求
+ * 反序列化公式批量计算请求（复用 TransferableSerializer.deserializeCellData）
  */
 function deserializeFormulaBatch(buffer) {
   const reader = new BufferReader(buffer);
 
-  // 验证魔数
   const magic = reader.readUint32();
   if (magic !== 0x464F524D) { // "FORM"
     throw new Error('Invalid formula batch data');
   }
 
-  // 读取公式数量
   const formulaCount = reader.readUint32();
   const formulas = [];
-
-  // 读取公式列表
   for (let i = 0; i < formulaCount; i++) {
     const cellId = reader.readString();
     const formula = reader.readString();
     formulas.push({ cellId, formula });
   }
 
-  // 读取数据条目数量
   const dataCount = reader.readUint32();
   const data = {};
-
-  // 读取数据
   for (let i = 0; i < dataCount; i++) {
-    const key = reader.readString();
-    const valueType = reader.readUint8();
-
-    let v;
-    switch (valueType) {
-      case DataType.NULL:
-        v = null;
-        break;
-      case DataType.UNDEFINED:
-        v = undefined;
-        break;
-      case DataType.BOOLEAN:
-        v = reader.readUint8() === 1;
-        break;
-      case DataType.NUMBER:
-        v = reader.readFloat64();
-        break;
-      case DataType.STRING:
-        v = reader.readString();
-        break;
-      default:
-        v = undefined;
-    }
-
-    const hasFormula = reader.readUint8() === 1;
-    const f = hasFormula ? reader.readString() : undefined;
-    const dirty = reader.readUint8() === 1;
-
+    const { key, cell } = deserializeCellData(reader);
     const { r, c } = parseCellKey(key);
     if (r < 0 || c < 0) continue;
-    data[makeCellKey(r, c)] = { v, f, dirty };
+    data[cellKey(r, c)] = cell;
   }
 
   return { formulas, data };
@@ -1528,7 +1370,7 @@ function handleRecalcAll(task) {
   initEvaluator(dataProvider);
 
   // 2. 拓扑排序
-  const sortedFormulas = topologicalSort(formulas, data);
+  const sortedFormulas = topologicalSort(formulas, data, evaluator.parser);
   
   // 3. 顺序计算
   for (const fc of sortedFormulas) {
@@ -1580,7 +1422,19 @@ function isWasmFastPathSupported(formula) {
 }
 
 function setSharedValue(r, c, val) {
-  if (!sharedBufferView) return;
   if (r < 0 || r >= sharedMaxRows || c < 0 || c >= sharedMaxCols) return;
-  sharedBufferView[r * sharedMaxCols + c] = val;
+
+  // 优先连续视图
+  if (sharedBufferView) {
+    sharedBufferView[r * sharedMaxCols + c] = val;
+    return;
+  }
+
+  // 分块视图
+  if (sharedChunks.size > 0) {
+    const chunkIdx = Math.floor(r / sharedChunkSize);
+    const view = sharedChunks.get(chunkIdx);
+    if (!view) return;
+    view[(r % sharedChunkSize) * sharedMaxCols + c] = val;
+  }
 }

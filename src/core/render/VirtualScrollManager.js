@@ -459,9 +459,6 @@ export class VirtualScrollManager {
   getIncrementalUpdateStats() {
     const stats = this.updateStats;
     const total = stats.totalUpdates;
-    const avgInc = stats.incrementalUpdateTimes.length > 0 
-      ? stats.incrementalUpdateTimes.reduce((a, b) => a + b, 0) / stats.incrementalUpdateTimes.length 
-      : 0;
     return {
       total,
       incremental: stats.incrementalUpdates,
@@ -475,8 +472,7 @@ export class VirtualScrollManager {
       totalRemovedRows: stats.removedRowCount,
       totalAddedCols: stats.addedColCount,
       totalRemovedCols: stats.removedColCount,
-      hitRate: total > 0 ? (stats.cacheHits / total * 100).toFixed(2) + '%' : '0%',
-      avgTime: avgInc.toFixed(2) + 'ms'
+      hitRate: total > 0 ? (stats.cacheHits / total * 100).toFixed(2) + '%' : '0%'
     };
   }
 
@@ -517,9 +513,7 @@ export class VirtualScrollManager {
       addedRowCount: 0,
       removedRowCount: 0,
       addedColCount: 0,
-      removedColCount: 0,
-      incrementalUpdateTimes: [],
-      fullUpdateTimes: []
+      removedColCount: 0
     };
   }
   
@@ -596,14 +590,12 @@ export class VirtualScrollManager {
     this.updateStats.removedRowCount += changes.totalRemovedRows;
     this.updateStats.addedColCount += changes.totalAddedCols;
     this.updateStats.removedColCount += changes.totalRemovedCols;
-    this.updateStats.incrementalUpdateTimes.push(0); // 占位
   }
-  
+
   _recordFullUpdate() {
     this.updateStats.totalUpdates++;
     this.updateStats.fullUpdates++;
     this.updateStats.cacheMisses++;
-    this.updateStats.fullUpdateTimes.push(0); // 占位
   }
   
   // ========================================

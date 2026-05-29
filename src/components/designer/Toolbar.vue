@@ -125,7 +125,8 @@
 			</div>
 		</ToolbarGroup>
 		<ToolbarGroup v-if="isToolbarVisible('freeze')" label="冻结" icon="pin" :compact="toolbarGroups.freeze.compact">
-			<div class="popover-wrapper">
+			<!-- 非 compact 模式 -->
+			<div v-if="!toolbarGroups.freeze.compact" class="popover-wrapper">
 				<button class="vue-canvas-sheet-tool-btn" title="冻结窗格" @click.stop="togglePopover('freeze')">
 					<SvgIcon name="pin" />
 				</button>
@@ -149,15 +150,45 @@
 						</div>
 						<div class="freeze-divider"></div>
 						<div class="freeze-custom">
-							<div class="border-top">
+							<div class="freeze-row">
 								<span>行</span>
 								<input type="number" class="native-number-input" :value="freezeRowCount" min="0" max="10" @change="$emit('update:freezeRowCount', Number($event.target.value))" />
 							</div>
-							<div class="border-top">
+							<div class="freeze-row">
 								<span>列</span>
 								<input type="number" class="native-number-input" :value="freezeColCount" min="0" max="10" @change="$emit('update:freezeColCount', Number($event.target.value))" />
 							</div>
 						</div>
+					</div>
+				</div>
+			</div>
+			<!-- compact 模式：直接展示二级冻结菜单，无需二次点击 -->
+			<div v-else class="vue-canvas-sheet-freeze-menu" style="width: 100%;">
+				<div class="freeze-menu-item" @click="$emit('command', { type: 'freeze-pane' }); closeAllPopovers(true)">
+					<SvgIcon name="pin" />
+					<span>冻结窗格 (当前选中)</span>
+				</div>
+				<div class="freeze-menu-item" @click="$emit('command', { type: 'freeze-top' }); closeAllPopovers(true)">
+					<SvgIcon name="border-top" />
+					<span>冻结首行</span>
+				</div>
+				<div class="freeze-menu-item" @click="$emit('command', { type: 'freeze-first-col' }); closeAllPopovers(true)">
+					<SvgIcon name="border-left" />
+					<span>冻结首列</span>
+				</div>
+				<div class="freeze-menu-item" @click="$emit('command', { type: 'unfreeze' }); closeAllPopovers(true)">
+					<SvgIcon name="close" />
+					<span>取消冻结</span>
+				</div>
+				<div class="freeze-divider"></div>
+				<div class="freeze-custom">
+					<div class="freeze-row">
+						<span>行</span>
+						<input type="number" class="native-number-input" :value="freezeRowCount" min="0" max="10" @change="$emit('update:freezeRowCount', Number($event.target.value))" />
+					</div>
+					<div class="freeze-row">
+						<span>列</span>
+						<input type="number" class="native-number-input" :value="freezeColCount" min="0" max="10" @change="$emit('update:freezeColCount', Number($event.target.value))" />
 					</div>
 				</div>
 			</div>
@@ -243,10 +274,13 @@ export default {
 		document.removeEventListener('close-all-popovers', this.handleCloseAllPopoversEvent);
 	},
 	methods: {
-		closeAllPopovers() {
+		closeAllPopovers(forceAll = false) {
 			this.showBorderMenu = false;
 			this.showThemeMenu = false;
 			this.showFreezeMenu = false;
+			if (forceAll) {
+				document.dispatchEvent(new CustomEvent('close-all-popovers', { detail: null }));
+			}
 		},
 		handleCloseAllPopoversEvent(e) {
 			if (e.detail !== this) {
@@ -434,31 +468,6 @@ export default {
 		box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
 		z-index: 2000;
 		padding: 12px;
-	}
-
-	.export-menu {
-		padding: 4px 0;
-		min-width: 160px;
-	}
-
-	.export-menu-item {
-		padding: 6px 16px;
-		font-size: 13px;
-		color: #606266;
-		cursor: pointer;
-		white-space: nowrap;
-
-		&:hover {
-			background: #f5f7fa;
-			color: #409eff;
-		}
-	}
-
-	.vue-canvas-sheet-divider {
-		width: 1px;
-		height: 20px;
-		background: #e1e1e1;
-		margin: 0 10px;
 	}
 
 	:deep(.vue-canvas-sheet-tool-btn) {

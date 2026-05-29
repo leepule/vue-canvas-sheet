@@ -42,51 +42,6 @@ import { cellKey } from './CellKey.js';
  */
 
 /**
- * Cell 紧凑编码器
- * 根据单元格实际内容选择最优存储格式，减少内存占用
- */
-class CompactCellEncoder {
-  constructor() {
-    this.TYPE_VALUE = 0;      // 纯值
-  }
-
-  encode(cell) {
-    if (!cell || typeof cell !== 'object') {
-      return cell;
-    }
-
-    // 确保对象引用的稳定性，以兼容 Workbook 的对象池和依赖追踪
-    return cell;
-  }
-
-  decode(encoded) {
-    if (encoded === undefined) {
-      return encoded;
-    }
-
-    // 原始值包装回 Cell 对象
-    if (typeof encoded !== 'object' || encoded === null) {
-      return { v: encoded };
-    }
-
-    // 如果存的是对象引用，直接返回
-    return encoded;
-  }
-
-  getValue(encoded) {
-    if (encoded === null || encoded === undefined) {
-      return encoded;
-    }
-
-    if (typeof encoded !== 'object') {
-      return encoded;
-    }
-
-    return encoded.v;
-  }
-}
-
-/**
  * 稀疏矩阵存储类
  * 采用单层 Map 存储和列倒序索引结构
  */
@@ -94,13 +49,15 @@ export class SparseMatrix {
   constructor(options = {}) {
     this._rows = new Map();
     this._colIndex = new Map();
+    // 列脏标记：乱序插入时延迟排序，避免每次 splice O(N)。
+    // 仅在 _updateColIndex 删除路径需要二分查找时才触发 _ensureColSorted。
+    this._dirtyCols = new Set();
     this._size = 0;
     this._version = 0;
     this._bounds = { minRow: 0, maxRow: -1, minCol: 0, maxCol: -1 };
     this._boundsDirty = false;
-    this._encoder = new CompactCellEncoder();
     this.onDeleteCell = options.onDeleteCell || null;
-    
+
     this._stats = {
       compactCount: 0,
       fullCount: 0,
@@ -123,21 +80,15 @@ export class SparseMatrix {
   get(row, col) {
     const rowMap = this._rows.get(row);
     if (!rowMap) return undefined;
-    
-    const encoded = rowMap.get(col);
-    if (encoded === undefined) return undefined;
-    
-    return this._encoder.decode(encoded);
+    return rowMap.get(col);
   }
 
   getValue(row, col) {
     const rowMap = this._rows.get(row);
     if (!rowMap) return undefined;
-    
-    const encoded = rowMap.get(col);
-    if (encoded === undefined) return undefined;
-    
-    return this._encoder.getValue(encoded);
+    const cell = rowMap.get(col);
+    if (cell === undefined) return undefined;
+    return (cell && typeof cell === 'object') ? cell.v : cell;
   }
 
   set(row, col, value, skipOnDelete = false) {
@@ -146,32 +97,28 @@ export class SparseMatrix {
       return;
     }
 
-    const encoded = this._encoder.encode(value);
-    
-    if (encoded === null || encoded === undefined || typeof encoded !== 'object') {
-      this._stats.compactCount++;
-    } else {
+    if (value && typeof value === 'object') {
       this._stats.fullCount++;
+    } else {
+      this._stats.compactCount++;
     }
-    
+
     let rowMap = this._rows.get(row);
     const isExisting = rowMap && rowMap.has(col);
-    
+
     if (!rowMap) {
       rowMap = new Map();
       this._rows.set(row, rowMap);
     }
-    
+
     if (isExisting && !skipOnDelete && this.onDeleteCell) {
-      const oldEncoded = rowMap.get(col);
-      // 触发删除回调（用于对象池回收）
-      const oldCell = this._encoder.decode(oldEncoded);
+      const oldCell = rowMap.get(col);
       if (oldCell) {
         this.onDeleteCell(oldCell, row, col);
       }
     }
-    
-    rowMap.set(col, encoded);
+
+    rowMap.set(col, value);
     
     if (!isExisting) {
       this._updateColIndex(col, row, true);
@@ -184,40 +131,49 @@ export class SparseMatrix {
 
   _updateColIndex(col, row, isAdd) {
     let indexList = this._colIndex.get(col);
-    
+
     if (isAdd) {
       if (!indexList) {
         indexList = [];
         this._colIndex.set(col, indexList);
       }
-      
-      // 性能优化：针对顺序加载（常见于全量导入）进行尾部探测，复杂度从 O(N) 降为 O(1)
+
+      // 调用方 set() 已通过 isExisting 守住重复（同一 (row,col) 不会二次进入），
+      // 因此这里不再需要二分去重，关注点仅是维持 _colIndex 有序。
       if (indexList.length === 0 || row > indexList[indexList.length - 1]) {
+        // 顺序加载快路径
         indexList.push(row);
       } else {
-        const pos = this._binarySearch(indexList, row);
-        if (pos === -1) {
-          // 使用二分查找定位插入位置，避免 linear scan
-          let low = 0, high = indexList.length;
-          while (low < high) {
-            let mid = (low + high) >>> 1;
-            if (indexList[mid] < row) low = mid + 1;
-            else high = mid;
-          }
-          indexList.splice(low, 0, row);
-        }
+        // 乱序插入：仅 push 并标记列脏，把 O(N) splice 推迟到删除路径需要二分时执行
+        indexList.push(row);
+        this._dirtyCols.add(col);
       }
     } else {
       if (indexList) {
+        this._ensureColSorted(col);
         const pos = this._binarySearch(indexList, row);
         if (pos !== -1) {
           indexList.splice(pos, 1);
           if (indexList.length === 0) {
             this._colIndex.delete(col);
+            this._dirtyCols.delete(col);
           }
         }
       }
     }
+  }
+
+  /**
+   * 若 col 在乱序插入后被标记为脏，则一次性排序，复杂度 O(N log N)，
+   * 摊还到大量乱序插入上比每次 splice O(N) 显著更优。
+   */
+  _ensureColSorted(col) {
+    if (!this._dirtyCols.has(col)) return;
+    const list = this._colIndex.get(col);
+    if (list && list.length > 1) {
+      list.sort((a, b) => a - b);
+    }
+    this._dirtyCols.delete(col);
   }
 
   _binarySearch(arr, target) {
@@ -253,7 +209,7 @@ export class SparseMatrix {
 
     if (!skipOnDelete && this.onDeleteCell) {
       const encoded = rowMap.get(col);
-      const cell = this._encoder.decode(encoded);
+      const cell = encoded;
       this.onDeleteCell(cell, row, col);
     }
 
@@ -290,7 +246,7 @@ export class SparseMatrix {
     
     const result = new Map();
     for (const [col, encoded] of rowMap) {
-      result.set(col, this._encoder.decode(encoded));
+      result.set(col, encoded);
     }
     return result;
   }
@@ -305,7 +261,7 @@ export class SparseMatrix {
       if (rowMap) {
         const encoded = rowMap.get(col);
         if (encoded !== undefined) {
-          result.set(row, this._encoder.decode(encoded));
+          result.set(row, encoded);
         }
       }
     }
@@ -319,7 +275,7 @@ export class SparseMatrix {
     const count = rowMap.size;
     if (this.onDeleteCell) {
       for (const [col, encoded] of rowMap) {
-        this.onDeleteCell(this._encoder.decode(encoded), row, col);
+        this.onDeleteCell(encoded, row, col);
       }
     }
 
@@ -346,7 +302,7 @@ export class SparseMatrix {
         if (rowMap) {
           const encoded = rowMap.get(col);
           if (encoded !== undefined) {
-            this.onDeleteCell(this._encoder.decode(encoded), row, col);
+            this.onDeleteCell(encoded, row, col);
           }
         }
       }
@@ -363,10 +319,11 @@ export class SparseMatrix {
     }
 
     this._colIndex.delete(col);
+    this._dirtyCols.delete(col);
     this._size -= count;
     this._version++;
     this._boundsDirty = true;
-    
+
     return count;
   }
 
@@ -399,11 +356,33 @@ export class SparseMatrix {
   }
 
   iterateRange(startRow, startCol, endRow, endCol, callback) {
+    const colRangeWidth = endCol - startCol + 1;
+
+    // 列范围窄时利用 _colIndex 跳过无关列，避免遍历所有行
+    if (colRangeWidth < this._colIndex.size) {
+      for (let c = startCol; c <= endCol; c++) {
+        const rowList = this._colIndex.get(c);
+        if (!rowList) continue;
+        for (let i = 0, len = rowList.length; i < len; i++) {
+          const r = rowList[i];
+          if (r < startRow) continue;
+          if (r > endRow) break; // 行列表有序，后续都超出范围
+          const rowMap = this._rows.get(r);
+          if (rowMap) {
+            const encoded = rowMap.get(c);
+            if (encoded !== undefined) callback(r, c, encoded);
+          }
+        }
+      }
+      return;
+    }
+
+    // 列范围宽时遍历行，跳过不匹配的行
     for (const [row, rowMap] of this._rows) {
       if (row < startRow || row > endRow) continue;
       for (const [col, encoded] of rowMap) {
         if (col >= startCol && col <= endCol) {
-          callback(row, col, this._encoder.decode(encoded));
+          callback(row, col, encoded);
         }
       }
     }
@@ -412,33 +391,33 @@ export class SparseMatrix {
   forEach(callback) {
     for (const [row, rowMap] of this._rows) {
       for (const [col, encoded] of rowMap) {
-        callback(row, col, this._encoder.decode(encoded));
+        callback(row, col, encoded);
       }
     }
   }
 
-  entries() {
-    const result = [];
-    this.forEach((r, c, cell) => {
-      result.push({ r, c, cell });
-    });
-    return result;
+  *entries() {
+    for (const [row, rowMap] of this._rows) {
+      for (const [col, cell] of rowMap) {
+        yield { r: row, c: col, cell };
+      }
+    }
   }
 
-  keys() {
-    const result = [];
-    this.forEach((r, c) => {
-      result.push({ r, c });
-    });
-    return result;
+  *keys() {
+    for (const [row, rowMap] of this._rows) {
+      for (const col of rowMap.keys()) {
+        yield { r: row, c: col };
+      }
+    }
   }
 
-  values() {
-    const result = [];
-    this.forEach((r, c, cell) => {
-      result.push(cell);
-    });
-    return result;
+  *values() {
+    for (const [row, rowMap] of this._rows) {
+      for (const cell of rowMap.values()) {
+        yield cell;
+      }
+    }
   }
 
   rowIndices() {
@@ -488,6 +467,7 @@ export class SparseMatrix {
     }
     this._rows.clear();
     this._colIndex.clear();
+    this._dirtyCols.clear();
     this._size = 0;
     this._version++;
     this._bounds = { minRow: 0, maxRow: -1, minCol: 0, maxCol: -1 };

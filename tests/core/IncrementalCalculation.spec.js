@@ -36,7 +36,7 @@ describe('IncrementalCalculationEngine', () => {
 
     workbook.setCell(0, 1, { v: '=SUM(A:A)' });
     workbook.calcEngine.dirtyBitset.clear();
-    workbook.calcEngine.markDirty(workbook._cellKey(999, 0));
+    workbook.calcEngine.markDirtyRC(999, 0);
 
     const { queue } = workbook.calcEngine._collectDirtyGraph();
 

@@ -28,7 +28,7 @@ export function getSparseBounds(workbook) {
 
 export function getWorkbookEntries(workbook) {
   if (workbook && workbook._dataMatrix && typeof workbook._dataMatrix.entries === 'function') {
-    return workbook._dataMatrix.entries().map(({ r, c, cell }) => ({ r, c, cell }));
+    return Array.from(workbook._dataMatrix.entries());
   }
   const data = workbook?.toJSON?.().data || {};
   const out = [];

@@ -138,6 +138,12 @@ export default {
         return;
       }
 
+      if (y < this.colHeaderHeight && x < this.rowHeaderWidth) {
+        // 左上角全选方块
+        this.workbook.setSelection(0, 0, this.workbook.rowCount - 1, this.workbook.colCount - 1);
+        return;
+      }
+
       if (y < this.colHeaderHeight && x > this.rowHeaderWidth) {
         const c = this.getColAt(x);
         if (c >= 0) {
@@ -169,12 +175,15 @@ export default {
       }
     },
 
-    // Throttle wrapper
+    // Throttle wrapper - always keeps the latest event so coordinates are never stale
     handleThrottledMouseMove(e) {
+        this._lastMoveEvent = e;
         if (this._ticking) return;
         this._ticking = true;
         requestAnimationFrame(() => {
-            this.handleMouseMove(e);
+            const evt = this._lastMoveEvent;
+            this._lastMoveEvent = null;
+            this.handleMouseMove(evt);
             this._ticking = false;
         });
     },
@@ -449,6 +458,14 @@ export default {
           if (e.ctrlKey || e.metaKey) {
             e.preventDefault();
             this.$emit('trigger-find');
+            return;
+          }
+          break;
+        case 'a':
+        case 'A':
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            this.workbook.setSelection(0, 0, this.workbook.rowCount - 1, this.workbook.colCount - 1);
             return;
           }
           break;

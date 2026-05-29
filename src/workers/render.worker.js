@@ -129,28 +129,6 @@ function drawBatchedBackgrounds(bgGroups) {
 }
 
 /**
- * 批量绘制网格线
- */
-function drawBatchedGridLines(gridLines, borderColor) {
-  if (!gridLines.length) return;
-  
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = borderColor;
-  ctx.beginPath();
-  
-  for (let i = 0; i < gridLines.length; i += 4) {
-    // 水平线
-    ctx.moveTo(gridLines[i] + 0.5, gridLines[i+1] + 0.5);
-    ctx.lineTo(gridLines[i] + gridLines[i+2] - 0.5, gridLines[i+1] + 0.5);
-    // 垂直线
-    ctx.moveTo(gridLines[i] + 0.5, gridLines[i+1] + 0.5);
-    ctx.lineTo(gridLines[i] + 0.5, gridLines[i+1] + gridLines[i+3] - 0.5);
-  }
-  
-  ctx.stroke();
-}
-
-/**
  * 绘制单行文本
  */
 function drawSingleLineText(text, x, y, w, h, padding, align, valign, fSize, color, style) {
@@ -291,7 +269,7 @@ function drawBatchedTexts(cellDataList, theme) {
   for (const cellData of cellDataList) {
     if (!cellData.text) continue;
     
-    const { text, x, y, w, h } = cellData;
+    const { text, x, y, w, h, clip } = cellData;
     const s = text.style || {};
 
     // 动态计算样式属性（原在主线程 prepareRenderDataForWorker 中执行）
@@ -301,6 +279,15 @@ function drawBatchedTexts(cellDataList, theme) {
     const align = text.align || 'left';
     const valign = text.valign || 'middle';
     const fSize = s.fontSize ? s.fontSize + 'px' : defaultFontSize;
+
+    // 应用区域的物理裁剪（例如冻结区/滚动区边界，防止滚动主体的单元格因部分露出而在Worker中把文字超出绘制到冻结区）
+    const hasGlobalClip = !!clip;
+    if (hasGlobalClip) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(clip.x, clip.y, clip.w, clip.h);
+      ctx.clip();
+    }
 
     // 性能优化：检查是否真的需要裁剪
     // 自动换行文本由于高度不确定，始终建议裁剪
@@ -348,6 +335,10 @@ function drawBatchedTexts(cellDataList, theme) {
     }
 
     if (needsClip) {
+      ctx.restore();
+    }
+
+    if (hasGlobalClip) {
       ctx.restore();
     }
   }
@@ -431,41 +422,21 @@ function drawRowHeader(r, y, w, h, theme, selection) {
 }
 
 /**
- * 绘制选区
- */
-function drawSelection(ctx, sel, active, theme, ox, oy, wb) {
-  if (!sel) return;
-
-  const getRect = (r1, c1, r2, c2) => {
-    // 这里需要从主线程传入位置信息
-    return { x: 0, y: 0, w: 0, h: 0 }; // 简化处理
-  };
-
-  ctx.fillStyle = theme.selectionBg;
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = theme.selectionBorder;
-
-  // 选区由主线程绘制，这里只处理简单的覆盖层
-}
-
-/**
  * 执行渲染命令
  */
 function executeRender(data) {
-  const { 
-    type, 
-    cellDataList, 
-    borderBatch, 
-    bgGroups, 
-    gridLines,
+  const {
+    type,
+    cellDataList,
+    borderBatch,
+    bgGroups,
     theme,
-    width, 
+    width,
     height,
     renderRect,
     colHeaders,
     rowHeaders,
-    frozenLines,
-    selectionData
+    frozenLines
   } = data;
 
   if (!ctx) {
@@ -493,17 +464,22 @@ function executeRender(data) {
     ctx.clip();
   }
 
+  // 冻结区域填充不透明底色，避免滚动时主体内容透过冻结单元格显示
+  const frozenRegions = data.frozenRegions;
+  const frozenBg = theme && theme.frozenBg;
+  if (frozenRegions && frozenRegions.length && frozenBg) {
+    ctx.fillStyle = frozenBg;
+    for (const region of frozenRegions) {
+      ctx.fillRect(region.x, region.y, region.w, region.h);
+    }
+  }
+
   // 1. 批量绘制背景
   if (bgGroups) {
     drawBatchedBackgrounds(bgGroups);
   }
 
-  // 2. 批量绘制网格线
-  if (!data.skipGrid && gridLines && gridLines.length) {
-    drawBatchedGridLines(gridLines, theme.borderColor);
-  }
-
-  // 3. 批量绘制文本
+  // 2. 批量绘制文本
   if (cellDataList && cellDataList.length) {
     drawBatchedTexts(cellDataList, theme);
   }
@@ -546,11 +522,10 @@ function executeRender(data) {
   }
 
   // 7. 绘制左上角全选方块 (最高优先级)
+  // 不绘制 strokeRect，避免与表头分隔线重叠产生双线
   if (!data.skipGrid) {
     ctx.fillStyle = theme.headerBg;
     ctx.fillRect(0, 0, RW, CH);
-    ctx.strokeStyle = theme.borderColor;
-    ctx.strokeRect(0.5, 0.5, RW, CH);
   }
 
   // 8. 绘制冻结线

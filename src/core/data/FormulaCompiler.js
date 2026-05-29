@@ -24,16 +24,15 @@ export class FormulaCompiler {
   compile(formula, context, baseR = 0, baseC = 0) {
     // 性能爆发点：使用 R1C1 标准化作为缓存键
     // 这使得逻辑相同但引用不同的公式 (如 A1+B1, A2+B2) 可以共享同一个编译函数
-    const r1c1Key = this._normalizeToR1C1(formula, context, baseR, baseC);
-    if (this.cache.has(r1c1Key)) return this.cache.get(r1c1Key);
+    const { r1c1, tokens } = this._normalizeToR1C1(formula, context, baseR, baseC);
+    if (this.cache.has(r1c1)) return this.cache.get(r1c1);
 
-    const tokens = this._tokenize(formula);
     const expression = this._buildExpression(tokens, context, baseR, baseC);
-    
+
     try {
       // 编译为高性能模板函数 (ctx, baseR, baseC)
       const compiledFn = new Function('ctx', 'baseR', 'baseC', `try { return ${expression}; } catch(e) { return "#ERROR!"; }`);
-      this.cache.set(r1c1Key, compiledFn);
+      this.cache.set(r1c1, compiledFn);
       return compiledFn;
     } catch (e) {
       console.error('Formula Compile Error:', e, expression);
@@ -45,15 +44,16 @@ export class FormulaCompiler {
    * 将公式转化为 R1C1 相对引用格式 (归一化)
    */
   toR1C1(formula, context, baseR, baseC) {
-    return this._normalizeToR1C1(formula, context, baseR, baseC);
+    return this._normalizeToR1C1(formula, context, baseR, baseC).r1c1;
   }
 
   /**
-   * 将公式标准化为 R1C1 格式作为缓存键
+   * 将公式标准化为 R1C1 格式作为缓存键，同时返回 tokens 避免重复分词
    * @private
+   * @returns {{ r1c1: string, tokens: Array }}
    */
   _normalizeToR1C1(formula, context, baseR, baseC) {
-    if (!context) return formula;
+    if (!context) return { r1c1: formula, tokens: this._tokenize(formula) };
     const tokens = this._tokenize(formula);
     let r1c1 = '';
     
@@ -78,7 +78,7 @@ export class FormulaCompiler {
         r1c1 += token.value;
       }
     }
-    return r1c1;
+    return { r1c1, tokens };
   }
 
   /**

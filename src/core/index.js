@@ -8,4 +8,3 @@ export { Store, StoreManager } from './data/Store.js';
 export { EventEmitter } from './events/EventEmitter.js';
 export { PluginRegistry, createPlugin, HookTypes } from './plugin/PluginRegistry.js';
 export { SharedValueStore } from './data/SharedValueStore.js';
-export { TransferableSerializer } from './worker/TransferableSerializer.js';

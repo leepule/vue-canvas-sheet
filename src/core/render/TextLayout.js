@@ -13,8 +13,9 @@ class CacheNode {
 }
 
 export class LRUCache {
-  constructor(maxSize) {
+  constructor(maxSize, onEvict) {
     this.maxSize = maxSize;
+    this.onEvict = onEvict || null;
     this.cache = new Map();
     this.head = new CacheNode(null, null);
     this.tail = new CacheNode(null, null);
@@ -81,6 +82,7 @@ export class LRUCache {
     if (node !== this.head) {
       this._removeNode(node);
       this.cache.delete(node.key);
+      if (this.onEvict) this.onEvict(node.key, node.value);
     }
   }
 }
