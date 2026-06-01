@@ -199,19 +199,21 @@ export class CellPool extends ObjectPool {
     this._stylePool = new ObjectPool(
       () => ({}),
       (s) => {
-        // 清空样式对象但保留对象引用
-        for (const key in s) {
+        // 清空样式对象：delete 移除 key，防止 key 集合无限膨胀
+        // border 保留空对象结构（清空其属性），避免下游访问 .border.xxx 报错
+        const keys = Object.keys(s);
+        for (let i = 0; i < keys.length; i++) {
+          const key = keys[i];
           if (key === 'border') {
-            // border 是嵌套对象，需要特殊处理
             const border = s.border;
             if (border) {
-              border.top = undefined;
-              border.bottom = undefined;
-              border.left = undefined;
-              border.right = undefined;
+              const borderKeys = Object.keys(border);
+              for (let j = 0; j < borderKeys.length; j++) {
+                delete border[borderKeys[j]];
+              }
             }
           } else {
-            s[key] = undefined;
+            delete s[key];
           }
         }
       },

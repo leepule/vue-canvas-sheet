@@ -27,11 +27,7 @@ export default {
     };
   },
   mounted() {
-    this.$nextTick(() => {
-      if (this.$refs.tableDesigner && this.$refs.tableDesigner.workbook) {
-        window.__workbook__ = this.$refs.tableDesigner.workbook;
-      }
-    });
+    // window.__wb 已在 TableDesigner created() 中自动挂载
   },
 };
 </script>

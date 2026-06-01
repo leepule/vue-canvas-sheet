@@ -7,6 +7,8 @@ tests/performance/.artifacts/
 .rustup/
 .rustup_home/
 .gemini/
+.codegraph/
+.claude/
 src/wasm/target/
 .zread
 dist

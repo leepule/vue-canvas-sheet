@@ -500,9 +500,63 @@ export class SparseMatrix {
   }
 
   setCells(cells) {
+    if (cells.length === 0) return;
+
+    let sizeDelta = 0;
+
+    // 第一遍：写入数据 + 统计新增单元格 + 更新 bounds
     for (const { r, c, cell } of cells) {
-      this.set(r, c, cell);
+      let rowMap = this._rows.get(r);
+      const isExisting = rowMap && rowMap.has(c);
+
+      if (!rowMap) {
+        rowMap = new Map();
+        this._rows.set(r, rowMap);
+      }
+
+      if (!isExisting) {
+        sizeDelta++;
+        // 累积 bounds（延迟一次性更新）
+        if (this._size + sizeDelta === 1) {
+          this._bounds = { minRow: r, maxRow: r, minCol: c, maxCol: c };
+        } else {
+          if (r < this._bounds.minRow) this._bounds.minRow = r;
+          if (r > this._bounds.maxRow) this._bounds.maxRow = r;
+          if (c < this._bounds.minCol) this._bounds.minCol = c;
+          if (c > this._bounds.maxCol) this._bounds.maxCol = c;
+        }
+      }
+
+      if (isExisting && this.onDeleteCell) {
+        const oldCell = rowMap.get(c);
+        if (oldCell) this.onDeleteCell(oldCell, r, c);
+      }
+
+      rowMap.set(c, cell);
     }
+
+    // 第二遍：重建 _colIndex（比逐个 _updateColIndex + splice 高效）
+    const newColIndex = new Map();
+    for (const [row, rowMap] of this._rows) {
+      for (const col of rowMap.keys()) {
+        let list = newColIndex.get(col);
+        if (!list) {
+          list = [];
+          newColIndex.set(col, list);
+        }
+        list.push(row);
+      }
+    }
+    // 排序每个列的行列表
+    for (const list of newColIndex.values()) {
+      if (list.length > 1) list.sort((a, b) => a - b);
+    }
+    this._colIndex = newColIndex;
+    this._dirtyCols.clear();
+
+    // 批量更新 size 和 version
+    this._size += sizeDelta;
+    this._version++;
   }
 
   toObject(useCompactKey = true) {

@@ -6,7 +6,7 @@
 export class HistoryOptimizer {
   constructor(historyManager) {
     this.history = historyManager;
-    
+
     // 压缩配置
     this.config = {
       memoryThreshold: 5 * 1024 * 1024,  // 5MB内存阈值
@@ -14,11 +14,11 @@ export class HistoryOptimizer {
       minMergeInterval: 100,                // 最小合并间隔(ms)
       maxMergeWindow: 2000                  // 最大合并窗口(ms)
     };
-    
-    // 内存使用统计
+
+    // 增量内存追踪（O(1) 查询，避免每次全量扫描）
     this.memoryUsage = 0;
     this.lastMemoryCheck = 0;
-    
+
     // 合并策略映射
     this.mergeStrategies = new Map([
       ['set-cell', this._mergeSetCell.bind(this)],
@@ -27,63 +27,68 @@ export class HistoryOptimizer {
       ['set-row-height', this._mergeNumeric.bind(this)]
     ]);
   }
-  
+
+  // ─── 增量内存追踪 API ───────────────────────────────────
+
+  /**
+   * 命令入栈时调用：累加估算大小
+   */
+  trackPush(cmd) {
+    this.memoryUsage += this._estimateCommandSize(cmd);
+  }
+
+  /**
+   * 命令出栈时调用：扣减估算大小
+   */
+  trackRemove(cmd) {
+    this.memoryUsage -= this._estimateCommandSize(cmd);
+    if (this.memoryUsage < 0) this.memoryUsage = 0;
+  }
+
+  /**
+   * 整个栈清空时调用：扣减栈内所有命令的大小
+   */
+  trackClearStack(stack) {
+    for (const cmd of stack) {
+      this.memoryUsage -= this._estimateCommandSize(cmd);
+    }
+    if (this.memoryUsage < 0) this.memoryUsage = 0;
+  }
+
+  // ─── 压缩入口 ───────────────────────────────────────────
+
   /**
    * 智能压缩历史记录
    */
   compressHistory() {
     const now = Date.now();
-    
-    // 检查内存使用
-    if (this._shouldCompressByMemory()) {
+
+    // O(1) 内存检查（增量追踪，无需遍历）
+    if (this.memoryUsage > this.config.memoryThreshold) {
       this._compressByMemory();
       return;
     }
-    
+
     // 检查条目数量
     if (this.history.undoStack.length > this.config.compressionThreshold) {
       this._compressBySize();
     }
-    
+
     // 定期压缩（每30秒）
     if (now - this.lastMemoryCheck > 30000) {
       this._optimizeMemory();
       this.lastMemoryCheck = now;
     }
   }
-  
-  /**
-   * 检查是否应该基于内存压缩
-   */
-  _shouldCompressByMemory() {
-    // 估算内存使用
-    const estimatedMemory = this._estimateMemoryUsage();
-    return estimatedMemory > this.config.memoryThreshold;
-  }
-  
-  /**
-   * 估算内存使用
-   */
-  _estimateMemoryUsage() {
-    let total = 0;
-    
-    for (const cmd of this.history.undoStack) {
-      total += this._estimateCommandSize(cmd);
-    }
-    
-    for (const cmd of this.history.redoStack) {
-      total += this._estimateCommandSize(cmd);
-    }
-    
-    return total;
-  }
-  
+
+  // ─── 估算逻辑 ───────────────────────────────────────────
+
   /**
    * 估算命令大小（字节）
    */
   _estimateCommandSize(cmd) {
     let size = 100; // 基础开销
-    
+
     if (cmd.oldValue) {
       size += this._estimateValueSize(cmd.oldValue);
     }
@@ -98,10 +103,10 @@ export class HistoryOptimizer {
         size += this._estimateCommandSize(subCmd);
       }
     }
-    
+
     return size;
   }
-  
+
   _estimateValueSize(val) {
     if (val === null || val === undefined) return 0;
     if (typeof val === 'string') return val.length * 2; // UTF-16
@@ -110,16 +115,26 @@ export class HistoryOptimizer {
     if (typeof val === 'object') return JSON.stringify(val).length * 2;
     return 100;
   }
-  
+
+  // ─── 内部压缩方法 ───────────────────────────────────────
+
   /**
-   * 基于内存压缩
+   * 清空 redo 栈并追踪内存扣减
+   */
+  _clearRedoStack() {
+    this.trackClearStack(this.history.redoStack);
+    this.history.redoStack.clear();
+  }
+
+  /**
+   * 基于内存压缩：保留最近 50 条，逐个 shift 并追踪扣减
    */
   _compressByMemory() {
-    // 保留最近 50 个：直接 shift 多余项；RingBuffer.shift 是 O(1)
     while (this.history.undoStack.length > 50) {
-      this.history.undoStack.shift();
+      const removed = this.history.undoStack.shift();
+      this.trackRemove(removed);
     }
-    this.history.redoStack.clear();
+    this._clearRedoStack();
   }
 
   /**
@@ -144,8 +159,12 @@ export class HistoryOptimizer {
       }
     }
 
+    // 先扣减旧栈内存，再整体替换，最后累加新栈内存
+    this.trackClearStack(undoStack);
     undoStack.replace(compressed);
-    this.history.redoStack.clear();
+    for (const cmd of compressed) this.trackPush(cmd);
+
+    this._clearRedoStack();
   }
 
   /**
@@ -245,7 +264,7 @@ export class HistoryOptimizer {
   _optimizeMemory() {
     // 清理redo栈（超过10条就清空）
     if (this.history.redoStack.length > 10) {
-      this.history.redoStack.clear();
+      this._clearRedoStack();
     }
 
     // 深度克隆大型命令，释放引用

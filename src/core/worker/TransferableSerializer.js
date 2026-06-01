@@ -269,11 +269,16 @@ export class BufferWriter {
   }
 
   /**
-   * 获取可转移的缓冲区
+   * 获取可转移的缓冲区（零拷贝）
+   *
+   * 直接返回底层 ArrayBuffer 供 postMessage transfer，
+   * 避免 slice() 产生的内存拷贝。接收方通过序列化格式中的
+   * 长度字段确定有效数据范围，不依赖 buffer.byteLength。
+   *
+   * 注意：调用后底层 buffer 会被 detach，Writer 不可再使用。
    */
   getTransferable() {
-    // 返回精确大小的缓冲区
-    return this.buffer.slice(0, this.offset);
+    return this.buffer;
   }
 }
 

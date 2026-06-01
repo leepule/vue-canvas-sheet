@@ -59,7 +59,7 @@ export class HistoryManager {
     }
 
     const now = Date.now();
-    
+
     // 尝试合并操作
     if (this._tryMerge(cmd, now)) {
       return;
@@ -68,10 +68,19 @@ export class HistoryManager {
     // 记录本次操作信息
     this._recordOpInfo(cmd, now);
 
-    // RingBuffer 已自带容量上限淘汰，不需要手动 shift
+    // RingBuffer 容量满时 push 会淘汰最旧元素，需先追踪扣减
+    if (this.undoStack.length === this.undoStack.capacity) {
+      this.optimizer.trackRemove(this.undoStack.first());
+    }
     this.undoStack.push(cmd);
+    this.optimizer.trackPush(cmd);
+
+    // 清空 redo 栈并追踪内存扣减
+    if (this.redoStack.length > 0) {
+      this.optimizer.trackClearStack(this.redoStack);
+    }
     this.redoStack.clear();
-    
+
     // 执行完命令后尝试智能压缩
     this.optimizer.compressHistory();
   }
@@ -157,9 +166,17 @@ export class HistoryManager {
   undo() {
     if (this.undoStack.length === 0) return;
     const cmd = this.undoStack.pop();
+    this.optimizer.trackRemove(cmd);
+
+    // redo 栈可能满，push 会淘汰最旧元素
+    if (this.redoStack.length === this.redoStack.capacity) {
+      this.optimizer.trackRemove(this.redoStack.first());
+    }
     this.redoStack.push(cmd);
+    this.optimizer.trackPush(cmd);
+
     this.workbook.applyCommand(cmd, true);
-    
+
     // 重置合并状态
     this.lastOpTime = 0;
   }
@@ -170,9 +187,17 @@ export class HistoryManager {
   redo() {
     if (this.redoStack.length === 0) return;
     const cmd = this.redoStack.pop();
+    this.optimizer.trackRemove(cmd);
+
+    // undo 栈可能满，push 会淘汰最旧元素
+    if (this.undoStack.length === this.undoStack.capacity) {
+      this.optimizer.trackRemove(this.undoStack.first());
+    }
     this.undoStack.push(cmd);
+    this.optimizer.trackPush(cmd);
+
     this.workbook.applyCommand(cmd, false);
-    
+
     // 更新合并状态
     this._recordOpInfo(cmd, Date.now());
   }
@@ -181,6 +206,8 @@ export class HistoryManager {
    * 清空历史记录
    */
   clear() {
+    this.optimizer.trackClearStack(this.undoStack);
+    this.optimizer.trackClearStack(this.redoStack);
     this.undoStack.clear();
     this.redoStack.clear();
     this.lastOpTime = 0;
@@ -211,6 +238,21 @@ export class HistoryManager {
   set maxDepth(value) {
     if (!Number.isInteger(value) || value <= 0) return;
     if (this._maxDepth === value) return;
+
+    // resize 会截断多余元素，先追踪扣减
+    const undoDiscarded = Math.max(0, this.undoStack.length - value);
+    if (undoDiscarded > 0) {
+      for (let i = 0; i < undoDiscarded; i++) {
+        this.optimizer.trackRemove(this.undoStack.get(i));
+      }
+    }
+    const redoDiscarded = Math.max(0, this.redoStack.length - value);
+    if (redoDiscarded > 0) {
+      for (let i = 0; i < redoDiscarded; i++) {
+        this.optimizer.trackRemove(this.redoStack.get(i));
+      }
+    }
+
     this._maxDepth = value;
     this.undoStack.resize(value);
     this.redoStack.resize(value);

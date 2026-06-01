@@ -148,22 +148,23 @@ export class WasmBridge {
     if (!this.isLoaded || !this.engine) return {};
 
     let allNonNumeric = {};
-    const gridCols = this.engine.get_grid_cols();
 
     try {
       for (const [formula, group] of groupedTasks.entries()) {
         const rows = new Uint32Array(group.rows);
         const cols = new Uint32Array(group.cols);
         const ids = group.ids;
-        
+
         const { numeric_results, non_numeric_results } = this.engine.evaluate_group(rows, cols, formula, ids);
-        
+
         // 合并所有非数字/错误结果返回给主线程
         Object.assign(allNonNumeric, non_numeric_results);
-        
-        // 利用线性 SharedArrayBuffer 批量写回数字结果，实现极速零拷贝刷新
-        if (this.sharedView) {
+
+        // 零拷贝路径：Rust 已直接写入 SharedArrayBuffer，跳过 JS 侧循环
+        // 降级路径：无共享内存时 numeric_results 存在，从 JS 侧写回
+        if (numeric_results && this.sharedView) {
           const len = rows.length;
+          const gridCols = this.engine.get_grid_cols();
           for (let i = 0; i < len; i++) {
             const val = numeric_results[i];
             if (!isNaN(val)) {
@@ -182,6 +183,23 @@ export class WasmBridge {
     }
   }
 
+  /**
+   * 更新 WASM 引擎的 grid_rows（缓冲区扩容后调用）
+   */
+  updateGridRows(rows) {
+    if (this.isLoaded && this.engine && typeof this.engine.update_grid_rows === 'function') {
+      this.engine.update_grid_rows(rows);
+    }
+  }
+
+  /**
+   * 重新绑定共享内存（缓冲区扩容后调用，WASM 需要引用新的 SharedArrayBuffer）
+   */
+  rebindSharedMemory(sab, rows, cols) {
+    if (this.isLoaded && this.engine) {
+      this.engine.init_shared_memory(sab, rows, cols);
+    }
+  }
 
   getStatus() {
     return {

@@ -10,6 +10,7 @@ export class FormulaEngine {
     get_grid_rows(): number;
     init_shared_memory(sab: SharedArrayBuffer, rows: number, cols: number): void;
     constructor();
+    update_grid_rows(rows: number): void;
 }
 
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
@@ -23,6 +24,7 @@ export interface InitOutput {
     readonly formulaengine_get_grid_rows: (a: number) => number;
     readonly formulaengine_init_shared_memory: (a: number, b: any, c: number, d: number) => void;
     readonly formulaengine_new: () => number;
+    readonly formulaengine_update_grid_rows: (a: number, b: number) => void;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_exn_store: (a: number) => void;

@@ -44,6 +44,87 @@ describe('IncrementalCalculationEngine', () => {
     expect(queue).toContain(formulaNumeric);
   });
 
+  describe('增量 numeric 依赖索引 (_numericDepIndex)', () => {
+    it('设置公式后在 numeric 索引中登记反向出边', () => {
+      workbook.setCell(0, 0, { v: 1 });
+      workbook.setCell(0, 1, { v: '=A1+1' });
+
+      const a1 = cellKeyNumeric(0, 0);
+      const b1 = cellKeyNumeric(0, 1);
+      const index = workbook._numericDepIndex;
+
+      expect(index.get(a1)).toBeInstanceOf(Set);
+      expect(index.get(a1).has(b1)).toBe(true);
+    });
+
+    it('清除公式后移除对应出边，源条目变空时删除', () => {
+      workbook.setCell(0, 0, { v: 1 });
+      workbook.setCell(0, 1, { v: '=A1+1' });
+
+      const a1 = cellKeyNumeric(0, 0);
+      expect(workbook._numericDepIndex.has(a1)).toBe(true);
+
+      // 用普通值覆盖公式，应清掉 A1 的唯一依赖者
+      workbook.setCell(0, 1, { v: 42 });
+      expect(workbook._numericDepIndex.has(a1)).toBe(false);
+    });
+
+    it('改写公式依赖时旧出边被回收、新出边被登记', () => {
+      workbook.setCell(0, 0, { v: 1 });
+      workbook.setCell(1, 0, { v: 2 });
+      workbook.setCell(0, 1, { v: '=A1+1' }); // 依赖 A1
+
+      const a1 = cellKeyNumeric(0, 0);
+      const a2 = cellKeyNumeric(1, 0);
+      const b1 = cellKeyNumeric(0, 1);
+
+      expect(workbook._numericDepIndex.get(a1).has(b1)).toBe(true);
+
+      // 改为依赖 A2
+      workbook.setCell(0, 1, { v: '=A2+1' });
+
+      expect(workbook._numericDepIndex.has(a1)).toBe(false);
+      expect(workbook._numericDepIndex.get(a2).has(b1)).toBe(true);
+    });
+
+    it('标脏沿增量索引传播到依赖者（无需全量重建）', () => {
+      workbook.setCell(0, 0, { v: 1 });
+      workbook.setCell(0, 1, { v: '=A1+1' });
+      workbook.setCell(0, 2, { v: '=B1+1' });
+
+      workbook.calcEngine.dirtyBitset.clear();
+      workbook.calcEngine.markDirtyRC(0, 0); // 改 A1
+
+      const { queue } = workbook.calcEngine._collectDirtyGraph();
+      expect(queue).toContain(cellKeyNumeric(0, 1)); // B1
+      expect(queue).toContain(cellKeyNumeric(0, 2)); // C1（间接依赖）
+    });
+
+    it('compactDependencyGraph 清理孤儿条目时同步删除 numeric 索引', () => {
+      workbook.setCell(0, 0, { v: 1 });
+      workbook.setCell(0, 1, { v: '=A1+1' });
+
+      const a1 = cellKeyNumeric(0, 0);
+      // 直接删除公式单元格使依赖图产生孤儿条目（绕过 _updateDependencyMap）
+      workbook._dataMatrix.delete(0, 1);
+      workbook.calcEngine.compactDependencyGraph();
+
+      expect(workbook.dependencyMap.has(workbook._cellKey(0, 0))).toBe(false);
+      expect(workbook._numericDepIndex.has(a1)).toBe(false);
+    });
+
+    it('rebuildDependencyMap 后 numeric 索引与 dependencyMap 一致', () => {
+      workbook.setCell(0, 0, { v: 1 });
+      workbook.setCell(0, 1, { v: '=A1+1' });
+
+      workbook.rebuildDependencyMap();
+
+      const a1 = cellKeyNumeric(0, 0);
+      const b1 = cellKeyNumeric(0, 1);
+      expect(workbook._numericDepIndex.get(a1).has(b1)).toBe(true);
+    });
+  });
+
   it('tracks cache hit rate and batch stats', () => {
     const numericKey = cellKeyNumeric(0, 1);
     workbook.setCell(0, 0, { v: 10 });
@@ -188,6 +269,69 @@ describe('IncrementalCalculationEngine', () => {
       // 在依赖范围内引入脏单元格
       engine.dirtyBitset.add(3, 0);
       expect(engine._isCacheValid(cached, 0, 5)).toBe(false);
+    });
+  });
+
+  describe('缓存依赖解析复用 (_resolveDependencies)', () => {
+    it('缓存时复用 reverseDependencyMap，不再重新解析公式', () => {
+      workbook.setCell(0, 0, { v: 1 });
+      workbook.setCell(0, 1, { v: 2 });
+      workbook.setCell(0, 2, { v: '=A1+B1' });
+
+      const engine = workbook.calcEngine;
+      const spy = vi.spyOn(workbook, 'getDependencies');
+      engine._cacheResult(0, 2, 3, '=A1+B1');
+
+      // 反向依赖已存在 → 不应触发重新解析
+      expect(spy).not.toHaveBeenCalled();
+
+      const cached = engine.calcCache.get(engine._getCacheKey(0, 2));
+      const cellIds = [...cached.dependencies.cells];
+      expect(cellIds).toContain(workbook._cellKey(0, 0));
+      expect(cellIds).toContain(workbook._cellKey(0, 1));
+      spy.mockRestore();
+    });
+
+    it('依赖与反向依赖映射内容等价', () => {
+      workbook.setCell(0, 0, { v: 1 });
+      workbook.setCell(0, 5, { v: '=SUM(A1:A10)+A1' });
+
+      const engine = workbook.calcEngine;
+      engine._cacheResult(0, 5, 1, '=SUM(A1:A10)+A1');
+      const cached = engine.calcCache.get(engine._getCacheKey(0, 5));
+      const fresh = workbook.getDependencies('=SUM(A1:A10)+A1');
+
+      expect([...cached.dependencies.cells].sort()).toEqual([...fresh.cells].sort());
+      expect(cached.dependencies.ranges.length).toBe(fresh.ranges.length);
+    });
+
+    it('缓存依赖是浅克隆，compact 原地删除不污染缓存快照', () => {
+      workbook.setCell(0, 0, { v: 1 });
+      workbook.setCell(0, 1, { v: '=A1+1' });
+
+      const engine = workbook.calcEngine;
+      engine.dirtyBitset.clear();
+      engine._cacheResult(0, 1, 2, '=A1+1');
+      const cached = engine.calcCache.get(engine._getCacheKey(0, 1));
+      expect([...cached.dependencies.cells]).toContain(workbook._cellKey(0, 0));
+
+      // 删除公式单元格并 compact，使 reverseDependencyMap 中的 Set 被原地修改/删除
+      workbook._dataMatrix.delete(0, 1);
+      engine.compactDependencyGraph();
+
+      // 缓存快照应保留克隆的依赖，不被 compact 影响
+      expect([...cached.dependencies.cells]).toContain(workbook._cellKey(0, 0));
+    });
+
+    it('反向依赖缺失时回退到完整解析', () => {
+      const engine = workbook.calcEngine;
+      const spy = vi.spyOn(workbook, 'getDependencies');
+
+      // 未经 setCell 注册依赖，直接缓存 → reverseDependencyMap 无此项
+      engine._cacheResult(5, 5, 99, '=A1+1');
+
+      expect(spy).toHaveBeenCalledWith('=A1+1');
+      spy.mockRestore();
     });
   });
 });

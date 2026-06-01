@@ -311,12 +311,11 @@ export class RealtimeCollaborationPlugin {
    */
   _broadcastSelection(selection) {
     if (!selection) return;
+    // userName/userColor 已在 user-join 时发送，后续选区变化只发变动数据
     this._sendRaw({
       type: 'selection-change',
       roomId: this.roomId,
       userId: this.userId,
-      userName: this.userName,
-      userColor: this.userColor,
       selection
     });
   }

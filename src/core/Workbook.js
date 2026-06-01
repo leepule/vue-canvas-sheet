@@ -83,7 +83,7 @@ import { StyleCache } from './render/StyleCache.js';
 import { RangeDependencyIndex } from './data/RangeDependencyIndex.js';
 import { IndexedDBStorage } from './utils/IndexedDBStorage.js';
 import { SharedValueStore } from './data/SharedValueStore.js';
-import { cellKey, parseCellKey } from './data/CellKey.js';
+import { cellKey, cellKeyNumeric, parseCellKey } from './data/CellKey.js';
 import { HeadPointerQueue } from './utils/Queues.js';
 
 import { formulaCompiler } from './data/FormulaCompiler.js';
@@ -273,6 +273,13 @@ export class Workbook {
     // ========== 范围依赖索引 ==========
     /** @type {RangeDependencyIndex} 范围依赖索引 */
     this.rangeDependencyIndex = new RangeDependencyIndex();
+
+    // ========== Numeric 依赖索引（增量维护，热路径只读） ==========
+    // 镜像 dependencyMap 的 cells 部分，键值均为 (r<<16)|c 数字键。
+    // 在 _updateDependencyMap / _clearDependencyGraph / compactDependencyGraph
+    // 写入点同步增删，避免增量重算 BFS 中每次全量重建 + 字符串解析。
+    /** @type {Map<number, Set<number>>} numericKey -> Set<dependentNumericKey> */
+    this._numericDepIndex = new Map();
 
     // ========== 持久化存储 ==========
     if (this._enablePersistence) {
@@ -562,9 +569,7 @@ export class Workbook {
 
         // 关键：在导入前确保依赖图、计算引擎、持久化缓存和物理内存全部清理干净
         if (this.calcEngine) this.calcEngine.reset();
-        this.dependencyMap.clear();
-        this.reverseDependencyMap.clear();
-        if (this.rangeDependencyIndex) this.rangeDependencyIndex.clear();
+        this._clearDependencyGraph();
         if (this._dirtyCells) this._dirtyCells.clear();
         
         const sharedStore = this._ensureSharedStore();
@@ -636,9 +641,7 @@ export class Workbook {
         // 有表头模式：增量更新
 
         // 关键：清理旧依赖图，后续按需重建
-        this.dependencyMap.clear();
-        this.reverseDependencyMap.clear();
-        if (this.rangeDependencyIndex) this.rangeDependencyIndex.clear();
+        this._clearDependencyGraph();
         if (this._dirtyCells) this._dirtyCells.clear();
         if (this.calcEngine) this.calcEngine.reset();
 
@@ -1458,12 +1461,14 @@ export class Workbook {
     }
     
     let head = 0;
+    // 复用 Set，避免每步 new Set() 的 GC 压力
+    const affected = new Set();
     while (head < queue.length) {
       const fc = queue[head++];
       result.push(fc);
-      
+
       // 查找依赖于当前单元格的其他公式单元格
-      const affected = new Set();
+      affected.clear();
       const dependents = this.dependencyMap.get(fc.key);
       if (dependents) {
         for (const depKey of dependents) {
@@ -1517,6 +1522,7 @@ export class Workbook {
         oldDeps.cells.forEach(srcId => {
           const deps = this.dependencyMap.get(srcId);
           if (deps) deps.delete(cellId);
+          this._removeNumericDep(srcId, cellId);
         });
       }
       // 处理旧的范围依赖
@@ -1529,13 +1535,14 @@ export class Workbook {
     if (!formula) return;
 
     const { cells, ranges } = this.getDependencies(formula);
-    
+
     // 注册新的单元格依赖
     cells.forEach(srcId => {
       if (!this.dependencyMap.has(srcId)) {
         this.dependencyMap.set(srcId, new Set());
       }
       this.dependencyMap.get(srcId).add(cellId);
+      this._addNumericDep(srcId, cellId);
     });
 
     // 注册新的范围依赖
@@ -1544,6 +1551,70 @@ export class Workbook {
     });
 
     this.reverseDependencyMap.set(cellId, { cells, ranges });
+  }
+
+  /**
+   * 将字符串单元格键转为 numeric 键 (r<<16)|c；越界或非法返回 -1。
+   * 与增量计算引擎使用的编码一致（仅支持 r,c < 65536）。
+   * @param {string} id
+   * @returns {number}
+   */
+  _numericKeyFromId(id) {
+    const { r, c } = parseCellKey(id);
+    if (!Number.isFinite(r) || !Number.isFinite(c) || r < 0 || c < 0 || r > 0xFFFF || c > 0xFFFF) {
+      return -1;
+    }
+    return cellKeyNumeric(r, c);
+  }
+
+  /**
+   * 增量索引：登记 srcId 的依赖者 dependentId（与 dependencyMap.add 同步）
+   */
+  _addNumericDep(srcId, dependentId) {
+    const srcNk = this._numericKeyFromId(srcId);
+    const depNk = this._numericKeyFromId(dependentId);
+    if (srcNk < 0 || depNk < 0) return;
+    let set = this._numericDepIndex.get(srcNk);
+    if (!set) {
+      set = new Set();
+      this._numericDepIndex.set(srcNk, set);
+    }
+    set.add(depNk);
+  }
+
+  /**
+   * 增量索引：移除 srcId 的依赖者 dependentId（与 dependencyMap.delete 同步）
+   */
+  _removeNumericDep(srcId, dependentId) {
+    const srcNk = this._numericKeyFromId(srcId);
+    if (srcNk < 0) return;
+    const set = this._numericDepIndex.get(srcNk);
+    if (!set) return;
+    const depNk = this._numericKeyFromId(dependentId);
+    set.delete(depNk);
+    if (set.size === 0) {
+      this._numericDepIndex.delete(srcNk);
+    }
+  }
+
+  /**
+   * 增量索引：删除某个源单元格的全部出边（与 dependencyMap.delete(srcId) 同步），
+   * 供 compactDependencyGraph 清理孤儿条目时调用。
+   */
+  _dropNumericDepSource(srcId) {
+    const srcNk = this._numericKeyFromId(srcId);
+    if (srcNk < 0) return;
+    this._numericDepIndex.delete(srcNk);
+  }
+
+  /**
+   * 整体清空依赖图（含 numeric 索引），供导入等批量重置场景复用。
+   */
+  _clearDependencyGraph() {
+    this.dependencyMap.clear();
+    this.reverseDependencyMap.clear();
+    this._numericDepIndex.clear();
+    if (this.rangeDependencyIndex) this.rangeDependencyIndex.clear();
   }
   triggerRecalc(r, c, stack = []) {
     this._markCellChanged(r, c);
@@ -2015,9 +2086,7 @@ export class Workbook {
     }
   }
   rebuildDependencyMap() {
-    this.dependencyMap.clear();
-    this.reverseDependencyMap.clear();
-    this.rangeDependencyIndex.clear();
+    this._clearDependencyGraph();
     this._dataMatrix.forEach((r, c, cell) => {
       if (cell && cell.f) {
         const key = this._cellKey(r, c);
@@ -2627,6 +2696,11 @@ export class Workbook {
     if (!this.sharedValueStore) {
       if (typeof SharedArrayBuffer === 'undefined') return null;
       this.sharedValueStore = new SharedValueStore(this._sharedRows, this._sharedCols);
+      // 缓冲区扩容时同步更新 WASM 引擎的 grid_rows
+      this.sharedValueStore.onGrow = (newRows, newBuffer, newCols) => {
+        // 扩容后 SharedArrayBuffer 是新对象，必须重新绑定 WASM 引擎
+        wasmBridge.rebindSharedMemory(newBuffer, newRows, newCols);
+      };
     }
     return this.sharedValueStore;
   }
@@ -2645,8 +2719,9 @@ export class Workbook {
       const sharedBuffer = sharedStore?.getBuffer(); // 这里会触发连续内存分配
       
       if (sharedBuffer) {
-        this._sharedRows = sharedStore.maxRows;
-        this._sharedCols = sharedStore.maxCols;
+        // 使用连续缓冲区的实际行数/列数，而非 maxRows/maxCols，确保 WASM 不会越界读取
+        this._sharedCols = sharedStore._continuousCols || sharedStore.maxCols;
+        this._sharedRows = Math.floor(sharedBuffer.byteLength / (this._sharedCols * 8));
         const sharedMemoryBound = wasmBridge.bindSharedMemory(sharedBuffer, this._sharedRows, this._sharedCols);
         if (sharedMemoryBound) {
           // WASM Engine & Shared Memory bound

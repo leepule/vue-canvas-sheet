@@ -395,6 +395,7 @@ const loadBigData = () => {
   font-weight: 700;
   background: linear-gradient(to right, #38bdf8, #818cf8);
   -webkit-background-clip: text;
+  background-clip: text;
   -webkit-text-fill-color: transparent;
   font-family: 'Outfit', 'Inter', sans-serif;
   letter-spacing: -0.5px;

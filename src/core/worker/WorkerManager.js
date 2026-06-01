@@ -45,7 +45,7 @@ export class WorkerManager {
       savedCopyBytes: 0
     };
 
-    this._initWorker();
+    // 延迟到第一次 execute() 时再初始化 Worker，避免不必要的启动成本
   }
 
   get worker() {
@@ -116,6 +116,13 @@ export class WorkerManager {
 
   ready() {
     if (this.isReady) return Promise.resolve();
+
+    // 惰性初始化：首次 ready/execute 时才创建 Worker
+    if (!this.client && !this._initialized) {
+      this._initialized = true;
+      this._initWorker();
+    }
+
     if (this.client) return this.client.ready();
     return new Promise((resolve) => {
       this.readyCallbacks.push(resolve);
@@ -157,6 +164,12 @@ export class WorkerManager {
   async execute(type, data = {}, options = {}) {
     if (this.useFallback) {
       return this._executeWithFallback(type, data);
+    }
+
+    // 惰性初始化：首次 execute 时才创建 Worker
+    if (!this.client && !this._initialized) {
+      this._initialized = true;
+      this._initWorker();
     }
 
     if (!this.client) {

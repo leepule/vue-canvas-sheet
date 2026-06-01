@@ -32,8 +32,11 @@
           <button class="vue-canvas-sheet-tool-btn" @click="handleExportExcel" title="导出为 Excel 文件">
             <SvgIcon name="document-xls" />
           </button>
+          <button class="vue-canvas-sheet-tool-btn" @click="handleExportCSV" title="导出为 CSV 文件">
+            <SvgIcon name="document-csv" />
+          </button>
           <button class="vue-canvas-sheet-tool-btn" @click="handleExportJSON" title="导出为 JSON 文件">
-            <SvgIcon name="download" />
+            <SvgIcon name="code" />
           </button>
           <button class="vue-canvas-sheet-tool-btn" @click="handleImport" title="导入 Excel 或 JSON 文件">
             <SvgIcon name="upload" />
@@ -213,6 +216,10 @@ const fileInput = ref(null);
 
 const handleExportExcel = () => {
   exportPlugin.exportExcel({ fileName: "demo-data.xlsx" });
+};
+
+const handleExportCSV = () => {
+  exportPlugin.exportCSV({ fileName: "demo-data.csv" });
 };
 
 const handleExportJSON = () => {

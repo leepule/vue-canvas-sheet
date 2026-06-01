@@ -63,6 +63,58 @@ export function buildImportUpdates(matrix) {
   return updates;
 }
 
+/**
+ * 从 XLSX worksheet 读取带样式的单元格，转换为内部格式
+ */
+function buildImportUpdatesFromXLSX(XLSX, ws) {
+  const updates = [];
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
+
+  for (let r = range.s.r; r <= range.e.r; r++) {
+    for (let c = range.s.c; c <= range.e.c; c++) {
+      const addr = XLSX.utils.encode_cell({ r, c });
+      const xlsxCell = ws[addr];
+      if (!xlsxCell) continue;
+
+      const cell = {};
+
+      // 值
+      if (xlsxCell.f) {
+        cell.f = '=' + xlsxCell.f;
+      }
+      if (xlsxCell.v !== undefined && xlsxCell.v !== null) {
+        cell.v = xlsxCell.v;
+      }
+
+      // 样式：xlsx-js-style 读取时 s 可能是数字索引或对象
+      const style = xlsxCell.s;
+      if (style && typeof style === 'object') {
+        const s = {};
+        if (style.font) {
+          if (style.font.bold) s.bold = true;
+          if (style.font.italic) s.italic = true;
+          if (style.font.color?.rgb) s.color = '#' + style.font.color.rgb;
+        }
+        if (style.fill?.fgColor?.rgb) {
+          s.bg = '#' + style.fill.fgColor.rgb;
+        }
+        if (style.alignment) {
+          if (style.alignment.horizontal) s.align = style.alignment.horizontal;
+          if (style.alignment.vertical) {
+            s.valign = style.alignment.vertical === 'center' ? 'middle' : style.alignment.vertical;
+          }
+        }
+        if (Object.keys(s).length > 0) cell.s = s;
+      }
+
+      if (cell.f || cell.v !== undefined) {
+        updates.push({ r, c, val: cell });
+      }
+    }
+  }
+  return updates;
+}
+
 function matrixDimensions(matrix) {
   const rowCount = Math.max(20, matrix.length + 5);
   let widest = 0;
@@ -170,9 +222,10 @@ export class ImportPlugin {
         const XLSX = await loadXLSX();
         const wb = XLSX.read(new Uint8Array(buffer), { type: 'array' });
         const ws = wb.Sheets[wb.SheetNames[0]];
-        const matrix = XLSX.utils.sheet_to_json(ws, { header: 1 });
-        const summary = await applyMatrixInBatches(this._workbook, matrix, importOptions);
-        result = { fileName: file.name, fileSize: file.size, type: 'excel', ...summary };
+        // 使用带样式的导入，保留格式信息
+        const updates = buildImportUpdatesFromXLSX(XLSX, ws);
+        await this._applyUpdatesInBatches(this._workbook, updates, importOptions);
+        result = { fileName: file.name, fileSize: file.size, type: 'excel', cells: updates.length };
       }
 
       if (this.onComplete) this.onComplete(result);
@@ -181,6 +234,30 @@ export class ImportPlugin {
       const wrapped = err instanceof Error ? err : new Error(String(err));
       if (this.onError) this.onError(wrapped);
       throw wrapped;
+    }
+  }
+
+  async _applyUpdatesInBatches(workbook, updates, options = {}) {
+    const batchSize = options.batchSize || DEFAULT_IMPORT_BATCH_SIZE;
+    const dims = { rowCount: 0, colCount: 0 };
+    for (const u of updates) {
+      if (u.r + 1 > dims.rowCount) dims.rowCount = u.r + 1;
+      if (u.c + 1 > dims.colCount) dims.colCount = u.c + 1;
+    }
+    workbook.rowCount = Math.max(20, dims.rowCount + 5);
+    workbook.colCount = Math.max(10, dims.colCount + 5);
+    if (typeof workbook.clearCells === 'function') {
+      workbook.clearCells({
+        s: { r: 0, c: 0 },
+        e: { r: Math.max(0, dims.rowCount - 1), c: Math.max(0, dims.colCount - 1) }
+      });
+    }
+    for (let i = 0; i < updates.length; i += batchSize) {
+      workbook.bulkSetCells(updates.slice(i, i + batchSize));
+      if (options.onProgress) {
+        options.onProgress({ phase: 'import', done: Math.min(i + batchSize, updates.length), total: updates.length });
+      }
+      await nextFrame();
     }
   }
 

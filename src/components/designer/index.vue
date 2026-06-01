@@ -84,6 +84,7 @@
 		data() {
 			return {
 				uiVersion: 0, // Manual reactivity trigger
+				workbook: null,
 
 				showFindDialog: false,
 				findText: '',
@@ -663,6 +664,11 @@
 			}));
 			this.workbook.readOnly = this.readOnly;
 			this.workbook.enableWorker();
+
+			// 开发调试：挂载到 window，控制台可直接使用 __wb
+			if (typeof window !== 'undefined') {
+				window.__wb = this.workbook;
+			}
 			
 			// 创建数据控制器，传入懒加载配置
 			this.dataController = markRaw(new DataController(this.workbook, () => {

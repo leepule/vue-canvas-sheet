@@ -26,14 +26,29 @@
     </div>
 
     <div class="sheet-wrapper">
-      <TableDesigner ref="table" :initial-data="initialData" :reload-key="reloadKey" />
+      <TableDesigner ref="table" :initial-data="initialData" :reload-key="reloadKey" :plugins="designerPlugins">
+        <template #toolbar-end-group>
+          <button class="vue-canvas-sheet-tool-btn" @click="handleExportExcel" title="导出为 Excel 文件">
+            <SvgIcon name="document-xls" />
+          </button>
+          <button class="vue-canvas-sheet-tool-btn" @click="handleExportCSV" title="导出为 CSV 文件">
+            <SvgIcon name="document-csv" />
+          </button>
+          <button class="vue-canvas-sheet-tool-btn" @click="handleExportJSON" title="导出为 JSON 文件">
+            <SvgIcon name="code" />
+          </button>
+        </template>
+      </TableDesigner>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, shallowRef, onMounted, nextTick } from 'vue';
-import { TableDesigner } from 'vue-canvas-sheet';
+import { ref, shallowRef, watch, onMounted, nextTick } from 'vue';
+import { TableDesigner, SvgIcon, createExportPlugin } from 'vue-canvas-sheet';
+
+const exportPlugin = createExportPlugin({ defaultFileName: 'random-data' });
+const designerPlugins = [exportPlugin];
 
 const table = ref(null);
 const rows = ref(30);
@@ -87,7 +102,7 @@ function makeHeader(c) {
   };
 }
 
-function makeCell(r, c) {
+function makeCell(_, c) {
   let value;
   switch (c) {
     case 0: value = pick(NAMES); break;
@@ -95,7 +110,7 @@ function makeCell(r, c) {
     case 2: value = pick(ROLES); break;
     case 3: value = 5000 + rand(15000); break;
     case 4: value = rand(8000); break;
-    case 5: value = { f: `=D${r + 2}+E${r + 2}` }; break;
+    case 5: value = 0; break; // 先填 0，稍后由 setCell 写入公式
     case 6: value = Math.round(Math.random() * 100) / 100; break;
     case 7: value = pick(NOTES); break;
     default: value = rand(1000);
@@ -160,6 +175,18 @@ function addBorders() {
   );
 }
 
+function handleExportExcel() {
+  exportPlugin.exportExcel({ fileName: 'random-data.xlsx' });
+}
+
+function handleExportCSV() {
+  exportPlugin.exportCSV({ fileName: 'random-data.csv' });
+}
+
+function handleExportJSON() {
+  exportPlugin.exportJSON({ fileName: 'random-data.json' });
+}
+
 function addFormula() {
   const wb = table.value?.workbook;
   if (!wb) return;
@@ -194,14 +221,28 @@ function addFormula() {
       s: { bold: true, fmt: 'percent', decimals: 1, align: 'center', bg: '#fef3c7' },
     });
   }
+}
 
-  wb.recalcAll({ useWorker: true });
+function applyFormulas() {
+  const wb = table.value?.workbook;
+  if (!wb) return;
+  for (let r = 1; r <= rows.value; r++) {
+    wb.setCell(r, 5, { f: `=D${r + 1}+E${r + 1}` });
+  }
 }
 
 onMounted(async () => {
   generate();
   await nextTick();
+  await nextTick();
   table.value?.workbook?.enableWorker();
+  applyFormulas();
+});
+
+watch(reloadKey, async () => {
+  await nextTick();
+  await nextTick();
+  applyFormulas();
 });
 </script>
 

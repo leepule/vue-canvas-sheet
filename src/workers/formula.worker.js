@@ -32,18 +32,20 @@ const DataType = {
 };
 
 const PATTERNS = [
-  { type: 'fn', regex: /^[A-Z]+(?=\()/ },
-  { type: 'range', regex: /^[A-Z]+[0-9]+:[A-Z]+[0-9]+/ },
-  { type: 'cell', regex: /^[A-Z]+[0-9]+/ },
-  { type: 'string', regex: /^"([^"]*)"/ },
-  { type: 'boolean', regex: /^(TRUE|FALSE)(?![A-Z0-9])/i },
-  { type: 'number', regex: /^\d+(\.\d+)?/ },
-  { type: 'op', regex: /^[\+\-\*\/]/ },
-  { type: 'compare', regex: /^(<>|<=|>=|[<>=])/ },
-  { type: 'lparen', regex: /^\(/ },
-  { type: 'rparen', regex: /^\)/ },
-  { type: 'comma', regex: /^,/ },
-  { type: 'ws', regex: /^\s+/ }
+  // 使用 sticky flag (y) 替代 ^ 锚点，配合 regex.lastIndex 在原字符串上原地匹配
+  // 避免 tokenize 每个字符位置都创建 substring
+  { type: 'fn', regex: /[A-Z]+(?=\()/y },
+  { type: 'range', regex: /[A-Z]+[0-9]+:[A-Z]+[0-9]+/y },
+  { type: 'cell', regex: /[A-Z]+[0-9]+/y },
+  { type: 'string', regex: /"([^"]*)"/y },
+  { type: 'boolean', regex: /(TRUE|FALSE)(?![A-Z0-9])/iy },
+  { type: 'number', regex: /\d+(\.\d+)?/y },
+  { type: 'op', regex: /[\+\-\*\/]/y },
+  { type: 'compare', regex: /(<>|<=|>=|[<>=])/y },
+  { type: 'lparen', regex: /\(/y },
+  { type: 'rparen', regex: /\)/y },
+  { type: 'comma', regex: /,/y },
+  { type: 'ws', regex: /\s+/y }
 ];
 
 const PRECEDENCE = {
@@ -205,11 +207,12 @@ class FormulaWorkerParser {
 
     while (i < len) {
       let matched = false;
-      const remaining = expr.substring(i);
 
       for (let j = 0; j < PATTERNS.length; j++) {
         const { type, regex } = PATTERNS[j];
-        const match = remaining.match(regex);
+        // sticky flag (y) 让正则在 lastIndex 位置精确匹配，无需 substring
+        regex.lastIndex = i;
+        const match = regex.exec(expr);
         if (match) {
           if (type !== 'ws') {
             if (type === 'string') {
@@ -220,7 +223,7 @@ class FormulaWorkerParser {
               tokens.push({ type, value: match[0] });
             }
           }
-          i += match[0].length;
+          i = regex.lastIndex;
           matched = true;
           break;
         }
@@ -298,7 +301,11 @@ class FormulaWorkerParser {
     const cacheKey = expression.toUpperCase();
 
     if (this.rpnCache.has(cacheKey)) {
-      return this.rpnCache.get(cacheKey);
+      // LRU：命中时删后重插，移到 Map 末尾（最近使用）
+      const rpn = this.rpnCache.get(cacheKey);
+      this.rpnCache.delete(cacheKey);
+      this.rpnCache.set(cacheKey, rpn);
+      return rpn;
     }
 
     const tokens = this.tokenize(expression);
@@ -1024,10 +1031,14 @@ class FormulaWorkerEvaluator {
 let evaluator = null;
 
 /**
- * 初始化计算器
+ * 初始化计算器（复用实例，仅更新 dataProvider）
  */
 function initEvaluator(dataProvider) {
-  evaluator = new FormulaWorkerEvaluator(dataProvider);
+  if (evaluator) {
+    evaluator.dataProvider = dataProvider;
+  } else {
+    evaluator = new FormulaWorkerEvaluator(dataProvider);
+  }
 }
 
 /**

@@ -74,7 +74,7 @@ export class VirtualScrollManager {
     this.dirtyState = {
       rows: new Map(),      // 脏行集合 { rowIndex: { timestamp, reason } }
       cols: new Map(),      // 脏列集合 { colIndex: { timestamp, reason } }
-      cells: new Map(),     // 脏单元格集合 { "r-c": { timestamp, reason } }
+      cells: new Map(),     // 脏单元格集合 Map<row, Map<col, { timestamp }>> — 按行分桶
       stats: {
         markedRows: 0,
         markedCols: 0,
@@ -84,6 +84,7 @@ export class VirtualScrollManager {
         cleanedCells: 0
       }
     };
+    this._dirtyCellCount = 0; // 维护计数器，避免遍历嵌套 Map 计数
     
     // 脏标记清理策略配置
     this.dirtyConfig = {
@@ -495,7 +496,7 @@ export class VirtualScrollManager {
     return {
       rows: this.dirtyState.rows.size,
       cols: this.dirtyState.cols.size,
-      cells: this.dirtyState.cells.size
+      cells: this._dirtyCellCount
     };
   }
   
@@ -604,29 +605,43 @@ export class VirtualScrollManager {
   
   markDirtyRow(rowIndex) { this.dirtyState.rows.set(rowIndex, { timestamp: Date.now() }); }
   markDirtyCol(colIndex) { this.dirtyState.cols.set(colIndex, { timestamp: Date.now() }); }
-  markDirtyCell(r, c) { this.dirtyState.cells.set(`${r}-${c}`, { rowIndex: r, colIndex: c, timestamp: Date.now() }); }
+  markDirtyCell(r, c) {
+    let colMap = this.dirtyState.cells.get(r);
+    if (!colMap) {
+      colMap = new Map();
+      this.dirtyState.cells.set(r, colMap);
+    }
+    if (!colMap.has(c)) {
+      colMap.set(c, { timestamp: Date.now() });
+      this._dirtyCellCount++;
+    }
+  }
   
   cleanDirtyRange(range) {
     for (let r = range.startRow; r <= range.endRow; r++) this.dirtyState.rows.delete(r);
     for (let c = range.startCol; c <= range.endCol; c++) this.dirtyState.cols.delete(c);
-    const keysToDelete = [];
-    for (const [key, info] of this.dirtyState.cells) {
-      if (info.rowIndex >= range.startRow && info.rowIndex <= range.endRow && 
-          info.colIndex >= range.startCol && info.colIndex <= range.endCol) {
-        keysToDelete.push(key);
+    // 按行分桶结构：只遍历 range 内的行，而非全量 dirty cells
+    for (let r = range.startRow; r <= range.endRow; r++) {
+      const colMap = this.dirtyState.cells.get(r);
+      if (!colMap) continue;
+      for (let c = range.startCol; c <= range.endCol; c++) {
+        if (colMap.delete(c)) this._dirtyCellCount--;
       }
+      if (colMap.size === 0) this.dirtyState.cells.delete(r);
     }
-    keysToDelete.forEach(k => this.dirtyState.cells.delete(k));
   }
 
   getDirtyRegions(range) {
     const rows = [], cols = [], cells = [];
     for (let r = range.startRow; r <= range.endRow; r++) if (this.dirtyState.rows.has(r)) rows.push({ index: r });
     for (let c = range.startCol; c <= range.endCol; c++) if (this.dirtyState.cols.has(c)) cols.push({ index: c });
-    for (const [key, info] of this.dirtyState.cells) {
-      if (info.rowIndex >= range.startRow && info.rowIndex <= range.endRow && 
-          info.colIndex >= range.startCol && info.colIndex <= range.endCol) {
-        cells.push(info);
+    // 按行分桶：只遍历 range 内的行
+    for (let r = range.startRow; r <= range.endRow; r++) {
+      const colMap = this.dirtyState.cells.get(r);
+      if (!colMap) continue;
+      for (let c = range.startCol; c <= range.endCol; c++) {
+        const info = colMap.get(c);
+        if (info) cells.push({ rowIndex: r, colIndex: c, ...info });
       }
     }
     return { rows, cols, cells };
@@ -636,7 +651,10 @@ export class VirtualScrollManager {
     // 简化的阈值控制
     if (this.dirtyState.rows.size > 1000) this.dirtyState.rows.clear();
     if (this.dirtyState.cols.size > 1000) this.dirtyState.cols.clear();
-    if (this.dirtyState.cells.size > 5000) this.dirtyState.cells.clear();
+    if (this._dirtyCellCount > 5000) {
+      this.dirtyState.cells.clear();
+      this._dirtyCellCount = 0;
+    }
   }
   
   invalidateCache() {

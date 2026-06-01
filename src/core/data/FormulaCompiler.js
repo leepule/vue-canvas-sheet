@@ -9,30 +9,60 @@
  * 将 Excel 公式字符串编译为可执行的 JavaScript 函数
  */
 export class FormulaCompiler {
-  constructor() {
+  constructor(maxCacheSize = 500) {
     this.cache = new Map();
+    this.maxCacheSize = maxCacheSize;
+  }
+
+  /**
+   * LRU 驱逐：缓存满时删除最久未使用的条目
+   * @private
+   */
+  _evict() {
+    if (this.cache.size >= this.maxCacheSize) {
+      const oldestKey = this.cache.keys().next().value;
+      this.cache.delete(oldestKey);
+    }
   }
 
   /**
    * 编译公式
-   * @param {string} formula 
+   * @param {string} formula
    * @param {Object} [context] - 用于解析引用的上下文 (Workbook 实例)
    * @param {number} [baseR=0] - 基准行 (编译时的参考坐标)
    * @param {number} [baseC=0] - 基准列 (编译时的参考坐标)
    * @returns {Function} 编译后的执行函数
    */
   compile(formula, context, baseR = 0, baseC = 0) {
-    // 性能爆发点：使用 R1C1 标准化作为缓存键
-    // 这使得逻辑相同但引用不同的公式 (如 A1+B1, A2+B2) 可以共享同一个编译函数
+    // 快速路径：按原始公式 + 位置直接查缓存，跳过 tokenization
+    const rawKey = formula + '\0' + baseR + '\0' + baseC;
+    if (this.cache.has(rawKey)) {
+      // LRU：命中时移到末尾
+      const fn = this.cache.get(rawKey);
+      this.cache.delete(rawKey);
+      this.cache.set(rawKey, fn);
+      return fn;
+    }
+
+    // 慢路径：R1C1 归一化作为缓存键，支持跨单元格去重
     const { r1c1, tokens } = this._normalizeToR1C1(formula, context, baseR, baseC);
-    if (this.cache.has(r1c1)) return this.cache.get(r1c1);
+    if (this.cache.has(r1c1)) {
+      const fn = this.cache.get(r1c1);
+      // LRU：命中时移到末尾
+      this.cache.delete(r1c1);
+      this.cache.set(r1c1, fn);
+      this.cache.set(rawKey, fn); // 回填快速路径
+      return fn;
+    }
 
     const expression = this._buildExpression(tokens, context, baseR, baseC);
 
     try {
-      // 编译为高性能模板函数 (ctx, baseR, baseC)
       const compiledFn = new Function('ctx', 'baseR', 'baseC', `try { return ${expression}; } catch(e) { return "#ERROR!"; }`);
+      this._evict();
       this.cache.set(r1c1, compiledFn);
+      this._evict();
+      this.cache.set(rawKey, compiledFn);
       return compiledFn;
     } catch (e) {
       console.error('Formula Compile Error:', e, expression);

@@ -17,3 +17,6 @@ pest_derive = "2.6"
 [profile.release]
 lto = true
 opt-level = 'z'
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

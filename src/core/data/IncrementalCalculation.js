@@ -72,6 +72,9 @@ export class IncrementalCalculationEngine {
     visited.clear();
     let newDirty = false;
 
+    // 常驻 numeric 依赖索引（在 Workbook 写入点增量维护），无需每次重建
+    const numericDepIndex = wb._numericDepIndex;
+
     const enqueue = (nk) => {
       if (visited.has(nk)) return;
       visited.add(nk);
@@ -96,15 +99,11 @@ export class IncrementalCalculationEngine {
         cell.dirty = true;
       }
 
-      const currentId = cellKey(r, c);
-
-      const directDependents = wb.dependencyMap.get(currentId);
+      // O(1) 数字键查找，无字符串分配
+      const directDependents = numericDepIndex.get(nk);
       if (directDependents) {
-        for (const depId of directDependents) {
-          const parsed = wb._parseKey(depId);
-          if (Number.isFinite(parsed.r) && Number.isFinite(parsed.c) && parsed.r >= 0 && parsed.c >= 0) {
-            enqueue(cellKeyNumeric(parsed.r, parsed.c));
-          }
+        for (const depNk of directDependents) {
+          enqueue(depNk);
         }
       }
 
@@ -196,6 +195,9 @@ export class IncrementalCalculationEngine {
     visited.clear();
     priorityMap.clear();
 
+    // 常驻 numeric 依赖索引（在 Workbook 写入点增量维护），无需每次重建
+    const numericDepIndex = wb._numericDepIndex;
+
     const enqueue = (nk, priority) => {
       if (!visited.has(nk)) {
         visited.add(nk);
@@ -220,14 +222,11 @@ export class IncrementalCalculationEngine {
       const currentPriority = priorityMap.get(nk);
       const { r, c } = decodeNumeric(nk);
 
-      const currentId = cellKey(r, c);
-      const directDependents = wb.dependencyMap.get(currentId);
+      // O(1) 数字键查找，无字符串分配
+      const directDependents = numericDepIndex.get(nk);
       if (directDependents) {
-        for (const depId of directDependents) {
-          const parsed = wb._parseKey(depId);
-          if (Number.isFinite(parsed.r) && Number.isFinite(parsed.c) && parsed.r >= 0 && parsed.c >= 0) {
-            enqueue(cellKeyNumeric(parsed.r, parsed.c), currentPriority + 1);
-          }
+        for (const depNk of directDependents) {
+          enqueue(depNk, currentPriority + 1);
         }
       }
 
@@ -414,10 +413,11 @@ export class IncrementalCalculationEngine {
   }
   
   /**
-   * 获取缓存键
+   * 获取缓存键（数字键，避免字符串分配）
+   * 使用 r * 1000000 + c 编码，支持最大 100 万列
    */
   _getCacheKey(r, c) {
-    return `${r}|${c}|${this.cacheVersion}`;
+    return r * 1000000 + c;
   }
   
   /**
@@ -430,18 +430,42 @@ export class IncrementalCalculationEngine {
       const oldestKey = this.calcCache.keys().next().value;
       this.calcCache.delete(oldestKey);
     }
-    
+
     const cacheKey = this._getCacheKey(r, c);
-    const dependencies = this.workbook.getDependencies(formula);
-    
+
     this.calcCache.set(cacheKey, {
       value,
       formula,
-      dependencies,
+      dependencies: this._resolveDependencies(r, c, formula),
       timestamp: Date.now(),
       // 记录创建时的 DirtyBitset 版本号，用于快速校验
       dirtyVersion: this.dirtyBitset.version
     });
+  }
+
+  /**
+   * 解析公式依赖供缓存使用。
+   *
+   * 公式写入时 `_updateDependencyMap` 已对同一公式调用 `getDependencies` 并把
+   * `{cells, ranges}` 存入 `reverseDependencyMap`；这里直接复用该结果，避免对每次
+   * cache miss 重复跑两遍正则与 `_refToRC` 解析（热路径上的正则/字符串分配大头）。
+   *
+   * 注意：必须浅克隆而非共享引用——`compactDependencyGraph` 会原地 `cells.delete`
+   * 修改 `reverseDependencyMap` 中的 Set，若共享会破坏缓存快照导致 `_isCacheValid`
+   * 漏检脏依赖。ranges 元素对象不会被原地修改，`slice` 浅拷贝即可。
+   *
+   * 反向依赖缺失（理论上公式单元格不会发生）时回退到完整解析。
+   */
+  _resolveDependencies(r, c, formula) {
+    const wb = this.workbook;
+    const reverse = wb.reverseDependencyMap.get(wb._cellKey(r, c));
+    if (reverse && (reverse.cells || reverse.ranges)) {
+      return {
+        cells: reverse.cells ? new Set(reverse.cells) : new Set(),
+        ranges: reverse.ranges ? reverse.ranges.slice() : []
+      };
+    }
+    return wb.getDependencies(formula);
   }
 
   /**
@@ -501,15 +525,16 @@ export class IncrementalCalculationEngine {
    * 由 _maybeScheduleCompact 节流触发，也可显式调用。
    */
   compactDependencyGraph() {
-    const depMap = this.workbook.dependencyMap;
-    const reverseDepMap = this.workbook.reverseDependencyMap;
+    const wb = this.workbook;
+    const depMap = wb.dependencyMap;
+    const reverseDepMap = wb.reverseDependencyMap;
     if (!depMap) return;
 
     // 移除不存在的单元格的依赖
     for (const [srcId, dependents] of depMap) {
-      const { r, c } = this.workbook._parseKey(srcId);
-      const cell = this.workbook._dataMatrix.get(r, c);
-      
+      const { r, c } = wb._parseKey(srcId);
+      const cell = wb._dataMatrix.get(r, c);
+
       if (!cell || !cell.f) {
         // 单元格不存在或不是公式，清理依赖
         for (const depId of dependents) {
@@ -531,6 +556,10 @@ export class IncrementalCalculationEngine {
           }
         }
         depMap.delete(srcId);
+        // 同步清理常驻 numeric 索引中该源的整条出边
+        if (typeof wb._dropNumericDepSource === 'function') {
+          wb._dropNumericDepSource(srcId);
+        }
       }
     }
   }

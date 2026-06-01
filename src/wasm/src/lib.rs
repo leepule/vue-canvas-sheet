@@ -51,6 +51,10 @@ impl FormulaEngine {
         self.grid_cols
     }
 
+    pub fn update_grid_rows(&mut self, rows: usize) {
+        self.grid_rows = rows;
+    }
+
     pub fn evaluate(&mut self, formula: &str) -> JsValue {
         self.evaluate_internal(formula).to_js_value()
     }
@@ -75,8 +79,11 @@ impl FormulaEngine {
     pub fn evaluate_group(&mut self, rows: Uint32Array, cols: Uint32Array, formula: &str, ids: Array) -> JsValue {
         let non_numeric = Object::new();
         let len = rows.length();
-        let mut numeric_vals = Vec::with_capacity(len as usize);
-        
+        let has_shared = self.shared_buffer.is_some();
+
+        // 无共享内存时才收集 numeric_vals，有共享内存时直接写入（零拷贝）
+        let mut numeric_vals = if has_shared { Vec::new() } else { Vec::with_capacity(len as usize) };
+
         // 循环外解析公式（5万次合并为1次）
         let ast = if let Some(cached) = self.ast_cache.get(formula) {
             cached.clone()
@@ -86,27 +93,40 @@ impl FormulaEngine {
             self.ast_cache.insert(formula.to_string(), ast.clone());
             ast
         };
-        
+
         for i in 0..len {
             let r = rows.get_index(i) as usize;
             let c = cols.get_index(i) as usize;
-            
+
             let res = self.eval_ast(&ast, (r, c));
-            
+
             match res {
                 CalcValue::Number(n) => {
-                    numeric_vals.push(n);
+                    if let Some(ref buffer) = self.shared_buffer {
+                        // 零拷贝：直接写入 SharedArrayBuffer
+                        if r < self.grid_rows && c < self.grid_cols {
+                            let idx = (r * self.grid_cols + c) as u32;
+                            buffer.set_index(idx, n);
+                        }
+                    } else {
+                        numeric_vals.push(n);
+                    }
                 },
                 _ => {
-                    numeric_vals.push(f64::NAN); // 占位符
+                    if !has_shared {
+                        numeric_vals.push(f64::NAN); // 占位符
+                    }
                     let cell_id = ids.get(i);
                     Reflect::set(&non_numeric, &cell_id, &res.to_js_value()).unwrap();
                 }
             }
         }
-        
+
         let output = Object::new();
-        Reflect::set(&output, &"numeric_results".into(), &Float64Array::from(numeric_vals.as_slice()).into()).unwrap();
+        // 仅在无共享内存时返回 numeric_results（降级路径）
+        if !has_shared {
+            Reflect::set(&output, &"numeric_results".into(), &Float64Array::from(numeric_vals.as_slice()).into()).unwrap();
+        }
         Reflect::set(&output, &"non_numeric_results".into(), &non_numeric.into()).unwrap();
         output.into()
     }

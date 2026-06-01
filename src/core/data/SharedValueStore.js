@@ -22,13 +22,21 @@ export class SharedValueStore {
     this.maxRows = maxRows;
     this.maxCols = maxCols;
     this.supported = typeof SharedArrayBuffer !== 'undefined';
-    
+
     /** @type {Map<number, Float64Array>} 分块存储：chunkIndex -> Float64Array */
     this.chunks = new Map();
     /** @type {SharedArrayBuffer|null} 连续缓冲区（仅在需要 WASM 绑定时按需分配） */
     this.continuousBuffer = null;
     /** @type {Float64Array|null} 连续缓冲区的视图 */
     this.continuousView = null;
+    /** @type {number} 连续缓冲区实际分配的列数（用于索引计算） */
+    this._continuousCols = 0;
+    /** @type {Function|null} 缓冲区扩容回调（通知 WASM 更新 grid_rows） */
+    this.onGrow = null;
+
+    // 实际使用量追踪（用于按需分配连续缓冲区）
+    this._actualMaxRow = -1;
+    this._actualMaxCol = -1;
   }
 
   /**
@@ -79,9 +87,31 @@ export class SharedValueStore {
    */
   _syncToContinuous(chunkIdx, chunkView) {
     if (!this.continuousView) return;
-    
-    const offset = chunkIdx * CHUNK_SIZE * this.maxCols;
-    this.continuousView.set(chunkView, offset);
+
+    const offset = chunkIdx * CHUNK_SIZE * this._continuousCols;
+    // chunk 的列数可能大于连续缓冲区的列数，只同步重叠部分
+    const copyLen = Math.min(chunkView.length, this.continuousView.length - offset);
+    if (copyLen <= 0) return;
+
+    const srcCols = this.maxCols;
+    const dstCols = this._continuousCols;
+
+    // 快路径：源/目标列数相同（列数稳定的常见情况），行布局完全一致，
+    // 整个重叠区域可用 TypedArray.set 一次 memcpy 拷贝。
+    if (srcCols === dstCols) {
+      this.continuousView.set(chunkView.subarray(0, copyLen), offset);
+      return;
+    }
+
+    // 兜底：列数不同，逐行批量拷贝重叠列（仍用 set 避免逐元素标量写）
+    const chunkRows = Math.min(CHUNK_SIZE, Math.floor(chunkView.length / srcCols));
+    const rowCopy = Math.min(srcCols, dstCols);
+    for (let r = 0; r < chunkRows; r++) {
+      const srcOff = r * srcCols;
+      const dstOff = offset + r * dstCols;
+      if (dstOff + dstCols > this.continuousView.length) break;
+      this.continuousView.set(chunkView.subarray(srcOff, srcOff + rowCopy), dstOff);
+    }
   }
 
   /**
@@ -107,6 +137,10 @@ export class SharedValueStore {
       numericVal = isNaN(n) ? SharedValueStore.EMPTY_VALUE : n;
     }
 
+    // 追踪实际使用量
+    if (r > this._actualMaxRow) this._actualMaxRow = r;
+    if (c > this._actualMaxCol) this._actualMaxCol = c;
+
     // 1. 更新分块（懒分配）
     const chunkView = this._getChunk(r);
     if (chunkView) {
@@ -114,9 +148,15 @@ export class SharedValueStore {
       chunkView[rowInChunk * this.maxCols + c] = numericVal;
     }
 
-    // 2. 如果已存在连续缓冲区，同步更新
+    // 2. 如果已存在连续缓冲区，同步更新（超出范围时扩容）
     if (this.continuousView) {
-      this.continuousView[r * this.maxCols + c] = numericVal;
+      const idx = r * this._continuousCols + c;
+      if (idx < this.continuousView.length) {
+        this.continuousView[idx] = numericVal;
+      } else {
+        this._growContinuousBuffer(r + 1, c + 1);
+        this.continuousView[r * this._continuousCols + c] = numericVal;
+      }
     }
   }
 
@@ -129,10 +169,11 @@ export class SharedValueStore {
   get(r, c) {
     if (!this.supported) return SharedValueStore.EMPTY_VALUE;
     if (r < 0 || r >= this.maxRows || c < 0 || c >= this.maxCols) return SharedValueStore.EMPTY_VALUE;
-    
+
     // 优先从连续缓冲区获取
     if (this.continuousView) {
-      return this.continuousView[r * this.maxCols + c];
+      const idx = r * this._continuousCols + c;
+      return idx < this.continuousView.length ? this.continuousView[idx] : SharedValueStore.EMPTY_VALUE;
     }
 
     // 否则从分块获取
@@ -150,19 +191,25 @@ export class SharedValueStore {
 
   /**
    * 获取连续缓冲区（用于 WASM 绑定）
-   * 调用此方法会导致一次性分配大块内存
+   * 按实际使用量分配，避免预分配 195MB
    * @returns {SharedArrayBuffer|null}
    */
   getBuffer() {
     if (!this.supported) return null;
-    
+
     if (!this.continuousBuffer) {
       try {
-        console.log(`[SharedValueStore] 正在为 WASM 分配连续内存: ${(this.maxRows * this.maxCols * BYTES_PER_CELL / 1024 / 1024).toFixed(2)} MB`);
-        this.continuousBuffer = new SharedArrayBuffer(this.maxRows * this.maxCols * BYTES_PER_CELL);
+        // 按实际使用量分配，带 2x 增长余量，最少 1024 行减少初期扩容次数，上限为 maxRows × maxCols
+        const rows = Math.min(Math.max((this._actualMaxRow + 1) * 2, 1024), this.maxRows);
+        const cols = Math.min(Math.max((this._actualMaxCol + 1) * 2, 1), this.maxCols);
+        const size = rows * cols * BYTES_PER_CELL;
+
+        console.log(`[SharedValueStore] 正在为 WASM 分配连续内存: ${(size / 1024 / 1024).toFixed(2)} MB (${rows} rows × ${cols} cols)`);
+        this.continuousBuffer = new SharedArrayBuffer(size);
         this.continuousView = new Float64Array(this.continuousBuffer);
         this.continuousView.fill(SharedValueStore.EMPTY_VALUE);
-        
+        this._continuousCols = cols;
+
         // 将现有分块同步到连续缓冲区
         for (const [chunkIdx, view] of this.chunks.entries()) {
           this._syncToContinuous(chunkIdx, view);
@@ -172,8 +219,53 @@ export class SharedValueStore {
         return null;
       }
     }
-    
+
     return this.continuousBuffer;
+  }
+
+  /**
+   * 扩容连续缓冲区（当写入超出当前分配时调用）
+   * @private
+   */
+  _growContinuousBuffer(needRows, needCols) {
+    // 列数：按需增长，不盲目翻倍（列数通常稳定）
+    const newCols = Math.min(Math.max(needCols, this._continuousCols), this.maxCols);
+    // 行数：当前 2 倍或按需，取较大值（避免频繁扩容）
+    const currentRows = Math.floor(this.continuousView.length / this._continuousCols);
+    const newRows = Math.min(Math.max(needRows, currentRows * 2), this.maxRows);
+    const newSize = newRows * newCols * BYTES_PER_CELL;
+
+    console.log(`[SharedValueStore] 扩容连续缓冲区: ${(newSize / 1024 / 1024).toFixed(2)} MB (${newRows} rows × ${newCols} cols)`);
+
+    const newBuffer = new SharedArrayBuffer(newSize);
+    const newView = new Float64Array(newBuffer);
+    newView.fill(SharedValueStore.EMPTY_VALUE);
+
+    // 迁移旧数据
+    const oldRows = Math.floor(this.continuousView.length / this._continuousCols);
+    const copyRows = Math.min(oldRows, newRows);
+    const copyCols = Math.min(this._continuousCols, newCols);
+
+    // 快路径：列数不变（仅行增长，最常见的扩容场景），旧数据行布局与新缓冲区
+    // 前缀完全一致，整块用 TypedArray.set 一次 memcpy 迁移。
+    if (this._continuousCols === newCols) {
+      const copyLen = copyRows * newCols;
+      newView.set(this.continuousView.subarray(0, copyLen), 0);
+    } else {
+      // 兜底：列数变化，逐行批量拷贝重叠列（仍用 set 避免逐元素标量写）
+      for (let r = 0; r < copyRows; r++) {
+        const srcOffset = r * this._continuousCols;
+        const dstOffset = r * newCols;
+        newView.set(this.continuousView.subarray(srcOffset, srcOffset + copyCols), dstOffset);
+      }
+    }
+
+    this.continuousBuffer = newBuffer;
+    this.continuousView = newView;
+    this._continuousCols = newCols;
+
+    // 通知外部（如 WASM 引擎）重新绑定共享内存
+    if (this.onGrow) this.onGrow(newRows, newBuffer, newCols);
   }
 
   /**

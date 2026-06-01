@@ -583,7 +583,9 @@ export class StoreManager {
     this._stores = new Map();
     /** @type {Set<Function>} 全局监听器 */
     this._globalListeners = new Set();
-    
+    /** @type {Map<string, Function>} Store 取消订阅句柄 */
+    this._unsubscribes = new Map();
+
     Object.entries(stores).forEach(([name, store]) => {
       this.addStore(name, store);
     });
@@ -604,14 +606,21 @@ export class StoreManager {
    * @param {Store} store - Store 实例
    */
   addStore(name, store) {
+    // 替换已有 store 时，先取消旧 store 的订阅
+    if (this._stores.has(name)) {
+      const oldUnsub = this._unsubscribes.get(name);
+      if (oldUnsub) oldUnsub();
+    }
+
     this._stores.set(name, store);
-    
-    // 自动订阅 Store 变化并转发给全局监听器
-    store.subscribe((newState, prevState) => {
+
+    // 订阅 Store 变化并转发给全局监听器，保存 unsubscribe 句柄
+    const unsub = store.subscribe((newState, prevState) => {
       this._globalListeners.forEach(listener => {
         listener(name, newState, prevState);
       });
     });
+    this._unsubscribes.set(name, unsub);
   }
  
   /**
@@ -644,6 +653,11 @@ export class StoreManager {
    * 清除所有 Store 和监听器
    */
   clear() {
+    // 取消所有 store 的订阅，释放对 StoreManager 的引用
+    for (const unsub of this._unsubscribes.values()) {
+      unsub();
+    }
+    this._unsubscribes.clear();
     this._stores.forEach(store => store.clear());
     this._stores.clear();
     this._globalListeners.clear();

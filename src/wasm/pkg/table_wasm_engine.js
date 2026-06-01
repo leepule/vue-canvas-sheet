@@ -62,6 +62,12 @@ export class FormulaEngine {
         FormulaEngineFinalization.register(this, this.__wbg_ptr, this);
         return this;
     }
+    /**
+     * @param {number} rows
+     */
+    update_grid_rows(rows) {
+        wasm.formulaengine_update_grid_rows(this.__wbg_ptr, rows);
+    }
 }
 if (Symbol.dispose) FormulaEngine.prototype[Symbol.dispose] = FormulaEngine.prototype.free;
 function __wbg_get_imports() {
@@ -149,6 +155,9 @@ function __wbg_get_imports() {
             const ret = Reflect.set(arg0, arg1, arg2);
             return ret;
         }, arguments); },
+        __wbg_set_index_24a79f6bf22a9e3c: function(arg0, arg1, arg2) {
+            arg0[arg1 >>> 0] = arg2;
+        },
         __wbindgen_cast_0000000000000001: function(arg0) {
             // Cast intrinsic for `F64 -> Externref`.
             const ret = arg0;

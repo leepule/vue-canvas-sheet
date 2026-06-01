@@ -242,19 +242,52 @@ export class ExportPlugin {
       const snapshot = buildSparseExportSnapshot(this._workbook);
       const { entries, bounds, rowCount, colCount } = snapshot;
 
-      const rows = new Array(rowCount);
-      for (let i = 0; i < rowCount; i++) rows[i] = new Array(colCount).fill('');
+      // 预计算空行字符串（避免每行重复分配）
+      const emptyRow = colCount > 1 ? delimiter.repeat(colCount - 1) : '';
 
+      // 按行分组稀疏条目，避免创建 rowCount × colCount 的密集数组
+      const rowMap = new Map();
       for (let i = 0; i < entries.length; i++) {
         const { r, c, cell } = entries[i];
         if (!cell || r < bounds.minRow || c < bounds.minCol || r > bounds.maxRow || c > bounds.maxCol) continue;
         const value = cell.v;
         if (value === null || value === undefined || value === '') continue;
-        rows[r - bounds.minRow][c - bounds.minCol] = csvEscape(value, delimiter);
+
+        const rowIdx = r - bounds.minRow;
+        const colIdx = c - bounds.minCol;
+        let cells = rowMap.get(rowIdx);
+        if (!cells) {
+          cells = new Map();
+          rowMap.set(rowIdx, cells);
+        }
+        cells.set(colIdx, csvEscape(value, delimiter));
       }
 
-      const csvContent = (includeBom ? '﻿' : '') +
-        rows.map(row => row.join(delimiter)).join(lineEnding);
+      // 逐行构建 CSV：空行直接复用预计算字符串，有数据的行按稀疏方式拼接
+      const lines = new Array(rowCount);
+      for (let ri = 0; ri < rowCount; ri++) {
+        const cells = rowMap.get(ri);
+        if (!cells || cells.size === 0) {
+          lines[ri] = emptyRow;
+        } else {
+          // 按列号排序后逐段拼接，避免分配 colCount 大小的数组
+          const sortedCols = Array.from(cells.keys()).sort((a, b) => a - b);
+          let line = '';
+          let prev = -1;
+          for (const ci of sortedCols) {
+            // 填充前面的空列
+            if (ci > prev + 1) line += delimiter.repeat(ci - prev - 1);
+            if (prev >= 0) line += delimiter;
+            line += cells.get(ci);
+            prev = ci;
+          }
+          // 填充尾部空列
+          if (prev < colCount - 1) line += delimiter.repeat(colCount - 1 - prev);
+          lines[ri] = line;
+        }
+      }
+
+      const csvContent = (includeBom ? '﻿' : '') + lines.join(lineEnding);
 
       downloadBlob(new Blob([csvContent], { type: 'text/csv;charset=utf-8;' }), fileName);
 

@@ -1,7 +1,1 @@
 *
-!.gitignore
-!package.json
-!table_wasm_engine.js
-!table_wasm_engine.d.ts
-!table_wasm_engine_bg.wasm
-!table_wasm_engine_bg.wasm.d.ts

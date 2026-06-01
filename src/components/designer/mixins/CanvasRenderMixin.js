@@ -959,6 +959,39 @@ export default {
       this.invalidateCore(rect);
     },
 
+    // ── 预绑定渲染子步骤，避免每帧 requestAnimationFrame 内重建闭包 ──
+
+    _runRenderMainThread() {
+      const useProgressive = this.shouldUseProgressiveRender && this.shouldUseProgressiveRender();
+      if (useProgressive && this.startProgressiveRender) {
+        this.startProgressiveRender();
+      } else {
+        const monitor = this.workbook.getPerformanceMonitor();
+        const metricType = this.fullRedraw ? MetricTypes.RENDER_FULL : MetricTypes.RENDER_PARTIAL;
+        if (monitor && monitor.enabled) {
+          monitor.measure(metricType, () => { this._renderContent(); });
+        } else {
+          this._renderContent();
+        }
+      }
+    },
+
+    _finishContentRender() {
+      this.renderContentRequested = false;
+      this.renderSelectionRequested = true;
+    },
+
+    _flushOverlayRender() {
+      if (this.renderSelectionRequested) {
+        this._renderSelection();
+        this.renderSelectionRequested = false;
+      }
+      if (this.renderAnimationRequested) {
+        this._renderAnimation();
+        this.renderAnimationRequested = false;
+      }
+    },
+
     render() {
       if ((!this.ctx && !this.isOffscreenActive) || !this.workbook) return;
 
@@ -966,98 +999,39 @@ export default {
       this.pendingRender = true;
       requestAnimationFrame(() => {
         this.pendingRender = false;
-        
-        // 如果有渐进式渲染器且正在渲染，暂停它以进行同步渲染
+
+        // 渐进式渲染正在进行，只刷新覆盖层
         if (this.progressiveRenderer && this.progressiveState && this.progressiveState.isRendering) {
-          // 渐进式渲染正在进行，只渲染覆盖层
-          if (this.renderSelectionRequested) {
-            this._renderSelection();
-            this.renderSelectionRequested = false;
-          }
-          if (this.renderAnimationRequested) {
-            this._renderAnimation();
-            this.renderAnimationRequested = false;
-          }
+          this._flushOverlayRender();
           return;
         }
-        
-        const monitor = this.workbook.getPerformanceMonitor();
-        
+
         if (this.renderGridRequested) {
           this._renderGrid();
           this.renderGridRequested = false;
         }
 
         if (this.renderContentRequested) {
-            const isFullRedraw = this.fullRedraw;
-            const metricType = isFullRedraw ? MetricTypes.RENDER_FULL : MetricTypes.RENDER_PARTIAL;
-            
-            const renderMainThread = () => {
-              // 检查是否应该使用渐进式渲染
-              const useProgressive = this.shouldUseProgressiveRender && this.shouldUseProgressiveRender();
-              
-              if (useProgressive && this.startProgressiveRender) {
-                // 使用渐进式渲染
-                this.startProgressiveRender();
-              } else if (monitor && monitor.enabled) {
-                monitor.measure(metricType, () => {
-                  this._renderContent();
-                });
-              } else {
-                this._renderContent();
-              }
-            };
+          const useWorker = this.shouldUseWorkerRender && this.shouldUseWorkerRender();
+          if (useWorker && this._renderContentWithWorker) {
+            this._renderContentWithWorker().then((success) => {
+              if (!success) this._runRenderMainThread();
+              this._finishContentRender();
+              this._flushOverlayRender();
+            }).catch((error) => {
+              console.error('[CanvasRenderMixin] Worker render failed:', error);
+              this._runRenderMainThread();
+              this._finishContentRender();
+              this._flushOverlayRender();
+            });
+            return;
+          }
 
-            const finishContentRender = () => {
-              this.renderContentRequested = false;
-              // 内容变化时需要同步更新选区层
-              this.renderSelectionRequested = true;
-            };
-
-            const flushOverlayRender = () => {
-              if (this.renderSelectionRequested) {
-                this._renderSelection();
-                this.renderSelectionRequested = false;
-              }
-              if (this.renderAnimationRequested) {
-                this._renderAnimation();
-                this.renderAnimationRequested = false;
-              }
-            };
-
-            const useWorker = this.shouldUseWorkerRender && this.shouldUseWorkerRender();
-            if (useWorker && this._renderContentWithWorker) {
-              const workerRender = this._renderContentWithWorker();
-              workerRender.then((success) => {
-                if (!success) {
-                  renderMainThread();
-                }
-                finishContentRender();
-                flushOverlayRender();
-              }).catch((error) => {
-                console.error('[CanvasRenderMixin] Worker render failed:', error);
-                renderMainThread();
-                finishContentRender();
-                flushOverlayRender();
-              });
-              return;
-            }
-
-            renderMainThread();
-            finishContentRender();
+          this._runRenderMainThread();
+          this._finishContentRender();
         }
-        
-        // 渲染选区层（静态部分）
-        if (this.renderSelectionRequested) {
-            this._renderSelection();
-            this.renderSelectionRequested = false;
-        }
-        
-        // 渲染动画层（动态部分）
-        if (this.renderAnimationRequested) {
-            this._renderAnimation();
-            this.renderAnimationRequested = false;
-        }
+
+        this._flushOverlayRender();
       });
     },
 
