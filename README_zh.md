@@ -148,7 +148,7 @@ const off = wb.on('cell-change', (changes) => { /* ... */ });
 off();
 ```
 
-完整 API 参见 [docs/USAGE.md](./docs/USAGE.md)。
+完整文档（使用 / API / 插件 / 公式）参见 [文档中心](./docs/README.md)。
 
 ---
 

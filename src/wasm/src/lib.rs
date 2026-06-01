@@ -131,21 +131,66 @@ impl FormulaEngine {
         output.into()
     }
 
+    /// 二元运算符优先级（数值越大优先级越高），与 Excel / JS 标准一致。
+    fn op_precedence(op: &str) -> u8 {
+        match op {
+            "*" | "/" => 4,
+            "+" | "-" => 3,
+            "&" => 2,
+            "=" | "<>" | "<" | ">" | "<=" | ">=" => 1,
+            _ => 0,
+        }
+    }
+
+    /// 用 Shunting-Yard（操作数栈 + 运算符栈）按优先级构建左结合 AST。
+    /// `operands.len() == operators.len() + 1`。
+    fn build_with_precedence(operands: Vec<AstNode>, operators: Vec<String>) -> AstNode {
+        let mut out: Vec<AstNode> = Vec::new();
+        let mut ops: Vec<String> = Vec::new();
+        let mut operand_iter = operands.into_iter();
+        out.push(operand_iter.next().unwrap());
+
+        let reduce = |out: &mut Vec<AstNode>, op: String| {
+            let right = out.pop().unwrap();
+            let left = out.pop().unwrap();
+            out.push(AstNode::BinaryOp { left: Box::new(left), op, right: Box::new(right) });
+        };
+
+        for op in operators {
+            let prec = Self::op_precedence(&op);
+            // 左结合：栈顶优先级 >= 当前则先归约
+            while let Some(top) = ops.last() {
+                if Self::op_precedence(top) >= prec {
+                    let top_op = ops.pop().unwrap();
+                    reduce(&mut out, top_op);
+                } else {
+                    break;
+                }
+            }
+            ops.push(op);
+            out.push(operand_iter.next().unwrap());
+        }
+        while let Some(top_op) = ops.pop() {
+            reduce(&mut out, top_op);
+        }
+        out.pop().unwrap()
+    }
+
     fn build_ast(&self, pair: pest::iterators::Pair<Rule>) -> AstNode {
         match pair.as_rule() {
             Rule::formula => self.build_ast(pair.into_inner().next().unwrap()),
             Rule::expr => {
+                // 收集扁平的 term/op 序列后，按标准运算符优先级构建 AST，
+                // 而非简单的从左到右折叠（保证 =1+2*3 得 7 而非 9）。
                 let mut inner = pair.into_inner();
-                let mut node = self.build_ast(inner.next().unwrap());
+                let mut operands: Vec<AstNode> = Vec::new();
+                let mut operators: Vec<String> = Vec::new();
+                operands.push(self.build_ast(inner.next().unwrap()));
                 while let Some(op) = inner.next() {
-                    let right = self.build_ast(inner.next().unwrap());
-                    node = AstNode::BinaryOp {
-                        left: Box::new(node),
-                        op: op.as_str().to_string(),
-                        right: Box::new(right),
-                    };
+                    operators.push(op.as_str().to_string());
+                    operands.push(self.build_ast(inner.next().unwrap()));
                 }
-                node
+                Self::build_with_precedence(operands, operators)
             },
             Rule::number => AstNode::Number(pair.as_str().parse().unwrap_or(0.0)),
             Rule::string => {

@@ -36,3 +36,4 @@ pnpm-debug.log*
 
 *.lock
 !yarn.lock
+!src/wasm/Cargo.lock

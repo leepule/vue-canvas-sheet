@@ -148,7 +148,7 @@ const off = wb.on('cell-change', (changes) => { /* ... */ });
 off();
 ```
 
-See [docs/USAGE.md](./docs/USAGE.md) for the complete reference.
+See the [documentation hub](./docs/README.md) for the complete reference (usage, API, plugins, formulas).
 
 ---
 

@@ -7,6 +7,8 @@
 - 协议：Apache-2.0
 - Vue 版本要求：`vue ^3.5.0`
 
+> 相关文档：[包导出总览](./API_OVERVIEW.md) ｜ [Workbook API](./WORKBOOK_API.md) ｜ [插件开发](./PLUGIN_DEVELOPMENT.md) ｜ [公式](./FORMULAS.md)
+
 ---
 
 ## 目录
@@ -231,6 +233,8 @@ const data = [
 ---
 
 ## 7. 插件系统
+
+> 想自己开发插件？请参阅 [插件开发文档（PLUGIN_DEVELOPMENT.md）](./PLUGIN_DEVELOPMENT.md)，内含架构、生命周期、钩子系统、共享状态与完整示例。
 
 库内置的插件位于 `vue-canvas-sheet` 命名空间，全部以 `create<Name>Plugin(options)` 工厂函数提供。
 
