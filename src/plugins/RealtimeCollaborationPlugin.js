@@ -58,6 +58,17 @@ export class RealtimeCollaborationPlugin {
     this._editingDrafts = new Map(); // key: r,c -> { userId, userName, value }
     this._localFocusTime = Date.now();
     this._lastSelectionKey = null; // 缓存上一次的选区，避免原地重复点击或双击时重置聚焦时间
+
+    // 选区广播节流：拖拽/连续点选会爆发式触发 selection-change，逐次 _sendRaw 浪费网络与序列化。
+    // 这里只节流「网络发送」，焦点时间判定仍同步执行（见 onMounted）。窗口内合并为最后一次选区。
+    this._selectionThrottleMs = options.selectionThrottleMs ?? 30;
+    this._selectionSendTimer = null;
+    this._pendingSelection = null;
+
+    // cell-change 批量合并：同一同步任务（如 bulkSetCells 粘贴/填充）内爆发的多格变更，
+    // 入队后于微任务统一冲刷——单格走传统 cell-change（向后兼容），多格合并为单条 cell-change-batch。
+    this._cellChangeQueue = [];
+    this._cellChangeFlushScheduled = false;
   }
 
   onInit(workbook, registry) {
@@ -170,6 +181,14 @@ export class RealtimeCollaborationPlugin {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
+    if (this._selectionSendTimer !== null) {
+      clearTimeout(this._selectionSendTimer);
+      this._selectionSendTimer = null;
+      this._pendingSelection = null;
+    }
+    // 丢弃未冲刷的本地变更队列（断开即离场，无需再发）
+    this._cellChangeQueue = [];
+    this._cellChangeFlushScheduled = false;
     if (this._socket) {
       // 移除所有监听，避免触发 close 重连
       this._socket.onopen = null;
@@ -311,13 +330,22 @@ export class RealtimeCollaborationPlugin {
    */
   _broadcastSelection(selection) {
     if (!selection) return;
-    // userName/userColor 已在 user-join 时发送，后续选区变化只发变动数据
-    this._sendRaw({
-      type: 'selection-change',
-      roomId: this.roomId,
-      userId: this.userId,
-      selection
-    });
+    // 节流：窗口内只保留最后一次选区，窗口结束统一发送，合并拖拽爆发。
+    this._pendingSelection = selection;
+    if (this._selectionSendTimer !== null) return;
+    this._selectionSendTimer = setTimeout(() => {
+      this._selectionSendTimer = null;
+      const sel = this._pendingSelection;
+      this._pendingSelection = null;
+      if (!sel) return;
+      // userName/userColor 已在 user-join 时发送，后续选区变化只发变动数据
+      this._sendRaw({
+        type: 'selection-change',
+        roomId: this.roomId,
+        userId: this.userId,
+        selection: sel
+      });
+    }, this._selectionThrottleMs);
   }
 
   /**
@@ -332,17 +360,46 @@ export class RealtimeCollaborationPlugin {
 
     if (row === undefined || col === undefined) return data;
 
-    this._sendRaw({
-      type: 'cell-change',
-      roomId: this.roomId,
-      userId: this.userId,
-      row,
-      col,
-      cell,
-      timestamp: Date.now()
-    });
+    // 入队 + 微任务冲刷：同一同步任务内的爆发式变更合并为一次发送，避免逐格 WS 消息。
+    this._cellChangeQueue.push({ row, col, cell });
+    if (!this._cellChangeFlushScheduled) {
+      this._cellChangeFlushScheduled = true;
+      queueMicrotask(() => this._flushCellChanges());
+    }
 
     return data;
+  }
+
+  /**
+   * 冲刷 cell-change 队列：单格走传统 cell-change（向后兼容），多格合并为单条 cell-change-batch。
+   */
+  _flushCellChanges() {
+    this._cellChangeFlushScheduled = false;
+    const queue = this._cellChangeQueue;
+    if (queue.length === 0) return;
+    this._cellChangeQueue = [];
+
+    if (queue.length === 1) {
+      const { row, col, cell } = queue[0];
+      this._sendRaw({
+        type: 'cell-change',
+        roomId: this.roomId,
+        userId: this.userId,
+        row,
+        col,
+        cell,
+        timestamp: Date.now()
+      });
+    } else {
+      // batch 内层固定使用标准字段 {row,col,cell}（不走 fieldNames 映射），两端同版本原样透传。
+      this._sendRaw({
+        type: 'cell-change-batch',
+        roomId: this.roomId,
+        userId: this.userId,
+        cells: queue,
+        timestamp: Date.now()
+      });
+    }
   }
 
   /**
@@ -597,6 +654,25 @@ export class RealtimeCollaborationPlugin {
             this._workbook.setCell(row, col, cell, { skipEvent: true });
             // 应用最终修改后，清理对应的草稿
             this._editingDrafts.delete(`${row},${col}`);
+            this._requestRender();
+          } finally {
+            this._isApplyingRemote = false;
+          }
+        }
+        this._checkDraftsAnimation();
+        break;
+
+      case 'cell-change-batch':
+        // 收到远程批量单元格修改，一次性应用后只渲染一次
+        if (this._workbook && Array.isArray(msg.cells)) {
+          this._isApplyingRemote = true;
+          try {
+            for (const item of msg.cells) {
+              const { row, col, cell } = item;
+              if (row === undefined || col === undefined) continue;
+              this._workbook.setCell(row, col, cell, { skipEvent: true });
+              this._editingDrafts.delete(`${row},${col}`);
+            }
             this._requestRender();
           } finally {
             this._isApplyingRemote = false;

@@ -87,6 +87,11 @@ export class HistoryOptimizer {
    * 估算命令大小（字节）
    */
   _estimateCommandSize(cmd) {
+    // 估算结果缓存到命令对象：命令创建后其 oldValue/newValue/changes/cmds 不再变化
+    //（合并策略产生新对象、_optimizeMemory 仅打 _compressible 标记），故只需算一次，
+    // 避免 trackRemove / trackClearStack 反复对对象值 JSON.stringify。
+    if (cmd._size !== undefined) return cmd._size;
+
     let size = 100; // 基础开销
 
     if (cmd.oldValue) {
@@ -104,6 +109,7 @@ export class HistoryOptimizer {
       }
     }
 
+    cmd._size = size;
     return size;
   }
 

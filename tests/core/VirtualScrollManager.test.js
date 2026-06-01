@@ -33,30 +33,37 @@ describe('VirtualScrollManager 增强版验证', () => {
     expect(range.endCol).toBeGreaterThan(0);
   });
 
-  test('差量更新逻辑识别滚动变化', () => {
-    // 第一次计算获取缓存
+  test('入口短路：入参未变时返回同一缓存对象', () => {
     const range1 = manager.getVisibleRange(800, 600, 40, 30);
-    
-    // 模拟小幅向下滚动
+    const range2 = manager.getVisibleRange(800, 600, 40, 30);
+    // 同帧多次调用应复用同一引用，且只完整重算一次
+    expect(range2).toBe(range1);
+    expect(manager.getIncrementalUpdateStats().fullUpdates).toBe(1);
+  });
+
+  test('滚动变化触发重算并更新可见范围', () => {
+    const range1 = manager.getVisibleRange(800, 600, 40, 30);
+
+    // 模拟向下滚动
     manager.scrollY = 100;
     const range2 = manager.getVisibleRange(800, 600, 40, 30);
-    
-    expect(range2.needsIncrementalRender).toBe(true);
-    expect(range2.renderChanges).toBeDefined();
-    expect(range2.renderChanges.addedRows.length).toBeGreaterThan(0);
+
+    // 短路不命中 → 重新计算出新的范围引用，起始行随滚动下移
+    expect(range2).not.toBe(range1);
+    expect(range2.startRow).toBeGreaterThanOrEqual(range1.startRow);
+    expect(range2.exactStartRow).toBe(5); // floor(100 / 20)
+    expect(manager.getIncrementalUpdateStats().fullUpdates).toBe(2);
   });
 
   test('脏标记系统正常工作', () => {
-    manager.getVisibleRange(800, 600, 40, 30);
-    
-    // 标记行为脏
+    // 标记行为脏后，可通过脏区查询接口取回
     manager.markDirtyRow(5);
-    
-    // 发生小幅滚动触发差量计算
-    manager.scrollY = 20;
-    const range = manager.getVisibleRange(800, 600, 40, 30);
-    
-    expect(range.renderChanges.dirtyRows.some(r => r.rowIndex === 5)).toBe(true);
+    const regions = manager.getDirtyRegions({ startRow: 0, endRow: 10, startCol: 0, endCol: 10 });
+    expect(regions.rows.some(r => r.index === 5)).toBe(true);
+
+    // 完整重算（autoCleanAfterRender）后，落在可见范围内的脏行被清理
+    manager.getVisibleRange(800, 600, 40, 30);
+    expect(manager.dirtyState.rows.has(5)).toBe(false);
   });
 
   test('大步长滚动不应出现预测跳跃导致的空隙', () => {

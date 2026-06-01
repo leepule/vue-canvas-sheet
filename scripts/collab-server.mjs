@@ -180,6 +180,7 @@ wss.on('connection', (ws, req) => {
       }
 
       case 'cell-change':
+      case 'cell-change-batch': // 批量单元格变更（粘贴/填充合并），与 cell-change 一样纯透传
       case 'cell-editing':
       case 'chat-message':
         broadcast(roomId, ws, msg);

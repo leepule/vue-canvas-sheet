@@ -537,6 +537,8 @@ export class Workbook {
 
   get totalHeight() { return this._layoutEngine.totalHeight; }
 
+  getLayoutVersion() { return this._layoutEngine.getLayoutVersion(); }
+
   setData(data) {
     return this._performanceMonitor.measure(MetricTypes.DATA_SET, () => {
       this._setDataInternal(data);
@@ -1153,11 +1155,27 @@ export class Workbook {
     const data = {};
     const coordsByKey = new Map();
 
+    // SAB 优化前提：共享内存可用时，worker 的 dataProvider 对纯数值依赖 SAB 优先读取，
+    // 故这类单元格无需重复序列化进 buffer。用 get(r,c)===v 自校验（越界/未同步/不支持均落回保留）。
+    const sab = this.sharedValueStore;
+    const sabReady = !!(sab && sab.supported);
+
     const includeCell = (r, c) => {
       if (!Number.isFinite(r) || !Number.isFinite(c) || r < 0 || c < 0) return;
       const key = this._cellKey(r, c);
       if (data[key]) return;
       const cell = this._dataMatrix.get(r, c);
+
+      // 纯数值、无公式且 SAB 中已存同值的依赖单元格：worker 走共享内存读取，跳过序列化。
+      // 公式单元格（worker 需递归求值）、字符串/布尔（SAB 存 EMPTY 会回退 data）、
+      // 空单元格均不在此跳过（空单元格即便跳过 worker 也返回 null，但保留更直观）。
+      if (sabReady && cell && !cell.f) {
+        const v = cell.v;
+        if (typeof v === 'number' && Number.isFinite(v) && sab.get(r, c) === v) {
+          return;
+        }
+      }
+
       data[key] = cell
         ? { v: cell.v, f: cell.f, dirty: cell.dirty }
         : { v: null };

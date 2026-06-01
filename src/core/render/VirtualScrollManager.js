@@ -5,11 +5,12 @@
  */
 /**
  * 虚拟滚动管理器 - 增强版
- * 
+ *
  * 优化特性：
- * 1. 差量更新：只更新新增/移除的行列，避免全量重绘
+ * 1. 入口记忆化：关键入参（滚动/尺寸/表头）未变且缓存有效时直接返回 cachedRange，
+ *    避免同一帧内 grid/content/aria 等多次调用各自重复全量计算
  * 2. 冻结缓存：独立缓存冻结区域，避免重复计算
- * 3. 脏标记：精确跟踪变更区域，只渲染脏单元格
+ * 3. 脏标记：精确跟踪变更区域，供局部刷新查询
  */
 
 export class VirtualScrollManager {
@@ -44,6 +45,9 @@ export class VirtualScrollManager {
     // ===== 主可见范围缓存 =====
     this.cachedRange = null;
     this.rangeValid = false;
+    // 入口记忆化键：关键入参（滚动/尺寸/表头）未变且缓存有效时直接复用 cachedRange，
+    // 避免同一帧内 grid/content/aria 等多次调用各自全量重算（二分+累加+建对象+diff）。
+    this._rangeKey = null;
     
     // ===== 冻结区域独立缓存 =====
     this.frozenCache = {
@@ -119,9 +123,23 @@ export class VirtualScrollManager {
    */
   getVisibleRange(width, height, rowHeaderWidth, colHeaderHeight) {
     const wb = this.workbook;
+
+    // ===== 入口短路：缓存有效且关键入参未变，直接返回同一范围对象 =====
+    // 所有会改变可见范围的路径（滚动/编辑/resize/结构变更）都会经 invalidateCache()
+    // 清掉 rangeValid，因此命中短路时缓存必然仍然准确。
+    const sx = this.scrollX || 0;
+    const sy = this.scrollY || 0;
+    const key = this._rangeKey;
+    if (this.rangeValid && this.cachedRange && key &&
+        key.sx === sx && key.sy === sy &&
+        key.w === width && key.h === height &&
+        key.rhw === rowHeaderWidth && key.chh === colHeaderHeight) {
+      return this.cachedRange;
+    }
+
     const freezeC = wb.freeze?.c || 0;
     const freezeR = wb.freeze?.r || 0;
-    
+
     // 更新滚动状态
     this._updateScrollState();
     
@@ -216,36 +234,7 @@ export class VirtualScrollManager {
       bodyWidth, bodyHeight
     };
     
-    // ===== 检查主范围缓存 - 增量更新逻辑 =====
-    if (this.rangeValid && this.cachedRange) {
-      const oldRange = this.cachedRange;
-      
-      // 计算范围变化
-      const changes = this._calculateRangeChanges(oldRange, range);
-      
-      // 判断是否可以增量更新
-      const hasIntersection = 
-        range.startRow <= oldRange.endRow && 
-        range.endRow >= oldRange.startRow &&
-        range.startCol <= oldRange.endCol && 
-        range.endCol >= oldRange.startCol;
-      
-      const isSmallScroll = 
-        changes.totalAddedRows + changes.totalRemovedRows <= 50 &&
-        changes.totalAddedCols + changes.totalRemovedCols <= 50;
-      
-      if (hasIntersection && isSmallScroll) {
-        // 使用增量更新
-        const updatedRange = this._incrementallyUpdateRange(oldRange, range, changes);
-        
-        // 更新统计
-        this._recordIncrementalUpdate(changes);
-        
-        return updatedRange;
-      }
-    }
-    
-    // 全量更新
+    // 记录一次完整重算（入口短路未命中才会走到这里）
     this._recordFullUpdate();
     
     // 自动清理脏标记
@@ -255,6 +244,7 @@ export class VirtualScrollManager {
     
     this.cachedRange = range;
     this.rangeValid = true;
+    this._rangeKey = { sx, sy, w: width, h: height, rhw: rowHeaderWidth, chh: colHeaderHeight };
     return range;
   }
   
@@ -459,21 +449,12 @@ export class VirtualScrollManager {
 
   getIncrementalUpdateStats() {
     const stats = this.updateStats;
-    const total = stats.totalUpdates;
     return {
-      total,
-      incremental: stats.incrementalUpdates,
+      total: stats.totalUpdates,
       full: stats.fullUpdates,
       totalUpdates: stats.totalUpdates,
-      incrementalUpdates: stats.incrementalUpdates,
       fullUpdates: stats.fullUpdates,
-      cacheHits: stats.cacheHits,
-      cacheMisses: stats.cacheMisses,
-      totalAddedRows: stats.addedRowCount,
-      totalRemovedRows: stats.removedRowCount,
-      totalAddedCols: stats.addedColCount,
-      totalRemovedCols: stats.removedColCount,
-      hitRate: total > 0 ? (stats.cacheHits / total * 100).toFixed(2) + '%' : '0%'
+      cacheMisses: stats.cacheMisses
     };
   }
 
@@ -506,93 +487,12 @@ export class VirtualScrollManager {
 
   _createUpdateStats() {
     return {
-      totalUpdates: 0,
-      incrementalUpdates: 0,
+      totalUpdates: 0,   // 实际完整重算次数（入口短路命中不计入）
       fullUpdates: 0,
-      cacheHits: 0,
-      cacheMisses: 0,
-      addedRowCount: 0,
-      removedRowCount: 0,
-      addedColCount: 0,
-      removedColCount: 0
+      cacheMisses: 0
     };
   }
   
-  _calculateRangeChanges(oldRange, newRange) {
-    const changes = {
-      addedRows: [], removedRows: [], addedCols: [], removedCols: [],
-      totalAddedRows: 0, totalRemovedRows: 0, totalAddedCols: 0, totalRemovedCols: 0
-    };
-    
-    if (newRange.startRow < oldRange.startRow) {
-      changes.addedRows.push({ start: newRange.startRow, end: oldRange.startRow - 1, direction: 'top' });
-      changes.totalAddedRows += (oldRange.startRow - newRange.startRow);
-    } else if (newRange.startRow > oldRange.startRow) {
-      changes.removedRows.push({ start: oldRange.startRow, end: newRange.startRow - 1, direction: 'top' });
-      changes.totalRemovedRows += (newRange.startRow - oldRange.startRow);
-    }
-    
-    if (newRange.endRow > oldRange.endRow) {
-      changes.addedRows.push({ start: oldRange.endRow + 1, end: newRange.endRow, direction: 'bottom' });
-      changes.totalAddedRows += (newRange.endRow - oldRange.endRow);
-    } else if (newRange.endRow < oldRange.endRow) {
-      changes.removedRows.push({ start: newRange.endRow + 1, end: oldRange.endRow, direction: 'bottom' });
-      changes.totalRemovedRows += (oldRange.endRow - newRange.endRow);
-    }
-    
-    if (newRange.startCol < oldRange.startCol) {
-      changes.addedCols.push({ start: newRange.startCol, end: oldRange.startCol - 1, direction: 'left' });
-      changes.totalAddedCols += (oldRange.startCol - newRange.startCol);
-    } else if (newRange.startCol > oldRange.startCol) {
-      changes.removedCols.push({ start: oldRange.startCol, end: newRange.startCol - 1, direction: 'left' });
-      changes.totalRemovedCols += (newRange.startCol - oldRange.startCol);
-    }
-    
-    if (newRange.endCol > oldRange.endCol) {
-      changes.addedCols.push({ start: oldRange.endCol + 1, end: newRange.endCol, direction: 'right' });
-      changes.totalAddedCols += (newRange.endCol - oldRange.endCol);
-    } else if (newRange.endCol < oldRange.endCol) {
-      changes.removedCols.push({ start: newRange.endCol + 1, end: oldRange.endCol, direction: 'right' });
-      changes.totalRemovedCols += (oldRange.endCol - newRange.endCol);
-    }
-    
-    return changes;
-  }
-  
-  _incrementallyUpdateRange(oldRange, newRange, changes) {
-    const updated = { ...newRange };
-    const intersect = {
-      startRow: Math.max(oldRange.startRow, newRange.startRow),
-      endRow: Math.min(oldRange.endRow, newRange.endRow),
-      startCol: Math.max(oldRange.startCol, newRange.startCol),
-      endCol: Math.min(oldRange.endCol, newRange.endCol)
-    };
-    
-    const dirtyRegions = this.getDirtyRegions(intersect);
-    updated.needsIncrementalRender = true;
-    updated.renderChanges = {
-      addedRows: changes.addedRows.map(s => ({ ...s, colStart: newRange.startCol, colEnd: newRange.endCol, mode: 'full' })),
-      dirtyRows: dirtyRegions.rows.map(item => ({ rowIndex: item.index, colStart: intersect.startCol, colEnd: intersect.endCol, mode: 'dirty' })),
-      addedCols: changes.addedCols.map(s => ({ ...s, rowStart: newRange.startRow, rowEnd: newRange.endRow, mode: 'full' })),
-      dirtyCols: dirtyRegions.cols.map(item => ({ colIndex: item.index, rowStart: intersect.startRow, rowEnd: intersect.endRow, mode: 'dirty' })),
-      dirtyCells: dirtyRegions.cells.map(c => ({ row: c.rowIndex, col: c.colIndex, mode: 'cell' })),
-      skipRange: intersect
-    };
-    
-    this.cachedRange = updated;
-    return updated;
-  }
-  
-  _recordIncrementalUpdate(changes) {
-    this.updateStats.totalUpdates++;
-    this.updateStats.incrementalUpdates++;
-    this.updateStats.cacheHits++;
-    this.updateStats.addedRowCount += changes.totalAddedRows;
-    this.updateStats.removedRowCount += changes.totalRemovedRows;
-    this.updateStats.addedColCount += changes.totalAddedCols;
-    this.updateStats.removedColCount += changes.totalRemovedCols;
-  }
-
   _recordFullUpdate() {
     this.updateStats.totalUpdates++;
     this.updateStats.fullUpdates++;
@@ -660,6 +560,7 @@ export class VirtualScrollManager {
   invalidateCache() {
     this.rangeValid = false;
     this.cachedRange = null;
+    this._rangeKey = null;
     this.invalidateFrozenCache();
   }
 

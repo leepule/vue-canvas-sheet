@@ -10,6 +10,13 @@ export class LayoutEngine {
     this._offsetsDirty = true;
     this._frozenSize = null;
     this._frozenSizeDirty = true;
+    // 单调递增的布局版本号：任何会移动网格线的几何变更（行高/列宽/插删/计数）
+    // 都经 markDirty() 自增。供渲染层 O(1) 判定网格缓存是否失效，替代逐格累加哈希。
+    this._layoutVersion = 0;
+  }
+
+  getLayoutVersion() {
+    return this._layoutVersion;
   }
 
   _ensureOffsets() {
@@ -191,6 +198,7 @@ export class LayoutEngine {
 
   markDirty() {
     this._offsetsDirty = true;
+    this._layoutVersion++;
   }
 
   markFrozenDirty() {

@@ -263,12 +263,29 @@ export class ExportPlugin {
         cells.set(colIdx, csvEscape(value, delimiter));
       }
 
+      // 分块拼接到 Blob parts 数组：每 CHUNK_ROWS 行 join 成一段 push 进 parts，
+      // 避免把整个文件 join 成单个可能数百 MB 的巨串（再被 Blob 复制一份，峰值翻倍），
+      // 同时省掉 new Array(rowCount) 的上限分配。Blob 在内部拼接各段，不经过中间大字符串。
+      const CHUNK_ROWS = 2000;
+      const parts = [];
+      if (includeBom) parts.push('﻿');
+
+      let chunk = [];
+      let firstChunk = true;
+      const flushChunk = () => {
+        if (chunk.length === 0) return;
+        const joined = chunk.join(lineEnding);
+        // 块间用 lineEnding 衔接（首块直接附在 BOM 之后，无前导换行），等价于整体 lines.join
+        parts.push(firstChunk ? joined : lineEnding + joined);
+        firstChunk = false;
+        chunk.length = 0;
+      };
+
       // 逐行构建 CSV：空行直接复用预计算字符串，有数据的行按稀疏方式拼接
-      const lines = new Array(rowCount);
       for (let ri = 0; ri < rowCount; ri++) {
         const cells = rowMap.get(ri);
         if (!cells || cells.size === 0) {
-          lines[ri] = emptyRow;
+          chunk.push(emptyRow);
         } else {
           // 按列号排序后逐段拼接，避免分配 colCount 大小的数组
           const sortedCols = Array.from(cells.keys()).sort((a, b) => a - b);
@@ -283,18 +300,19 @@ export class ExportPlugin {
           }
           // 填充尾部空列
           if (prev < colCount - 1) line += delimiter.repeat(colCount - 1 - prev);
-          lines[ri] = line;
+          chunk.push(line);
         }
+        if (chunk.length >= CHUNK_ROWS) flushChunk();
       }
+      flushChunk();
 
-      const csvContent = (includeBom ? '﻿' : '') + lines.join(lineEnding);
-
-      downloadBlob(new Blob([csvContent], { type: 'text/csv;charset=utf-8;' }), fileName);
+      const blob = new Blob(parts, { type: 'text/csv;charset=utf-8;' });
+      downloadBlob(blob, fileName);
 
       const result = {
         type: 'csv',
         fileName,
-        bytes: csvContent.length,
+        bytes: blob.size, // 实际 UTF-8 字节数（较旧的 string.length 即 UTF-16 码元数更准确）
         rows: rowCount,
         cols: colCount
       };

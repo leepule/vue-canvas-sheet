@@ -249,9 +249,11 @@ export default {
      * 收集单元格渲染数据用于批量绘制
      * @returns {Object} 包含背景、文本、网格线数据的对象
      */
-    collectCellData(r, c, x, y, w, h, clipRect = null) {
-      const val = this.workbook.getCellValue(r, c);
-      const cell = this.workbook.getCell(r, c);
+    collectCellData(r, c, x, y, w, h, clipRect = null, cell, val) {
+      // 调用方（主渲染循环）通常已取到 cell/val，直接复用避免二次查找；
+      // 未传入时（如渐进式渲染路径）回退内部查询，保持兼容。
+      if (cell === undefined) cell = this.workbook.getCell(r, c);
+      if (val === undefined) val = this.workbook.getCellValue(r, c);
       const s = cell ? cell.s : null;
 
       const cellData = {
@@ -317,10 +319,19 @@ export default {
      * 批量绘制文本 - 按字体分组减少状态切换
      */
     _drawBatchedTexts(ctx, textGroups, cellDataList) {
+      // 跨格缓存已写入的文本状态，仅在变化时写 canvas（其中 font 字符串解析开销显著）。
+      // 关键：状态在任何 clip 的 save() 之前写入，使其成为被保存的基线状态——clip 的
+      // save/restore 只还原到该基线，不会抹掉它，故相邻同样式单元格可命中缓存跳过重复 set。
+      // textBaseline 不在此缓存：_drawSingleLineText / _drawWrappedText 各自会按需设置。
+      let lastFont = null, lastFill = null, lastAlign = null;
       for (const cellData of cellDataList) {
         if (!cellData.text) continue;
         const { text, x, y, w, h, clip } = cellData;
-        
+
+        if (lastFont !== text.font) { ctx.font = text.font; lastFont = text.font; }
+        if (lastFill !== text.color) { ctx.fillStyle = text.color; lastFill = text.color; }
+        if (lastAlign !== text.align) { ctx.textAlign = text.align; lastAlign = text.align; }
+
         // 应用区域的物理裁剪保护（解决主线程异步渐进式渲染没有全局裁剪而越界叠字的问题）
         const hasGlobalClip = !!clip;
         if (hasGlobalClip) {
@@ -356,11 +367,6 @@ export default {
           ctx.rect(x, y, w, h);
           ctx.clip();
         }
-
-        ctx.font = text.font;
-        ctx.fillStyle = text.color;
-        ctx.textAlign = text.align;
-        ctx.textBaseline = text.valign;
 
         if (text.isWrap) {
           this._drawWrappedText(ctx, text.content, x, y, w, h, text.padding, text.align, text.valign, text.fSize, text.color, text.style);
@@ -1150,7 +1156,7 @@ export default {
                     if (intersects({x: cx, y: vy, w: mw, h: mh}, cellRenderRect)) {
                       // 物理裁剪过滤，防止滚动时边缘有微小溢出单元格越界画到冻结区域内
                       if (!clipRect || (cx + mw > clipRect.minX && cx < clipRect.maxX && vy + mh > clipRect.minY && vy < clipRect.maxY)) {
-                        cellDataList.push(this.collectCellData(r, c, cx, vy, mw, mh, clipRect));
+                        cellDataList.push(this.collectCellData(r, c, cx, vy, mw, mh, clipRect, cell, val));
                         this.drawCellBorders(ctx, r, c, cx, vy, mw, mh, borderBatch);
                       }
                     }
@@ -1159,7 +1165,7 @@ export default {
                   // 物理裁剪过滤
                   if (!clipRect || (cx + w > clipRect.minX && cx < clipRect.maxX && vy + h > clipRect.minY && vy < clipRect.maxY)) {
                     if (!isEmpty) {
-                      cellDataList.push(this.collectCellData(r, c, cx, vy, w, h, clipRect));
+                      cellDataList.push(this.collectCellData(r, c, cx, vy, w, h, clipRect, cell, val));
                     }
                     this.drawCellBorders(ctx, r, c, cx, vy, w, h, borderBatch);
                   }
@@ -1256,30 +1262,38 @@ export default {
       }
 
       ctx.restore();
-      this._updateAriaGrid();
+      this._updateAriaGrid(visibleRange);
     },
 
     /**
      * 更新辅助功能网格（ARIA Grid）
      * 仅在可见区域渲染 DOM，平衡可访问性与性能
      */
-    _updateAriaGrid() {
+    _updateAriaGrid(range) {
       const wb = this.workbook;
       if (!wb) return;
 
       this.totalRowCount = wb.rowCount;
       this.totalColCount = wb.colCount;
 
-      const RW = this.rowHeaderWidth;
-      const CH = this.colHeaderHeight;
-      const W = this.width;
-      const H = this.height;
-
-      // 计算可见行列范围
-      const startRow = wb.getRowIndexAt(this.scrollY);
-      const endRow = wb.getRowIndexAt(this.scrollY + H - CH);
-      const startCol = wb.getColIndexAt(this.scrollX);
-      const endCol = wb.getColIndexAt(this.scrollX + W - RW);
+      // 优先复用 getVisibleRange 已算好的精确可见范围，省掉这 4 次二分查找；
+      // 缺省（未传 range）时回退自行二分，保持独立可用。
+      let startRow, endRow, startCol, endCol;
+      if (range) {
+        startRow = range.exactStartRow;
+        endRow = range.exactEndRow;
+        startCol = range.exactStartCol;
+        endCol = range.exactEndCol;
+      } else {
+        const RW = this.rowHeaderWidth;
+        const CH = this.colHeaderHeight;
+        const W = this.width;
+        const H = this.height;
+        startRow = wb.getRowIndexAt(this.scrollY);
+        endRow = wb.getRowIndexAt(this.scrollY + H - CH);
+        startCol = wb.getColIndexAt(this.scrollX);
+        endCol = wb.getColIndexAt(this.scrollX + W - RW);
+      }
 
       if (startRow === -1 || startCol === -1) return;
 
@@ -1577,9 +1591,15 @@ export default {
       mix(range.startRow); mix(range.endRow);
       mix(range.startCol); mix(range.endCol);
 
-      // 行高/列宽哈希：累加各行列尺寸（结构变化时自动失效）
-      for (let r = range.startRow; r <= range.endRow; r++) mix(wb.getRowHeight(r));
-      for (let c = range.startCol; c <= range.endCol; c++) mix(wb.getColWidth(c));
+      // 行高/列宽变化检测：用 LayoutEngine 单调布局版本号 O(1) 替代逐格累加哈希。
+      // 任何会移动网格线的几何变更（行高/列宽/插删/计数）都经 markDirty() 自增该版本，
+      // 故版本不变即可断定可见区网格线未移动。回退到逐格累加以兼容无该接口的 workbook。
+      if (typeof wb.getLayoutVersion === 'function') {
+        mix(wb.getLayoutVersion());
+      } else {
+        for (let r = range.startRow; r <= range.endRow; r++) mix(wb.getRowHeight(r));
+        for (let c = range.startCol; c <= range.endCol; c++) mix(wb.getColWidth(c));
+      }
 
       // 冻结位置变化时失效
       if (wb.freeze) { mix(wb.freeze.r); mix(wb.freeze.c); }
