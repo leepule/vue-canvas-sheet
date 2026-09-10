@@ -83,13 +83,17 @@ new Workbook(options?)
 | `headerDepth` | `number` | r/w | 表头深度 |
 | `dependencyMap` | `Map` | r/w | 公式依赖映射 |
 | `reverseDependencyMap` | `Map` | r/w | 反向依赖映射 |
-| `totalWidth` | `number` | r | 表格总宽度（像素，代理 LayoutEngine） |
-| `totalHeight` | `number` | r | 表格总高度（像素，代理 LayoutEngine） |
+| `totalWidth` | `number` | r | 表格总宽度（像素，兼容代理；推荐使用 `layoutEngine.totalWidth`） |
+| `totalHeight` | `number` | r | 表格总高度（像素，兼容代理；推荐使用 `layoutEngine.totalHeight`） |
 | `search` | `SearchEngine` | r | 搜索引擎实例（`searchEngine` 别名） |
 | `plugins` | `PluginRegistry` | r | 插件注册中心 |
 | `history` | `HistoryManager` | r | 历史管理器 |
 | `clipboard` | `ClipboardManager` | r | 剪贴板管理器 |
 | `errorHandler` | `ErrorHandler` | r | 错误处理器 |
+| `layoutEngine` | `LayoutEngine` | r | 布局引擎实例 |
+| `mergeManager` | `MergeManager` | r | 合并单元格管理器 |
+| `styleManager` | `StyleManager` | r | 样式管理器 |
+| `sheetStructure` | `SheetStructure` | r | 行列结构管理器 |
 
 ---
 
@@ -143,6 +147,8 @@ const values = wb.collectRange(
 
 ## 5. 样式与格式
 
+> 以下 Workbook 方法为向后兼容代理。新代码推荐直接调用 `wb.styleManager.*`。
+
 | 方法 | 说明 |
 |------|------|
 | `setStyle(range, style)` | 设置范围样式 |
@@ -154,6 +160,8 @@ const values = wb.collectRange(
 ---
 
 ## 6. 合并单元格
+
+> 以下 Workbook 方法为向后兼容代理。新代码推荐直接调用 `wb.mergeManager.*`。
 
 | 方法 | 返回 | 说明 |
 |------|------|------|
@@ -169,6 +177,8 @@ const values = wb.collectRange(
 ---
 
 ## 7. 行列结构
+
+> `insertRow`、`deleteRow`、`insertColumn`、`deleteColumn`、`fillAuto` 为向后兼容代理。新代码推荐直接调用 `wb.sheetStructure.*`；`moveColumn`、行高列宽和冻结 API 仍保留在 Workbook 上。
 
 | 方法 | 说明 |
 |------|------|
@@ -210,15 +220,20 @@ wb.paste({ s: { r: 10, c: 0 }, e: { r: 10, c: 0 } });
 | 方法 | 返回 | 说明 |
 |------|------|------|
 | `recalcAll(options?)` | `Promise<void>\|void` | 重算所有公式（拓扑排序）。`options.useWorker` 控制是否走 Worker |
-| `recalcDirty()` | — | 增量重算：仅脏单元格及其依赖 |
-| `triggerRecalc(r, c, stack?)` | — | 触发某单元格及其依赖重算 |
-| `evaluateFormula(formula, r, c, stack?)` | `any` | 求值单个公式 |
-| `getDependencies(formula) → string[]` | 解析公式引用的依赖单元格 |
 | `rebuildDependencyMap()` | — | 重建全表公式依赖图 |
 | `getCalculationStats() → Object\|null` | 计算引擎缓存统计 |
 | `resetCalculationStats()` | — | 重置计算统计 |
 
 > 公式语法见 [FORMULAS.md](./FORMULAS.md)。`recalcAll` 在启用 Worker 时返回 `Promise`。
+
+细粒度公式操作位于 `workbook.formulaEvaluator`：
+
+| 方法 | 说明 |
+|------|------|
+| `recalcDirty()` | 增量重算脏单元格及其依赖 |
+| `triggerRecalc(r, c)` | 触发某单元格及其依赖重算 |
+| `evaluateFormula(formula, r, c, stack?)` | 求值单个公式 |
+| `getDependencies(formula)` | 解析公式引用的单元格与范围依赖 |
 
 ---
 
@@ -263,16 +278,13 @@ wb.fromJSON(JSON.parse(localStorage.getItem('sheet')));
 ## 13. 事件与订阅
 
 ### `on(event, callback) → unsubscribe`
-订阅事件，返回取消订阅函数。`event` 取自 `Events` 常量（`cell-change`、`selection-change`、`data-load`、`structure-change`、`style-change`、`merge-change`、`freeze-change`、`history-change`、`save-status`、`error`、`change`）。
+订阅事件并返回取消订阅函数。常用事件包括 `cell-change`、`selection-change`、`data-load`、`structure-change`、`style-change`、`merge-change`、`freeze-change`、`save-status`、`error` 和 `change`。
 
 ### `off(event, callback)`
 取消订阅。
 
 ### `once(event, callback) → unsubscribe`
 一次性订阅。
-
-### `subscribe(fn) → unsubscribe`
-旧版通用监听（向后兼容），任何变更都会回调。
 
 ### `notify(data?)`
 手动触发变更通知。
@@ -373,10 +385,10 @@ wb.endBatchUpdate(); // 仅通知一次
 
 | 方法 | 返回 | 说明 |
 |------|------|------|
-| `enablePersistenceStorage(options?)` | — | 启用持久化存储（IndexedDB），`options.sheetId` 指定键 |
+| `enablePersistenceStorage(options?)` | `PersistenceStorage` | 启用并返回持久化存储（IndexedDB），`options.sheetId` 指定键 |
 | `persist(sheetId?)` | `Promise` | 全量持久化，默认 `'default'` |
 | `loadFromStorage(sheetId?)` | `Promise` | 从存储加载 |
-| `savePendingChanges(sheetId)` | `Promise` | 保存增量（diff）变更 |
+| `savePendingChanges(sheetId?)` | `Promise` | 保存增量（diff）变更 |
 | `flushPersistence()` | `Promise` | 立即落盘待写入数据 |
 
 > `AutoSavePlugin` 即基于这些方法实现自动保存。
@@ -384,6 +396,8 @@ wb.endBatchUpdate(); // 仅通知一次
 ---
 
 ## 21. 布局与坐标
+
+> 以下布局查询方法为向后兼容代理。新代码推荐直接调用 `wb.layoutEngine.*`。
 
 | 方法 | 返回 | 说明 |
 |------|------|------|
@@ -413,13 +427,36 @@ wb.getAddress(2, 1); // → 'B3'
 
 ## 23. 生命周期
 
-### `destroy()`
-销毁工作簿，清理全部资源：持久化定时器、布局引擎、合并管理器、插件系统、事件监听、Store 订阅、性能监控器、Worker、对象池。**组件卸载时务必调用，避免内存泄漏。**
+### `close()`
+
+异步保存所有待持久化变更，然后释放 Workbook 资源。启用持久化后，`close()` 是标准关闭方式；Promise 完成前存储连接不会关闭。如果保存失败，Promise 会拒绝，Workbook 保持可用，调用方可以提示用户或重试。
+
+```js
+try {
+  // 使用 Workbook
+} finally {
+  await wb.close();
+}
+```
+
+Vue 组件卸载时应显式处理关闭失败：
 
 ```js
 onUnmounted(() => {
-  wb.destroy();
+  void wb.close().catch((error) => {
+    console.error('Workbook 保存失败', error);
+  });
 });
+```
+
+### `destroy()`
+
+同步强制销毁工作簿并清理全部资源，但不会等待持久化写入。存在待保存单元格、布局配置或正在执行的保存任务时会输出警告，未落盘内容可能丢失。
+
+仅在未启用持久化或明确需要放弃待保存数据时调用：
+
+```js
+wb.destroy();
 ```
 
 ---
@@ -449,10 +486,11 @@ wb.mergeCells({ s: { r: 0, c: 0 }, e: { r: 0, c: 1 } });
 // 4. 监听变化
 const unsub = wb.on('cell-change', (e) => console.log(e));
 
-// 5. 持久化
-const json = wb.toJSON();
+// 5. 启用持久化并写入数据
+wb.enablePersistenceStorage({ sheetId: 'scores' });
+wb.setCell(3, 0, { v: '王五' });
 
-// 6. 销毁
+// 6. 先保存，再释放资源
 unsub();
-wb.destroy();
+await wb.close();
 ```

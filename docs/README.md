@@ -1,6 +1,6 @@
 # Vue Canvas Sheet 文档
 
-> 基于 Canvas 渲染、WASM 加速公式计算的高性能 Vue 3 表格组件。本目录为全部文档的导航入口。
+> 基于 Canvas 渲染、使用共享 JS 公式引擎并为已验证纯数字算术提供 WASM 加速的 Vue 3 表格组件。本目录为全部文档的导航入口。
 
 ## 📚 文档导航
 
@@ -42,7 +42,7 @@ const data = [
 - **无头引擎 / 自定义 UI** → [API_OVERVIEW §二](./API_OVERVIEW.md#二vue-canvas-sheetcore) + [Workbook API](./WORKBOOK_API.md)
 - **自建渲染层** → [API_OVERVIEW §三](./API_OVERVIEW.md#三vue-canvas-sheetrender)
 - **写插件 / 扩展能力** → [PLUGIN_DEVELOPMENT](./PLUGIN_DEVELOPMENT.md)
-- **TypeScript 类型** → [types/index.d.ts](../types/index.d.ts)
+- **TypeScript 类型** → [根入口](../types/index.d.ts) ｜ [core](../types/core.d.ts) ｜ [render](../types/render.d.ts)
 
 ## 🔗 其他
 

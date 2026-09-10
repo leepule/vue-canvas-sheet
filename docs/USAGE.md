@@ -1,6 +1,6 @@
 # Vue Canvas Sheet 使用文档
 
-> 一个基于 Canvas 渲染、WASM 加速公式计算的高性能 Vue 3 表格组件。
+> 一个基于 Canvas 渲染、使用共享 JS 公式引擎并为已验证纯数字算术提供 WASM 加速的 Vue 3 表格组件。
 
 - 包名：`vue-canvas-sheet`
 - 当前版本：`0.1.0`
@@ -186,7 +186,7 @@ wb.setFreeze(freezeRowCount, freezeColCount);
 ```js
 wb.enableWorker();                  // 启用 Web Worker 多线程
 wb.recalcAll({ useWorker: true });  // 全量重算
-wb.recalcDirty();                   // 只算脏单元格
+wb.formulaEvaluator.recalcDirty();  // 只算脏单元格
 wb.getSystemReport();               // 引擎诊断报告（WASM/线程/缓存等）
 ```
 
@@ -288,6 +288,8 @@ exportPlugin.exportExcel({ fileName: 'data.xlsx' });
 exportPlugin.exportJSON({ fileName: 'data.json' });
 exportPlugin.exportCSV({ fileName: 'data.csv' });
 ```
+
+CSV 导出默认防护以 `=`、`+`、`-` 或 `@` 开头的文本（包括前导空白或控制字符），避免被桌面表格软件当作公式执行。仅对可信数据显式使用 `exportPlugin.exportCSV({ allowFormulas: true })` 保留公式语义。数值类型的负数不会被改写。
 
 Excel 导出对大表使用 Web Worker，避免阻塞主线程。
 

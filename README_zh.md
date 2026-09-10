@@ -6,7 +6,7 @@
 [![Engine: WASM](https://img.shields.io/badge/Engine-Rust%20%2B%20WASM-blueviolet.svg)](https://webassembly.org/)
 [![English](https://img.shields.io/badge/Docs-English-red.svg)](./readme.md)
 
-> 一款基于 Canvas 渲染、Rust + WASM 向量化公式引擎驱动的高性能 Vue 3 表格组件。专为**百万级单元格**场景设计，在 Web 上交付接近原生 Excel 的操作体验。
+> 一款基于 Canvas 渲染、共享 JS 公式引擎并为已验证数值公式提供 Rust + WASM 加速的高性能 Vue 3 表格组件。专为**百万级单元格**场景设计，在 Web 上交付接近原生 Excel 的操作体验。
 
 [**English**](./readme.md) · [**使用文档**](./docs/USAGE.md) · [**在线 Demo**](./samples/basic-usage)
 
@@ -15,7 +15,7 @@
 ## ✨ 核心亮点
 
 - **⚡ Canvas 集群渲染** —— 纯 Canvas 2D 管线，10W+ 行数据下保持 60 FPS 滚动，零 DOM 渲染开销。
-- **🦀 Rust + WASM 引擎** —— 公式向量化执行，5W 个复杂公式重算耗时 **< 50ms**。
+- **🦀 Rust + WASM 引擎** —— 加速已验证的纯数字算术子集；引用、函数、字符串、布尔值、比较和未支持语法统一走共享 JS RPN 引擎。
 - **🧵 Worker + SharedArrayBuffer** —— 计算线程与 UI 线程彻底解耦，大数据更新时界面依然响应如飞。
 - **💾 IndexedDB 持久化** —— 基于 diff 的增量保存，启用 `enable-persistence` 即可秒开历史数据。
 - **🧩 Headless 友好** —— `Workbook` 可在 Node.js / Web Worker 中独立运行，UI 层与核心层完全解耦。
@@ -30,7 +30,6 @@
 | 测试项目 (50,000 行 / 200,000 单元格) | 耗时 | 备注 |
 | :--- | :--- | :--- |
 | 数据初始化加载 (`setData`) | **~200ms** | 含 5W 个动态公式的解析与注入 |
-| 向量化全量重算 (WASM) | **~48ms** | SIMD 风格执行，规避 JS 串行开销 |
 | 首帧渲染 | **~16ms** | Canvas 硬件加速，60 FPS 滚动 |
 
 ---
@@ -67,7 +66,7 @@ Peer 依赖：`vue ^3.5.0`。
 
 <script setup>
 import { TableDesigner } from 'vue-canvas-sheet';
-import 'vue-canvas-sheet/dist/style.css';
+import 'vue-canvas-sheet/style.css';
 
 const initialData = [
   ['名称',     '单价', '数量', '总价'],
@@ -106,6 +105,8 @@ import {
 | `ImportPlugin` | 导入 `.xlsx / .xls / .csv / .tsv / .json` |
 | `CollaborativeCursorPlugin` | 渲染远端用户光标与选区 |
 | `RealtimeCollaborationPlugin` | 通过 WebSocket 同步编辑、选区与单元格锁 |
+
+CSV 导出默认为类公式文本添加单引号前缀。仅当数据可信且必须保留表格公式语义时，使用 `exportCSV({ allowFormulas: true })` 显式放行。
 
 ```vue
 <TableDesigner :plugins="[historyPlugin, exportPlugin]" :initial-data="data" />
@@ -184,8 +185,8 @@ Cross-Origin-Embedder-Policy: require-corp
 
 ```js
 import { TableDesigner, Workbook, SvgIcon } from 'vue-canvas-sheet';
-import { Workbook }   from 'vue-canvas-sheet/core';    // 仅 headless 内核
-import { Renderer }   from 'vue-canvas-sheet/render';  // 仅 Canvas 渲染器
+import { Workbook as CoreWorkbook } from 'vue-canvas-sheet/core';
+import { OffscreenRenderer }        from 'vue-canvas-sheet/render';
 ```
 
 ---

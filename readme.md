@@ -6,7 +6,7 @@
 [![Engine: WASM](https://img.shields.io/badge/Engine-Rust%20%2B%20WASM-blueviolet.svg)](https://webassembly.org/)
 [![中文文档](https://img.shields.io/badge/Docs-中文-red.svg)](./README_zh.md)
 
-> A high-performance, Canvas-rendered Vue 3 spreadsheet component, backed by a Rust + WASM vectorized formula engine. Built for **million-cell** workloads with an Excel-grade UX on the web.
+> A high-performance, Canvas-rendered Vue 3 spreadsheet component with a shared JS formula engine and optional Rust + WASM acceleration for verified numeric formulas. Built for **million-cell** workloads with an Excel-grade UX on the web.
 
 [**中文文档**](./README_zh.md) · [**Usage Guide**](./docs/USAGE.md) · [**Live Demo**](./samples/basic-usage)
 
@@ -15,7 +15,7 @@
 ## ✨ Highlights
 
 - **⚡ Canvas Cluster Rendering** — Pure Canvas 2D pipeline, 60 FPS scrolling at 100k+ rows with zero DOM overhead.
-- **🦀 Rust + WASM Engine** — Vectorized formula execution; recalculates 50k complex formulas in **< 50 ms**.
+- **🦀 Rust + WASM Engine** — Accelerates the verified numeric-arithmetic subset; references, functions, strings, booleans, comparisons, and unsupported syntax use the shared JS RPN engine.
 - **🧵 Worker + SharedArrayBuffer** — Calculation lives off the UI thread; the interface stays responsive under heavy load.
 - **💾 IndexedDB Persistence** — Diff-based incremental save with instant "cold start" reload via `enable-persistence`.
 - **🧩 Headless-Friendly Core** — `Workbook` runs standalone in Node.js or Web Workers; UI and core are fully decoupled.
@@ -30,7 +30,6 @@
 | Workload (50,000 rows / 200,000 cells) | Time | Notes |
 | :--- | :--- | :--- |
 | Initial load (`setData`) | **~200 ms** | Includes parsing 50k dynamic formulas |
-| Full vectorized recalc (WASM) | **~48 ms** | SIMD-style execution, bypasses JS overhead |
 | First paint | **~16 ms** | Hardware-accelerated Canvas, 60 FPS scroll |
 
 ---
@@ -67,7 +66,7 @@ Peer dependency: `vue ^3.5.0`.
 
 <script setup>
 import { TableDesigner } from 'vue-canvas-sheet';
-import 'vue-canvas-sheet/dist/style.css';
+import 'vue-canvas-sheet/style.css';
 
 const initialData = [
   ['Name',      'Price', 'Qty', 'Total'],
@@ -106,6 +105,8 @@ import {
 | `ImportPlugin` | Import `.xlsx / .xls / .csv / .tsv / .json` |
 | `CollaborativeCursorPlugin` | Render remote users' cursors and selections |
 | `RealtimeCollaborationPlugin` | Sync edits, selections, and per-cell locks via WebSocket |
+
+CSV export prefixes formula-like text with a single quote by default. Use `exportCSV({ allowFormulas: true })` only for trusted data that must retain spreadsheet formula semantics.
 
 ```vue
 <TableDesigner :plugins="[historyPlugin, exportPlugin]" :initial-data="data" />
@@ -184,8 +185,8 @@ The engine gracefully falls back to main-thread execution when COOP/COEP is abse
 
 ```js
 import { TableDesigner, Workbook, SvgIcon } from 'vue-canvas-sheet';
-import { Workbook }   from 'vue-canvas-sheet/core';    // headless core only
-import { Renderer }   from 'vue-canvas-sheet/render';  // canvas renderer only
+import { Workbook as CoreWorkbook } from 'vue-canvas-sheet/core';
+import { OffscreenRenderer }        from 'vue-canvas-sheet/render';
 ```
 
 ---

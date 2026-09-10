@@ -3,7 +3,7 @@
 > `vue-canvas-sheet` 对外暴露的完整 API 清单，按三个入口组织。每一项均与源码、类型定义和专题文档交叉链接。
 
 - 包名：`vue-canvas-sheet`
-- 类型定义：[types/index.d.ts](../types/index.d.ts)
+- 类型定义：[types/index.d.ts](../types/index.d.ts) ｜ [types/core.d.ts](../types/core.d.ts) ｜ [types/render.d.ts](../types/render.d.ts)
 - 相关文档：[使用文档](./USAGE.md) ｜ [Workbook API](./WORKBOOK_API.md) ｜ [插件开发](./PLUGIN_DEVELOPMENT.md) ｜ [公式](./FORMULAS.md)
 
 ---
@@ -29,7 +29,7 @@ import { Workbook, EventEmitter, PluginRegistry } from 'vue-canvas-sheet/core';
 import { createProgressiveRenderer, measureTextWidth } from 'vue-canvas-sheet/render';
 ```
 
-> 三个入口的类型声明目前共用同一份 [types/index.d.ts](../types/index.d.ts)。
+> 三个入口分别使用 `types/index.d.ts`、`types/core.d.ts` 和 `types/render.d.ts`，与 `package.json#exports` 一一对应。
 
 ---
 
@@ -157,14 +157,11 @@ workbook.usePlugin(createAutoSavePlugin({ interval: 5000 }));
 
 ## 五、TypeScript 类型
 
-所有上述导出的类型声明集中在 [types/index.d.ts](../types/index.d.ts)，包含：
+类型声明按运行时入口隔离：
 
-- 基础结构：`CellRef`、`Range`、`CellStyle`、`Cell`、`WorkbookOptions`
-- 事件：`EventType`、`Events`、`Unsubscribe`
-- 插件：`PluginInterface`、`PluginInfo`、`HookType`、`HookTypes`、各插件 Options 接口
-- 引擎：`Workbook`、`Store`、`StoreManager`、`EventEmitter`、`SharedValueStore`、`PluginRegistry`
-- 渲染：`OffscreenRenderer`、`Priority`、`TaskState` 及 `TextLayout` 工具
-- 组件：`TableDesignerProps`、`LazyLoadConfig`、`TableDesigner`、`SvgIcon`
+- [types/index.d.ts](../types/index.d.ts)：`TableDesigner`、`SvgIcon`、`Workbook` 和内置插件。
+- [types/core.d.ts](../types/core.d.ts)：`Workbook`、`SelectionManager`、`Store`、`EventEmitter`、`PluginRegistry` 与 `SharedValueStore`。
+- [types/render.d.ts](../types/render.d.ts)：`OffscreenRenderer`、渐进渲染器和 `TextLayout` 工具。
 
 ```ts
 import type { Workbook, Cell, Range, PluginInterface } from 'vue-canvas-sheet';
