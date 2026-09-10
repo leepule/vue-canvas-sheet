@@ -49,13 +49,19 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./tests/setup.js'],
-    testMatch: ['**/tests/**/*.spec.js', '**/tests/**/*.test.js'],
+    include: ['tests/**/*.spec.js', 'tests/**/*.test.js'],
     testTimeout: 30000,
     coverage: {
       provider: 'v8',
       include: ['src/core/**/*.js', 'src/plugins/**/*.js'],
       reportsDirectory: 'coverage',
       reporter: ['text', 'lcov', 'html'],
+      thresholds: {
+        statements: 70,
+        branches: 70,
+        functions: 65,
+        lines: 70,
+      },
     },
   },
 })

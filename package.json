@@ -15,6 +15,7 @@
   ],
   "author": "Vue-Canvas-Sheet Team",
   "license": "Apache-2.0",
+  "packageManager": "npm@11.14.1",
   "homepage": "https://github.com/leepule/vue-canvas-sheet#readme",
   "bugs": {
     "url": "https://github.com/leepule/vue-canvas-sheet/issues"
@@ -30,25 +31,23 @@
       "import": "./dist/designer.es.js"
     },
     "./core": {
-      "types": "./types/index.d.ts",
+      "types": "./types/core.d.ts",
       "import": "./dist/core.es.js"
     },
     "./render": {
-      "types": "./types/index.d.ts",
+      "types": "./types/render.d.ts",
       "import": "./dist/render.es.js"
-    }
+    },
+    "./style.css": "./dist/vue-canvas-sheet.css"
   },
   "files": [
     "dist",
-    "src/core",
-    "src/plugins",
-    "src/wasm",
     "src/wasm/pkg",
     "types",
-    "ARCHITECT.md",
     "LICENSE",
     "NOTICE",
-    "README.md"
+    "readme.md",
+    "README_zh.md"
   ],
   "scripts": {
     "dev": "vite",
@@ -60,13 +59,23 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "test:wasm:real": "vitest run tests/core/WasmRealEngine.spec.js",
     "test:perf": "node scripts/run-performance-tests.mjs",
     "benchmark": "node scripts/benchmark.mjs",
     "build:wasm": "node scripts/build-wasm.mjs",
     "build:wasm:compile": "wasm-pack build src/wasm --target web",
     "build:wasm:verify": "node scripts/verify-wasm-build.mjs",
-    "check:publish": "npm pack --dry-run",
-    "collab:server": "node scripts/collab-server.mjs"
+    "check:publish": "node scripts/verify-package.mjs",
+    "check:types:runtime": "node scripts/verify-runtime-exports.mjs",
+    "collab:server": "node scripts/collab-server.mjs",
+    "test:e2e": "playwright test --config e2e/playwright.config.ts",
+    "test:e2e:ci": "playwright test --config e2e/playwright.config.ts --grep-invert 视觉回归",
+    "test:e2e:ui": "playwright test --config e2e/playwright.config.ts --ui",
+    "test:e2e:debug": "playwright test --config e2e/playwright.config.ts --debug",
+    "test:e2e:headed": "playwright test --config e2e/playwright.config.ts --headed",
+    "test:e2e:visual": "playwright test --config e2e/playwright.config.ts e2e/specs/visual-regression.spec.ts",
+    "test:e2e:visual:update": "playwright test --config e2e/playwright.config.ts e2e/specs/visual-regression.spec.ts --update-snapshots",
+    "test:e2e:report": "playwright show-report e2e/playwright-report"
   },
   "dependencies": {
     "@handsontable/spreadsheet-icons": "^2.0.0",
@@ -77,6 +86,7 @@
     "vue": "^3.5.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.60.0",
     "@vitejs/plugin-vue": "^5.2.0",
     "@vitest/coverage-v8": "^3.1.0",
     "jsdom": "^26.1.0",
