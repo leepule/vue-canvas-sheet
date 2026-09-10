@@ -14,15 +14,21 @@
  *   3. 断线时自动广播 user-leave，并清理该用户持有的锁。
  *
  * 启动：
- *   node scripts/collab-server.mjs                 # 默认 0.0.0.0:8080
- *   PORT=9000 node scripts/collab-server.mjs
- *   HOST=127.0.0.1 PORT=8080 node scripts/collab-server.mjs
+ *   node scripts/collab-server.mjs                 # 默认 0.0.0.0:8800，未设置 token 时拒绝所有连接
+ *   COLLAB_AUTH_TOKEN=dev-secret PORT=9000 node scripts/collab-server.mjs
+ *   HOST=127.0.0.1 COLLAB_AUTH_TOKEN=dev-secret PORT=8080 node scripts/collab-server.mjs
  */
 
 import { WebSocketServer } from 'ws';
+import {
+  CLOSE_POLICY_VIOLATION,
+  authenticateCollabRequestParams,
+  isCollabMessageAuthorized
+} from './collab-auth.mjs';
 
 const PORT = Number(process.env.PORT) || 8800;
 const HOST = process.env.HOST || '0.0.0.0';
+const AUTH_TOKEN = process.env.COLLAB_AUTH_TOKEN || '';
 
 const wss = new WebSocketServer({ host: HOST, port: PORT });
 
@@ -34,6 +40,8 @@ const clientMeta = new WeakMap();
 const lastSelection = new Map();
 /** roomId -> Map<"r,c", lockMessage> */
 const lockedCells = new Map();
+/** ws -> { roomId, userId } */
+const connectionAuth = new WeakMap();
 
 function getRoom(roomId) {
   let room = rooms.get(roomId);
@@ -59,6 +67,24 @@ function broadcast(roomId, senderWs, payload) {
 function sendTo(ws, payload) {
   if (ws.readyState !== ws.OPEN) return;
   ws.send(typeof payload === 'string' ? payload : JSON.stringify(payload));
+}
+
+function parseRequestParams(req) {
+  const host = req.headers.host || `${HOST}:${PORT}`;
+  return new URL(req.url || '/', `ws://${host}`).searchParams;
+}
+
+function authenticateRequest(req) {
+  return authenticateCollabRequestParams(parseRequestParams(req), AUTH_TOKEN);
+}
+
+function closeUnauthorized(ws, reason) {
+  console.warn(`[collab] unauthorized connection rejected: ${reason}`);
+  try {
+    ws.close(CLOSE_POLICY_VIOLATION, 'Unauthorized');
+  } catch (_) {
+    try { ws.terminate(); } catch (__) { /* noop */ }
+  }
 }
 
 function cleanupClient(ws) {
@@ -88,12 +114,19 @@ function cleanupClient(ws) {
   // 广播离线
   broadcast(roomId, ws, { type: 'user-leave', roomId, userId });
   clientMeta.delete(ws);
+  connectionAuth.delete(ws);
 
   console.log(`[collab] - ${userId} left room "${roomId}" (room size: ${room ? room.size : 0})`);
 }
 
 function handleJoin(ws, msg) {
   const { roomId, userId, userName, userColor } = msg;
+  const auth = connectionAuth.get(ws);
+  if (!isCollabMessageAuthorized(auth, msg)) {
+    closeUnauthorized(ws, 'join identity does not match authenticated handshake');
+    return;
+  }
+
   if (!roomId || !userId) {
     console.warn('[collab] user-join missing roomId/userId, ignored');
     return;
@@ -125,7 +158,14 @@ function handleJoin(ws, msg) {
 
 wss.on('connection', (ws, req) => {
   const ip = req.socket.remoteAddress;
-  console.log(`[collab] connection from ${ip}`);
+  const auth = authenticateRequest(req);
+  if (!auth.ok) {
+    closeUnauthorized(ws, auth.reason);
+    return;
+  }
+
+  connectionAuth.set(ws, { roomId: auth.roomId, userId: auth.userId });
+  console.log(`[collab] authenticated connection from ${ip} as ${auth.userId} in room "${auth.roomId}"`);
 
   ws.on('message', (raw) => {
     let msg;
@@ -139,6 +179,13 @@ wss.on('connection', (ws, req) => {
     const { type, roomId, userId } = msg || {};
     if (!type || !roomId || !userId) {
       console.warn('[collab] message missing type/roomId/userId, ignored:', msg);
+      return;
+    }
+
+    const auth = connectionAuth.get(ws);
+    if (!isCollabMessageAuthorized(auth, msg)) {
+      closeUnauthorized(ws, 'message identity does not match authenticated handshake');
+      cleanupClient(ws);
       return;
     }
 
@@ -198,6 +245,9 @@ wss.on('connection', (ws, req) => {
 
 wss.on('listening', () => {
   console.log(`[collab] WebSocket collaboration server listening on ws://${HOST}:${PORT}`);
+  if (!AUTH_TOKEN) {
+    console.warn('[collab] COLLAB_AUTH_TOKEN is not set; all WebSocket connections will be rejected.');
+  }
   console.log('[collab] Set RealtimeCollaborationPlugin serverUrl to e.g. ws://localhost:' + PORT);
 });
 

@@ -8,8 +8,11 @@
  */
 
 export function getSparseBounds(workbook) {
-  if (workbook && workbook._dataMatrix && typeof workbook._dataMatrix.getBounds === 'function') {
-    return workbook._dataMatrix.getBounds();
+  if (workbook && typeof workbook.getDataMatrix === 'function') {
+    const dm = workbook.getDataMatrix();
+    if (dm && typeof dm.getBounds === 'function') {
+      return dm.getBounds();
+    }
   }
   const data = workbook?.toJSON?.().data || {};
   let minRow = Infinity, maxRow = -1, minCol = Infinity, maxCol = -1;
@@ -27,8 +30,11 @@ export function getSparseBounds(workbook) {
 }
 
 export function getWorkbookEntries(workbook) {
-  if (workbook && workbook._dataMatrix && typeof workbook._dataMatrix.entries === 'function') {
-    return Array.from(workbook._dataMatrix.entries());
+  if (workbook && typeof workbook.getDataMatrix === 'function') {
+    const dm = workbook.getDataMatrix();
+    if (dm && typeof dm.entries === 'function') {
+      return Array.from(dm.entries());
+    }
   }
   const data = workbook?.toJSON?.().data || {};
   const out = [];

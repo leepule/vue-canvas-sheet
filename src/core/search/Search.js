@@ -14,6 +14,16 @@ const REBUILD_THRESHOLD_RATIO = 0.3;
 const REBUILD_THRESHOLD_MIN = 50;
 
 /**
+ * @typedef {Object} SearchEngineDeps
+ * @property {() => number} getDataVersion
+ * @property {() => Object} getDataMatrix
+ * @property {(r: number, c: number) => string} cellKey
+ * @property {(r: number, c: number) => Object|null} getCell
+ * @property {(updates: Array<{r:number,c:number,val:Object}>) => void} bulkSetCells
+ * @property {(r: number, c: number, val: Object) => void} setCell
+ */
+
+/**
  * 搜索引擎 - 支持二分搜索和正则表达式
  *
  * 功能：
@@ -24,8 +34,12 @@ const REBUILD_THRESHOLD_MIN = 50;
  * 5. 循环搜索
  */
 export class SearchEngine {
-    constructor(workbook) {
-        this.workbook = workbook;
+    /**
+     * @param {SearchEngineDeps} deps
+     */
+    constructor(deps) {
+        /** @type {SearchEngineDeps} */
+        this.d = deps;
         this.cache = {
             version: -1,
             index: [],         // 按 (r,c) 升序排列的 { r, c, key, v }
@@ -45,13 +59,11 @@ export class SearchEngine {
     }
 
     /**
-     * 订阅 workbook 事件以维护增量索引。延迟绑定。
+     * 订阅 Workbook 事件以维护增量索引。延迟绑定。
      * @private
      */
     _bindEventsIfNeeded() {
         if (this._eventsBound) return;
-        const wb = this.workbook;
-        if (!wb || typeof wb.on !== 'function') return;
 
         this._onCellChange = ({ r, c, newValue }) => {
             // 仅在索引已建立时收集 delta，避免索引未建立前的事件白白堆积
@@ -64,9 +76,11 @@ export class SearchEngine {
             this._pendingChanges.length = 0;
         };
 
-        wb.on(Events.CELL_CHANGE, this._onCellChange);
-        wb.on(Events.DATA_LOAD, this._onStructuralChange);
-        wb.on(Events.STRUCTURE_CHANGE, this._onStructuralChange);
+        // 订阅 Workbook 的 EventEmitter，维护增量索引。
+        // 这三个事件仅由 Workbook 产生（source 恒为 workbook），故无需 source 过滤。
+        this.d.onEvent(Events.CELL_CHANGE, this._onCellChange);
+        this.d.onEvent(Events.DATA_LOAD, this._onStructuralChange);
+        this.d.onEvent(Events.STRUCTURE_CHANGE, this._onStructuralChange);
         this._eventsBound = true;
     }
 
@@ -79,7 +93,7 @@ export class SearchEngine {
      */
     _ensureIndex() {
         this._bindEventsIfNeeded();
-        const wbVersion = this.workbook.dataVersion;
+        const wbVersion = this.d.getDataVersion();
 
         // 版本号未变且无 pending：快路径直接返回
         if (!this.cache.needsRebuild
@@ -116,12 +130,13 @@ export class SearchEngine {
      * @private
      */
     _fullRebuild() {
-        const wb = this.workbook;
+        const d = this.d;
         const entries = [];
+        const matrix = d.getDataMatrix();
 
-        if (wb._dataMatrix && typeof wb._dataMatrix.forEach === 'function') {
-            wb._dataMatrix.forEach((r, c, cell) => {
-                const key = wb._cellKey(r, c);
+        if (matrix && typeof matrix.forEach === 'function') {
+            matrix.forEach((r, c, cell) => {
+                const key = d.cellKey(r, c);
                 entries.push({ r, c, key, v: cell ? cell.v : undefined });
             });
         }
@@ -132,7 +147,7 @@ export class SearchEngine {
         });
 
         this.cache.index = entries;
-        this.cache.version = wb.dataVersion;
+        this.cache.version = d.getDataVersion();
         this.cache.needsRebuild = false;
         this._pendingChanges.length = 0;
     }
@@ -142,7 +157,7 @@ export class SearchEngine {
      * @private
      */
     _applyPendingChanges() {
-        const wb = this.workbook;
+        const d = this.d;
         const idx = this.cache.index;
         const pending = this._pendingChanges;
 
@@ -157,12 +172,12 @@ export class SearchEngine {
             } else if (exists) {
                 idx[pos].v = newValue.v;
             } else {
-                idx.splice(pos, 0, { r, c, key: wb._cellKey(r, c), v: newValue.v });
+                idx.splice(pos, 0, { r, c, key: d.cellKey(r, c), v: newValue.v });
             }
         }
 
         this._pendingChanges.length = 0;
-        this.cache.version = wb.dataVersion;
+        this.cache.version = d.getDataVersion();
     }
 
     /**
@@ -190,12 +205,11 @@ export class SearchEngine {
      * 销毁：解除事件订阅，释放索引内存。
      */
     destroy() {
-        const wb = this.workbook;
-        if (this._eventsBound && wb && typeof wb.off === 'function') {
-            if (this._onCellChange) wb.off(Events.CELL_CHANGE, this._onCellChange);
+        if (this._eventsBound) {
+            if (this._onCellChange) this.d.offEvent(Events.CELL_CHANGE, this._onCellChange);
             if (this._onStructuralChange) {
-                wb.off(Events.DATA_LOAD, this._onStructuralChange);
-                wb.off(Events.STRUCTURE_CHANGE, this._onStructuralChange);
+                this.d.offEvent(Events.DATA_LOAD, this._onStructuralChange);
+                this.d.offEvent(Events.STRUCTURE_CHANGE, this._onStructuralChange);
             }
         }
         this._eventsBound = false;
@@ -301,7 +315,7 @@ export class SearchEngine {
      */
     _getCellByRef(cellRef) {
         if (!cellRef) return null;
-        return this.workbook.getCell(cellRef.r, cellRef.c);
+        return this.d.getCell(cellRef.r, cellRef.c);
     }
 
     /**
@@ -312,7 +326,7 @@ export class SearchEngine {
      * @private
      */
     _getCellAt(r, c) {
-        return this.workbook.getCell(r, c);
+        return this.d.getCell(r, c);
     }
 
     /**
@@ -483,7 +497,7 @@ export class SearchEngine {
         const updates = [];
 
         // 直接遍历稀疏矩阵，避免 workbook.data getter 构造完整 O(N) 副本
-        const matrix = this.workbook._dataMatrix;
+        const matrix = this.d.getDataMatrix();
         if (!matrix || typeof matrix.forEach !== 'function') return 0;
 
         matrix.forEach((r, c, cell) => {
@@ -513,7 +527,7 @@ export class SearchEngine {
         });
 
         if (updates.length > 0) {
-            this.workbook.bulkSetCells(updates);
+            this.d.bulkSetCells(updates);
         }
 
         return count;
@@ -550,7 +564,7 @@ export class SearchEngine {
 
         if (newVal !== valStr) {
             const newCellData = { ...cloneCell(cell), v: newVal };
-            this.workbook.setCell(position.r, position.c, newCellData);
+            this.d.setCell(position.r, position.c, newCellData);
             return true;
         }
 

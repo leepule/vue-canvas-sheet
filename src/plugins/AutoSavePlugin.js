@@ -12,7 +12,16 @@ const SAVE_STATUS_EVENT = Events.SAVE_STATUS || 'save-status';
  *
  * 默认使用 Workbook 的 IndexedDB diff 持久化路径。localStorage 仅作为显式 backend
  * 或 IndexedDB 不可用时的小表 fallback，避免每次编辑都同步 stringify 全量工作簿。
+ *
+ * localStorage 安全边界：
+ * - MAX_LOCALSTORAGE_ROWS: 行数上限（快速首过检查）
+ * - MAX_LOCALSTORAGE_CELLS: 有值单元格数上限（精确检查）
+ * - MAX_LOCALSTORAGE_BYTES: 字符串长度预估上限（~4MB，留 1MB 余量给 5MB 配额）
  */
+const MAX_LOCALSTORAGE_ROWS = 2000;
+const MAX_LOCALSTORAGE_CELLS = 10000;
+const MAX_LOCALSTORAGE_BYTES = 4 * 1024 * 1024;
+
 export class AutoSavePlugin {
   name = 'AutoSave';
   version = '2.1.0';
@@ -118,8 +127,8 @@ export class AutoSavePlugin {
       ...extra
     };
 
-    if (workbook && typeof workbook._emit === 'function') {
-      workbook._emit(SAVE_STATUS_EVENT, payload);
+    if (workbook && typeof workbook.emitEvent === 'function') {
+      workbook.emitEvent(SAVE_STATUS_EVENT, payload);
     }
     if (this._registry) {
       this._registry.setSharedState('autosave:status', payload);
@@ -157,6 +166,7 @@ export class AutoSavePlugin {
     } catch (error) {
       this._lastError = error;
 
+      // 主路径为 indexedDB 时，尝试降级到 localStorage
       if (this.backend === 'indexedDB' && this.allowLocalStorageFallback) {
         try {
           const result = this._saveToLocalStorage(workbook);
@@ -167,13 +177,23 @@ export class AutoSavePlugin {
           return result;
         } catch (fallbackError) {
           this._lastError = fallbackError;
-          const status = this._isQuotaError(fallbackError) ? 'quotaExceeded' : 'failed';
-          this._emitStatus(workbook, status, { error: fallbackError });
+          const isSizeRejected = /被安全拦截|过大/.test(fallbackError.message || '');
+          const status = this._isQuotaError(fallbackError)
+            ? 'quotaExceeded'
+            : isSizeRejected
+              ? 'tooLarge'
+              : 'failed';
+          this._emitStatus(workbook, status, { error: fallbackError, reason: 'fallback' });
           return null;
         }
       }
 
-      const status = this._isQuotaError(error) ? 'quotaExceeded' : 'failed';
+      const isSizeRejected = /被安全拦截|过大/.test(error.message || '');
+      const status = this._isQuotaError(error)
+        ? 'quotaExceeded'
+        : isSizeRejected
+          ? 'tooLarge'
+          : 'failed';
       this._emitStatus(workbook, status, { error });
       return null;
     }
@@ -190,16 +210,57 @@ export class AutoSavePlugin {
       backend: 'indexedDB',
       mode: result?.mode || 'diff',
       sheetId: this.sheetId,
-      size: workbook._dirtyCells ? workbook._dirtyCells.size : 0
+      size: workbook.getDirtyCells() ? workbook.getDirtyCells().size : 0
     };
   }
 
+  /**
+   * 校验表格规模是否超出 localStorage 安全写入范围。
+   * @param {Workbook} workbook
+   * @returns {{ safe: boolean, reason?: string }} 校验结果
+   */
+  _validateLocalStorageSize(workbook) {
+    // 第一层：行数快速检查（避免对大表做 SparseMatrix.size 迭代）
+    if (workbook.rowCount > MAX_LOCALSTORAGE_ROWS) {
+      return {
+        safe: false,
+        reason: `表格行数超限 (${workbook.rowCount} > ${MAX_LOCALSTORAGE_ROWS})，localStorage 写入已被安全拦截。`
+      };
+    }
+
+    // 第二层：有值单元格数精确检查
+    const cellCount = workbook.getDataMatrix() ? workbook.getDataMatrix().size : 0;
+    if (cellCount > MAX_LOCALSTORAGE_CELLS) {
+      return {
+        safe: false,
+        reason: `表格有值单元格超限 (${cellCount} > ${MAX_LOCALSTORAGE_CELLS})，localStorage 写入已被安全拦截。`
+      };
+    }
+
+    return { safe: true };
+  }
+
   _saveToLocalStorage(workbook) {
+    // 写入前执行边界校验，防止大表同步 JSON.stringify + setItem 阻塞主线程
+    const validation = this._validateLocalStorageSize(workbook);
+    if (!validation.safe) {
+      throw new Error(validation.reason);
+    }
+
+    // 先序列化，再校验实际字节数（防止大量小单元格组合超出配额）
     const data = {
       ...workbook.toJSON(),
       _timestamp: Date.now()
     };
     const jsonStr = JSON.stringify(data);
+
+    if (jsonStr.length > MAX_LOCALSTORAGE_BYTES) {
+      const sizeMB = (jsonStr.length / (1024 * 1024)).toFixed(2);
+      throw new Error(
+        `序列化后数据过大 (${sizeMB}MB)，超出 localStorage 安全上限，写入已被拦截。`
+      );
+    }
+
     localStorage.setItem(this.key, jsonStr);
     return {
       backend: 'localStorage',

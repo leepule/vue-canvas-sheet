@@ -11,6 +11,7 @@ import {
 import { buildWorksheetFromSparseSnapshot } from './utils/xlsxAdapter.js';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+const CSV_FORMULA_PREFIX = /^[\s\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u206F]*[=+\-@]/u;
 
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
@@ -34,20 +35,27 @@ function loadXLSX() {
   return _xlsxPromise;
 }
 
-function csvEscape(value, delimiter) {
-  if (value === null || value === undefined) return '';
-  const str = typeof value === 'string' ? value : String(value);
-  if (str.includes(delimiter) || str.includes('"') || str.includes('\n') || str.includes('\r')) {
-    return `"${str.replace(/"/g, '""')}"`;
+function sanitizeCsvFormula(cellValue, csvOptions) {
+  const stringValue = typeof cellValue === 'string' ? cellValue : String(cellValue);
+  if (csvOptions.allowFormulas === true || typeof cellValue !== 'string') return stringValue;
+  return CSV_FORMULA_PREFIX.test(stringValue) ? `'${stringValue}` : stringValue;
+}
+
+function csvEscape(cellValue, delimiter, csvOptions) {
+  if (cellValue === null || cellValue === undefined) return '';
+  const safeText = sanitizeCsvFormula(cellValue, csvOptions);
+  if (safeText.includes(delimiter) || safeText.includes('"') || safeText.includes('\n') || safeText.includes('\r')) {
+    return `"${safeText.replace(/"/g, '""')}"`;
   }
-  return str;
+  return safeText;
 }
 
 function createExportWorker() {
   if (typeof Worker === 'undefined') return null;
   try {
     return new Worker(new URL('../workers/export.worker.js', import.meta.url), { type: 'module' });
-  } catch {
+  } catch (err) {
+    console.warn('[ExportPlugin] Failed to create export worker:', err?.message || err);
     return null;
   }
 }
@@ -250,8 +258,8 @@ export class ExportPlugin {
       for (let i = 0; i < entries.length; i++) {
         const { r, c, cell } = entries[i];
         if (!cell || r < bounds.minRow || c < bounds.minCol || r > bounds.maxRow || c > bounds.maxCol) continue;
-        const value = cell.v;
-        if (value === null || value === undefined || value === '') continue;
+        const cellValue = cell.v;
+        if (cellValue === null || cellValue === undefined || cellValue === '') continue;
 
         const rowIdx = r - bounds.minRow;
         const colIdx = c - bounds.minCol;
@@ -260,7 +268,7 @@ export class ExportPlugin {
           cells = new Map();
           rowMap.set(rowIdx, cells);
         }
-        cells.set(colIdx, csvEscape(value, delimiter));
+        cells.set(colIdx, csvEscape(cellValue, delimiter, options));
       }
 
       // 分块拼接到 Blob parts 数组：每 CHUNK_ROWS 行 join 成一段 push 进 parts，

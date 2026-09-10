@@ -1,12 +1,26 @@
 /**
- * 合并单元格管理器
- * 管理合并单元格的索引、查询、添加、删除
+ * 合并单元格管理器 — 管理合并单元格的索引、查询、添加与删除。
+ *
+ * @typedef {Object} MergeManagerDeps
+ * @property {() => Array<{s:{r,c}, e:{r,c}}>} getMerges      — 获取合并区域列表
+ * @property {(v: Array) => void}               setMerges      — 设置合并区域列表
+ * @property {() => Map<string, Object>}        getMergeMap    — 获取合并映射 (cellKey → mergeInfo)
+ * @property {(r: number, c: number) => string} getCellKey     — 行列 → 单元格键
+ * @property {(range: Object, cb: Function) => void} iterateRange — 遍历范围内单元格
+ * @property {() => SparseMatrix}               getDataMatrix  — 数据矩阵引用
+ * @property {() => HistoryManager}             getHistory     — 历史管理器
+ * @property {(...args: any[]) => void}         emit           — 事件发射
+ * @property {(...args: any[]) => void}         notify         — UI 通知
  */
+
 import { cloneCell, cloneRange } from './utils/Clipboard.js';
 import { Events } from './events/EventEmitter.js';
-
 export class MergeManager {
+  /**
+   * @param {MergeManagerDeps} deps — 具名依赖注入，详见 MergeManagerDeps typedef
+   */
   constructor(deps) {
+    /** @type {MergeManagerDeps} */
     this.d = deps;
     this._mergeRowIndex = new Map();
     this._mergeIndexDirty = true;
@@ -59,11 +73,13 @@ export class MergeManager {
   }
 
   addMerge(range) {
-    const merges = this.d.getMerges();
-    merges.push(range);
+    const merges = [...this.d.getMerges(), range];
+    this.d.setMerges(merges);
+    const mergeMap = { ...this.d.getMergeMap() };
     this.d.iterateRange(range, (r, c) => {
-      this.d.getMergeMap()[this.d.getCellKey(r, c)] = range;
+      mergeMap[this.d.getCellKey(r, c)] = range;
     });
+    this.d.setMergeMap(mergeMap);
     this._mergeIndexDirty = true;
     this.d.emit(Events.MERGE_CHANGE, { action: 'add', range });
     this.d.notify();
@@ -71,7 +87,7 @@ export class MergeManager {
 
   removeMerge(range) {
     const merges = this.d.getMerges();
-    const mergeMap = this.d.getMergeMap();
+    const mergeMap = { ...this.d.getMergeMap() };
     const toRemove = merges.filter(m => {
       const intersects = !(range.e.c < m.s.c || range.s.c > m.e.c || range.e.r < m.s.r || range.s.r > m.e.r);
       return intersects;
@@ -85,6 +101,7 @@ export class MergeManager {
     });
     const removeSet = new Set(toRemove);
     this.d.setMerges(merges.filter(m => !removeSet.has(m)));
+    this.d.setMergeMap(mergeMap);
     this._mergeIndexDirty = true;
     this.d.emit(Events.MERGE_CHANGE, { action: 'remove', range, removed: toRemove });
     this.d.notify();

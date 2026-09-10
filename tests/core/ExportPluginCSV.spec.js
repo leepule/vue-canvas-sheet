@@ -21,15 +21,16 @@ beforeEach(() => {
     createObjectURL: () => 'blob:mock',
     revokeObjectURL: () => {}
   });
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
 });
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function makePlugin(workbook) {
   const plugin = new ExportPlugin();
-  // ExportPlugin 通过 onInit/registry 拿 workbook；这里直接注入私有字段足够测试 exportCSV
-  plugin._workbook = workbook;
+  workbook.usePlugin(plugin);
   return plugin;
 }
 
@@ -65,6 +66,7 @@ describe('ExportPlugin.exportCSV - 分块拼接等价性 (#21)', () => {
     expect(lines[3000]).toBe('');
     // bytes 取 Blob 实际字节数
     expect(result.bytes).toBe(capturedBlob.size);
+    wb.destroy();
   });
 
   it('BOM + 自定义分隔/换行 正确拼接', async () => {
@@ -80,5 +82,47 @@ describe('ExportPlugin.exportCSV - 分块拼接等价性 (#21)', () => {
     expect(text.startsWith('﻿')).toBe(true);
     const body = text.slice(1); // 去掉 BOM
     expect(body).toBe('x;y\r\n;q');
+    wb.destroy();
+  });
+});
+
+describe('ExportPlugin.exportCSV - 公式注入防护', () => {
+  it.each([
+    ['等号', '=HYPERLINK("https://example.test")', '"\'=HYPERLINK(""https://example.test"")"'],
+    ['加号', '+cmd', "'+cmd"],
+    ['减号字符串', '-42', "'-42"],
+    ['@ 前缀', '@SUM(A1:A2)', "'@SUM(A1:A2)"],
+    ['前导 TAB', '\t=SUM(A1:A2)', "'\t=SUM(A1:A2)"],
+    ['前导空格', '  +cmd', "'  +cmd"],
+    ['前导回车', '\r=SUM(A1:A2)', '"\'\r=SUM(A1:A2)"'],
+    ['前导换行', '\n@SUM(A1:A2)', '"\'\n@SUM(A1:A2)"'],
+    ['前导控制字符', '\u0000-cmd', "'\u0000-cmd"],
+    ['前导零宽字符', '\u200B=SUM(A1:A2)', "'\u200B=SUM(A1:A2)"],
+    ['已加单引号', "'=SUM(A1:A2)", "'=SUM(A1:A2)"],
+    ['普通文本', 'Quarter 1', 'Quarter 1'],
+    ['数值负数', -42, '-42'],
+  ])('%s 按默认安全策略导出', (_scenario, cellValue, expectedCsv) => {
+    const workbook = new Workbook();
+    workbook.bulkSetCells([{ r: 0, c: 0, val: { v: cellValue } }]);
+
+    makePlugin(workbook).exportCSV();
+
+    expect(capturedParts.join('')).toBe(expectedCsv);
+    workbook.destroy();
+  });
+
+  it('allowFormulas=true 时显式保留可信文本的公式前缀', () => {
+    const workbook = new Workbook();
+    workbook.bulkSetCells([
+      { r: 0, c: 0, val: { v: '=SUM(A1:A2)' } },
+      { r: 0, c: 1, val: { v: '+cmd' } },
+      { r: 0, c: 2, val: { v: '-42' } },
+      { r: 0, c: 3, val: { v: '@SUM(A1:A2)' } },
+    ]);
+
+    makePlugin(workbook).exportCSV({ allowFormulas: true });
+
+    expect(capturedParts.join('')).toBe('=SUM(A1:A2),+cmd,-42,@SUM(A1:A2)');
+    workbook.destroy();
   });
 });

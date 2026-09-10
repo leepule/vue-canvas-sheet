@@ -1,9 +1,24 @@
 /**
- * 布局引擎
- * 管理行列偏移量计算、冻结区域尺寸、像素坐标与行列索引的转换
+ * 布局引擎 — 管理行列偏移量计算、冻结区域尺寸、像素坐标与行列索引的转换。
+ *
+ * @typedef {Object} LayoutEngineDeps
+ * @property {() => number}          getRowCount         — 总行数
+ * @property {() => number}          getColCount         — 总列数
+ * @property {() => number}          getDefaultRowHeight — 默认行高 (px)
+ * @property {() => number}          getDefaultColWidth  — 默认列宽 (px)
+ * @property {() => Object}          getRowHeights       — 行高映射 {rowIndex: px}
+ * @property {() => Object}          getColWidths        — 列宽映射 {colIndex: px}
+ * @property {() => Object}          getFreeze           — 冻结区域 {r, c}
+ * @property {(c: number) => number} getColWidth         — 指定列宽 (px)
+ * @property {(r: number) => number} getRowHeight        — 指定行高 (px)
+ * @property {() => SparseMatrix}    getDataMatrix       — 数据矩阵引用
  */
 export class LayoutEngine {
+  /**
+   * @param {LayoutEngineDeps} deps — 具名依赖注入，详见 LayoutEngineDeps typedef
+   */
   constructor(deps) {
+    /** @type {LayoutEngineDeps} */
     this.d = deps;
     this._rowOffsets = [];
     this._colOffsets = [];

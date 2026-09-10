@@ -1,11 +1,30 @@
 /**
- * 表格结构管理器
- * 管理行列的插入、删除和自动填充
+ * 表格结构管理器 — 管理行列的插入、删除、自动填充与结构调整。
+ *
+ * @typedef {Object} SheetStructureDeps
+ * @property {() => SparseMatrix}               getDataMatrix    — 数据矩阵引用
+ * @property {() => number}                     getRowCount      — 总行数
+ * @property {(v: number) => void}              setRowCount      — 设置行数
+ * @property {() => number}                     getColCount      — 总列数
+ * @property {(v: number) => void}              setColCount      — 设置列数
+ * @property {() => number}                     getDataVersion   — 数据版本号
+ * @property {(v: number) => void}              setDataVersion   — 设置数据版本号
+ * @property {() => void}                       markDirty        — 标记布局偏移失效
+ * @property {() => void}                       markFrozenDirty  — 标记冻结区域失效
+ * @property {() => HistoryManager}             getHistory       — 历史管理器
+ * @property {(r: number, c: number) => Cell}   getCell          — 获取单元格
+ * @property {(updates: Array) => void}         bulkSetCells     — 批量设置单元格
+ * @property {(...args: any[]) => void}         notify           — UI 通知
  */
+
 import { cloneCell } from './utils/Clipboard.js';
 
 export class SheetStructure {
+  /**
+   * @param {SheetStructureDeps} deps — 具名依赖注入，详见 SheetStructureDeps typedef
+   */
   constructor(deps) {
+    /** @type {SheetStructureDeps} */
     this.d = deps;
   }
 

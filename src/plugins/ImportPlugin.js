@@ -66,50 +66,61 @@ export function buildImportUpdates(matrix) {
 /**
  * 从 XLSX worksheet 读取带样式的单元格，转换为内部格式
  */
-function buildImportUpdatesFromXLSX(XLSX, ws) {
+export function buildImportUpdatesFromXLSX(XLSX, ws) {
   const updates = [];
   const range = XLSX.utils.decode_range(ws['!ref'] || 'A1');
 
-  for (let r = range.s.r; r <= range.e.r; r++) {
-    for (let c = range.s.c; c <= range.e.c; c++) {
-      const addr = XLSX.utils.encode_cell({ r, c });
-      const xlsxCell = ws[addr];
-      if (!xlsxCell) continue;
+  for (const addr of Object.keys(ws)) {
+    if (addr.startsWith('!')) continue;
 
-      const cell = {};
+    let coord;
+    try {
+      coord = XLSX.utils.decode_cell(addr);
+    } catch (_) {
+      continue;
+    }
 
-      // 值
-      if (xlsxCell.f) {
-        cell.f = '=' + xlsxCell.f;
+    const { r, c } = coord;
+    if (r < range.s.r || r > range.e.r || c < range.s.c || c > range.e.c) {
+      continue;
+    }
+
+    const xlsxCell = ws[addr];
+    if (!xlsxCell) continue;
+
+    const cell = {};
+
+    // 值
+    if (xlsxCell.f) {
+      cell.f = '=' + xlsxCell.f;
+    }
+    if (xlsxCell.v !== undefined && xlsxCell.v !== null) {
+      cell.v = xlsxCell.v;
+    }
+
+    // 样式：xlsx-js-style 读取时 s 可能是数字索引或对象
+    const style = xlsxCell.s;
+    if (style && typeof style === 'object') {
+      const s = {};
+      if (style.font) {
+        if (style.font.bold) s.bold = true;
+        if (style.font.italic) s.italic = true;
+        if (style.font.color?.rgb) s.color = '#' + style.font.color.rgb;
       }
-      if (xlsxCell.v !== undefined && xlsxCell.v !== null) {
-        cell.v = xlsxCell.v;
+      if (style.fill?.fgColor?.rgb) {
+        s.bg = '#' + style.fill.fgColor.rgb;
       }
-
-      // 样式：xlsx-js-style 读取时 s 可能是数字索引或对象
-      const style = xlsxCell.s;
-      if (style && typeof style === 'object') {
-        const s = {};
-        if (style.font) {
-          if (style.font.bold) s.bold = true;
-          if (style.font.italic) s.italic = true;
-          if (style.font.color?.rgb) s.color = '#' + style.font.color.rgb;
+      if (style.alignment) {
+        if (style.alignment.horizontal) s.align = style.alignment.horizontal;
+        if (style.alignment.vertical) {
+          s.valign = style.alignment.vertical === 'center' ? 'middle' : style.alignment.vertical;
         }
-        if (style.fill?.fgColor?.rgb) {
-          s.bg = '#' + style.fill.fgColor.rgb;
-        }
-        if (style.alignment) {
-          if (style.alignment.horizontal) s.align = style.alignment.horizontal;
-          if (style.alignment.vertical) {
-            s.valign = style.alignment.vertical === 'center' ? 'middle' : style.alignment.vertical;
-          }
-        }
-        if (Object.keys(s).length > 0) cell.s = s;
       }
+      if (Object.keys(s).length > 0) cell.s = s;
+    }
 
-      if (cell.f || cell.v !== undefined) {
-        updates.push({ r, c, val: cell });
-      }
+    if (cell.f || cell.v !== undefined) {
+      updates.push({ r, c, val: cell });
     }
   }
   return updates;
@@ -125,21 +136,29 @@ function matrixDimensions(matrix) {
   return { rowCount, colCount: Math.max(10, widest + 5) };
 }
 
+function clearExistingCells(workbook) {
+  const dataMatrix = workbook.getDataMatrix();
+  if (typeof workbook.clearCells !== 'function') {
+    dataMatrix.clear();
+    return;
+  }
+
+  const bounds = dataMatrix.getBounds();
+  if (bounds.maxRow < 0) return;
+  workbook.clearCells({
+    s: { r: bounds.minRow, c: bounds.minCol },
+    e: { r: bounds.maxRow, c: bounds.maxCol }
+  });
+}
+
 export async function applyMatrixInBatches(workbook, matrix, options = {}) {
   const batchSize = options.batchSize || DEFAULT_IMPORT_BATCH_SIZE;
   const { rowCount, colCount } = matrixDimensions(matrix);
   const updates = buildImportUpdates(matrix);
 
+  clearExistingCells(workbook);
   workbook.rowCount = rowCount;
   workbook.colCount = colCount;
-  if (typeof workbook.clearCells === 'function') {
-    workbook.clearCells({
-      s: { r: 0, c: 0 },
-      e: { r: Math.max(0, rowCount - 1), c: Math.max(0, colCount - 1) }
-    });
-  } else if (workbook._dataMatrix) {
-    workbook._dataMatrix.clear();
-  }
 
   for (let i = 0; i < updates.length; i += batchSize) {
     workbook.bulkSetCells(updates.slice(i, i + batchSize));
@@ -244,14 +263,9 @@ export class ImportPlugin {
       if (u.r + 1 > dims.rowCount) dims.rowCount = u.r + 1;
       if (u.c + 1 > dims.colCount) dims.colCount = u.c + 1;
     }
+    clearExistingCells(workbook);
     workbook.rowCount = Math.max(20, dims.rowCount + 5);
     workbook.colCount = Math.max(10, dims.colCount + 5);
-    if (typeof workbook.clearCells === 'function') {
-      workbook.clearCells({
-        s: { r: 0, c: 0 },
-        e: { r: Math.max(0, dims.rowCount - 1), c: Math.max(0, dims.colCount - 1) }
-      });
-    }
     for (let i = 0; i < updates.length; i += batchSize) {
       workbook.bulkSetCells(updates.slice(i, i + batchSize));
       if (options.onProgress) {

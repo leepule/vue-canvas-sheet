@@ -13,7 +13,16 @@ describe('SearchEngine', () => {
 
   beforeEach(() => {
     workbook = new Workbook();
-    searchEngine = new SearchEngine(workbook);
+    searchEngine = new SearchEngine({
+      getDataVersion: () => workbook.dataVersion,
+      getDataMatrix: () => workbook._dataMatrix,
+      cellKey: (r, c) => workbook._cellKey(r, c),
+      getCell: (r, c) => workbook.getCell(r, c),
+      bulkSetCells: (updates) => workbook.bulkSetCells(updates),
+      setCell: (r, c, val) => workbook.setCell(r, c, val),
+      onEvent: (event, cb) => workbook.on(event, cb),
+      offEvent: (event, cb) => workbook.off(event, cb),
+    });
   });
 
   afterEach(() => {
@@ -271,17 +280,17 @@ describe('SearchEngine', () => {
         const count = searchEngine.replaceAll('apple', 'orange');
         expect(count).toBe(3); // apple, apple pie, APPLE
         
-        expect(workbook.getCellValue(0, 0)).toBe('orange');
-        expect(workbook.getCellValue(0, 1)).toBe('orange pie');
-        expect(workbook.getCellValue(1, 1)).toBe('orange');
+        expect(workbook.formulaEvaluator.getCellValue(0, 0)).toBe('orange');
+        expect(workbook.formulaEvaluator.getCellValue(0, 1)).toBe('orange pie');
+        expect(workbook.formulaEvaluator.getCellValue(1, 1)).toBe('orange');
       });
 
       test('区分大小写替换', () => {
         const count = searchEngine.replaceAll('apple', 'orange', { caseSensitive: true });
         expect(count).toBe(2); // apple, apple pie (不匹配 APPLE)
         
-        expect(workbook.getCellValue(0, 0)).toBe('orange');
-        expect(workbook.getCellValue(1, 1)).toBe('APPLE');
+        expect(workbook.formulaEvaluator.getCellValue(0, 0)).toBe('orange');
+        expect(workbook.formulaEvaluator.getCellValue(1, 1)).toBe('APPLE');
       });
 
       test('空查询应该返回 0', () => {
@@ -293,7 +302,7 @@ describe('SearchEngine', () => {
         searchEngine.replaceAll('apple', 'orange');
         workbook.undo();
         
-        expect(workbook.getCellValue(0, 0)).toBe('apple');
+        expect(workbook.formulaEvaluator.getCellValue(0, 0)).toBe('apple');
       });
 
       test('应该保留单元格样式', () => {
@@ -310,13 +319,13 @@ describe('SearchEngine', () => {
       test('应该替换指定位置的单元格', () => {
         const result = searchEngine.replaceAt('apple', 'orange', { r: 0, c: 0 });
         expect(result).toBe(true);
-        expect(workbook.getCellValue(0, 0)).toBe('orange');
+        expect(workbook.formulaEvaluator.getCellValue(0, 0)).toBe('orange');
       });
 
       test('不应该替换不匹配的单元格', () => {
         const result = searchEngine.replaceAt('banana', 'orange', { r: 0, c: 0 });
         expect(result).toBe(false);
-        expect(workbook.getCellValue(0, 0)).toBe('apple');
+        expect(workbook.formulaEvaluator.getCellValue(0, 0)).toBe('apple');
       });
 
       test('应该返回 false 如果位置无效', () => {
@@ -333,7 +342,7 @@ describe('SearchEngine', () => {
         workbook.setCell(0, 0, { v: 'test123test' });
         const result = searchEngine.replaceAt('/\\d+/', 'X', { r: 0, c: 0 });
         expect(result).toBe(true);
-        expect(workbook.getCellValue(0, 0)).toBe('testXtest');
+        expect(workbook.formulaEvaluator.getCellValue(0, 0)).toBe('testXtest');
       });
 
       test('应该直接读取目标单元格而不触发 data getter', () => {
@@ -343,7 +352,7 @@ describe('SearchEngine', () => {
           const result = searchEngine.replaceAt('apple', 'orange', { r: 0, c: 0 });
 
           expect(result).toBe(true);
-          expect(workbook.getCellValue(0, 0)).toBe('orange');
+          expect(workbook.formulaEvaluator.getCellValue(0, 0)).toBe('orange');
           expect(dataSpy).not.toHaveBeenCalled();
         } finally {
           dataSpy.mockRestore();
@@ -428,14 +437,26 @@ describe('SearchEngine', () => {
       searchEngine.find('x');
       expect(searchEngine.cache.needsRebuild).toBe(false);
 
-      // 模拟结构性变化
-      workbook._events.emit('structure-change', { type: 'structure-change' });
+      // 触发结构性变化 — 走 Workbook 内部真实 _emit 路径（即 setColumns 等结构变更所用通道，
+      // SearchEngine 订阅 workbook 的 EventEmitter 上的 STRUCTURE_CHANGE）
+      workbook._emit('structure-change', {});
       expect(searchEngine.cache.needsRebuild).toBe(true);
 
       // 下次查找应触发全量重建
       workbook.setCell(2, 2, { v: 'y' });
       expect(searchEngine.find('y')).toEqual({ r: 2, c: 2 });
       expect(searchEngine.cache.needsRebuild).toBe(false);
+    });
+
+    test('skipEvent 写入（协同远程应用）不发 CELL_CHANGE，但仍能被搜索命中（dataVersion 兜底全量重建）', () => {
+      workbook.setCell(0, 0, { v: 'seed' });
+      searchEngine.find('seed'); // 建立索引，needsRebuild=false
+      expect(searchEngine.cache.needsRebuild).toBe(false);
+
+      // 模拟协同远程应用：skipEvent 跳过 CELL_CHANGE，Search 增量 patch 收不到，
+      // 但 _updateCellContent 的 dataVersion++ 使下次 _ensureIndex 检测版本落后而全量重建。
+      workbook.setCell(3, 4, { v: 'remoteVal' }, null, { skipEvent: true, skipHistory: true });
+      expect(searchEngine.find('remoteVal')).toEqual({ r: 3, c: 4 });
     });
   });
 

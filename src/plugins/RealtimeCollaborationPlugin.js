@@ -15,12 +15,16 @@ export class RealtimeCollaborationPlugin {
   dependencies = ['CollaborativeCursor'];
 
   constructor(options = {}) {
+    this.options = options;
     this.serverUrl = options.serverUrl || null;
     this.roomId = options.roomId || 'default-room';
     this.userId = options.userId || 'user_' + Math.random().toString(36).substring(2, 7);
     this.userName = options.userName || `用户_${this.userId}`;
     this.userColor = options.userColor || '#3498db';
     this.autoConnect = options.autoConnect !== false;
+    this.authToken = options.token ?? options.authToken ?? '';
+    this.authTokenParam = options.authTokenParam || 'token';
+    this.authRequired = options.authRequired !== false;
 
     // 自定义网络传输字段名映射配置
     const fieldNames = options.fieldNames || {};
@@ -120,6 +124,8 @@ export class RealtimeCollaborationPlugin {
   onUnmount() {
     this.disconnect();
     this._lastSelectionKey = null;
+    this._reconnectAttempts = 0;
+    this._lockedCells.clear();
     
     if (this._unsubSelection) {
       this._unsubSelection();
@@ -165,12 +171,41 @@ export class RealtimeCollaborationPlugin {
     console.log(`[RealtimeCollaboration] Connecting to ${this.serverUrl} [Room: ${this.roomId}]`);
 
     try {
-      this._socket = new WebSocket(this.serverUrl);
+      const connectionUrl = this._buildAuthenticatedUrl();
+      if (!connectionUrl) return false;
+      this._socket = new WebSocket(connectionUrl);
       this._setupSocketListeners();
+      return true;
     } catch (error) {
       console.error('[RealtimeCollaboration] WebSocket connection failed:', error);
       this._handleReconnect();
+      return false;
     }
+  }
+
+  _buildAuthenticatedUrl() {
+    const token = typeof this.authToken === 'function' ? this.authToken() : this.authToken;
+    if (this.authRequired && !token) {
+      console.warn('[RealtimeCollaboration] Cannot connect: collaboration auth token is required.');
+      return null;
+    }
+
+    const base =
+      typeof window !== 'undefined' && window.location
+        ? window.location.href
+        : undefined;
+    const url = base ? new URL(this.serverUrl, base) : new URL(this.serverUrl);
+    if (url.protocol === 'http:') url.protocol = 'ws:';
+    if (url.protocol === 'https:') url.protocol = 'wss:';
+
+    url.searchParams.set('roomId', this.roomId);
+    url.searchParams.set('userId', this.userId);
+    if (token) {
+      url.searchParams.set(this.authTokenParam, token);
+    } else {
+      url.searchParams.delete(this.authTokenParam);
+    }
+    return url.toString();
   }
 
   /**
@@ -206,6 +241,12 @@ export class RealtimeCollaborationPlugin {
         this._socket.close();
       }
       this._socket = null;
+    }
+    const lockStateChanged = this._clearLocksForUser(this.userId);
+    if (lockStateChanged && this._workbook) {
+      this._requestRender();
+      this._emitLockChange();
+      this._checkDraftsAnimation();
     }
     // 移除协作画板上的协同光标高亮
     const collabCursor = this._registry ? this._registry.get('CollaborativeCursor') : null;
@@ -245,31 +286,22 @@ export class RealtimeCollaborationPlugin {
     this._socket.onmessage = (event) => {
       try {
         const dataStr = typeof event.data === 'string' ? event.data.trim() : '';
-        
-        // 寻找第一个 JSON 起始符，高能剥离由于测试服务端回显前缀（如 <b>从服务端返回你发的消息：</b>）包装的 HTML 壳子
-        const firstBrace = dataStr.indexOf('{');
-        const firstBracket = dataStr.indexOf('[');
-        let startIndex = -1;
-        if (firstBrace !== -1 && firstBracket !== -1) {
-          startIndex = Math.min(firstBrace, firstBracket);
-        } else {
-          startIndex = firstBrace !== -1 ? firstBrace : firstBracket;
-        }
 
-        if (startIndex === -1) {
+        if (!dataStr) {
           console.log('[RealtimeCollaboration] Server feedback message:', event.data);
           return;
         }
-
-        // 剥离 HTML 前缀，提取核心 JSON 部分
-        const jsonPart = dataStr.substring(startIndex);
         
         let networkMessage;
         try {
-          networkMessage = JSON.parse(jsonPart);
+          networkMessage = JSON.parse(dataStr);
         } catch (parseErr) {
-          // 如果截取出的部分不能解析为 JSON，则视为普通文本消息处理
           console.log('[RealtimeCollaboration] Server raw feedback:', event.data);
+          return;
+        }
+
+        if (!networkMessage || typeof networkMessage !== 'object' || Array.isArray(networkMessage)) {
+          console.log('[RealtimeCollaboration] Ignored non-object message:', event.data);
           return;
         }
 
@@ -294,6 +326,12 @@ export class RealtimeCollaborationPlugin {
 
     this._socket.onclose = () => {
       console.warn('[RealtimeCollaboration] WebSocket connection closed.');
+      const changed = this._clearLocksForUser(this.userId);
+      if (changed && this._workbook) {
+        this._requestRender();
+        this._emitLockChange();
+        this._checkDraftsAnimation();
+      }
       this._socket = null;
       this._handleReconnect();
     };
@@ -532,6 +570,11 @@ export class RealtimeCollaborationPlugin {
    */
   lockLocalCell(r, c) {
     const key = `${r},${c}`;
+    const existing = this._lockedCells.get(key);
+    if (existing && existing.userId !== this.userId && !this._isLockOwnerWinner(this.userId, existing.userId)) {
+      return false;
+    }
+
     this._lockedCells.set(key, { userId: this.userId, userName: this.userName });
     this._sendRaw({
       type: 'cell-lock',
@@ -545,6 +588,7 @@ export class RealtimeCollaborationPlugin {
       this._requestRender();
       this._emitLockChange();
     }
+    return true;
   }
 
   /**
@@ -587,18 +631,7 @@ export class RealtimeCollaborationPlugin {
           collabCursor.removeRemoteCursor(msg.userId);
         }
         // 清理离开用户占有的所有编辑锁和打字草稿
-        let changed = false;
-        for (const [key, value] of this._lockedCells.entries()) {
-          if (value.userId === msg.userId) {
-            this._lockedCells.delete(key);
-            changed = true;
-          }
-        }
-        for (const [key, value] of this._editingDrafts.entries()) {
-          if (value.userId === msg.userId) {
-            this._editingDrafts.delete(key);
-          }
-        }
+        this._clearLocksForUser(msg.userId);
         if (this._workbook) {
           this._requestRender();
           this._emitLockChange();
@@ -622,7 +655,13 @@ export class RealtimeCollaborationPlugin {
 
       case 'cell-lock':
         // 收到远程加锁通知
-        const lockKey = `${msg.r},${msg.c}`;
+        const lockCoord = this._getValidRemoteCellCoord(msg, 'r', 'c');
+        if (!lockCoord) return;
+        const lockKey = `${lockCoord.r},${lockCoord.c}`;
+        const existingLock = this._lockedCells.get(lockKey);
+        if (existingLock && existingLock.userId !== msg.userId && !this._isLockOwnerWinner(msg.userId, existingLock.userId)) {
+          return;
+        }
         this._lockedCells.set(lockKey, { userId: msg.userId, userName: msg.userName });
         if (this._workbook) {
           this._requestRender();
@@ -632,7 +671,9 @@ export class RealtimeCollaborationPlugin {
 
       case 'cell-unlock':
         // 收到远程解锁通知
-        const unlockKey = `${msg.r},${msg.c}`;
+        const unlockCoord = this._getValidRemoteCellCoord(msg, 'r', 'c');
+        if (!unlockCoord) return;
+        const unlockKey = `${unlockCoord.r},${unlockCoord.c}`;
         const existing = this._lockedCells.get(unlockKey);
         if (existing && existing.userId === msg.userId) {
           this._lockedCells.delete(unlockKey);
@@ -651,7 +692,13 @@ export class RealtimeCollaborationPlugin {
           this._isApplyingRemote = true;
           try {
             const { row, col, cell } = msg;
-            this._workbook.setCell(row, col, cell, { skipEvent: true });
+            // 边界与防御性校验：拒绝非法行列值，防止越界 DoS 攻击
+            if (!Number.isInteger(row) || !Number.isInteger(col) ||
+                row < 0 || col < 0 ||
+                row >= this._workbook.rowCount || col >= this._workbook.colCount) {
+              return;
+            }
+            this._workbook.setCell(row, col, cell, null, { skipEvent: true, skipHistory: true });
             // 应用最终修改后，清理对应的草稿
             this._editingDrafts.delete(`${row},${col}`);
             this._requestRender();
@@ -667,10 +714,18 @@ export class RealtimeCollaborationPlugin {
         if (this._workbook && Array.isArray(msg.cells)) {
           this._isApplyingRemote = true;
           try {
+            const maxRow = this._workbook.rowCount;
+            const maxCol = this._workbook.colCount;
             for (const item of msg.cells) {
               const { row, col, cell } = item;
               if (row === undefined || col === undefined) continue;
-              this._workbook.setCell(row, col, cell, { skipEvent: true });
+              // 边界与防御性校验：拒绝非法行列值，防止越界 DoS 攻击
+              if (!Number.isInteger(row) || !Number.isInteger(col) ||
+                  row < 0 || col < 0 ||
+                  row >= maxRow || col >= maxCol) {
+                continue;
+              }
+              this._workbook.setCell(row, col, cell, null, { skipEvent: true, skipHistory: true });
               this._editingDrafts.delete(`${row},${col}`);
             }
             this._requestRender();
@@ -683,7 +738,9 @@ export class RealtimeCollaborationPlugin {
 
       case 'cell-editing':
         // 收到远程用户的打字草稿
-        const editKey = `${msg.r},${msg.c}`;
+        const editCoord = this._getValidRemoteCellCoord(msg, 'r', 'c');
+        if (!editCoord) return;
+        const editKey = `${editCoord.r},${editCoord.c}`;
         if (msg.val === '' || msg.val === undefined || msg.val === null) {
           this._editingDrafts.delete(editKey);
         } else {
@@ -704,6 +761,44 @@ export class RealtimeCollaborationPlugin {
       default:
         break;
     }
+  }
+
+  _isLockOwnerWinner(candidateUserId, currentUserId) {
+    const candidate = String(candidateUserId ?? '');
+    const current = String(currentUserId ?? '');
+    if (!current) return true;
+    if (!candidate) return false;
+    return candidate < current;
+  }
+
+  _clearLocksForUser(userId) {
+    let changed = false;
+    for (const [key, value] of this._lockedCells.entries()) {
+      if (value.userId === userId) {
+        this._lockedCells.delete(key);
+        changed = true;
+      }
+    }
+    for (const [key, value] of this._editingDrafts.entries()) {
+      if (value.userId === userId) {
+        this._editingDrafts.delete(key);
+        changed = true;
+      }
+    }
+    return changed;
+  }
+
+  _getValidRemoteCellCoord(msg, rowField = 'row', colField = 'col') {
+    if (!this._workbook) return null;
+    const r = Number(msg?.[rowField]);
+    const c = Number(msg?.[colField]);
+    if (!Number.isInteger(r) || !Number.isInteger(c) || r < 0 || c < 0) {
+      return null;
+    }
+    if (r >= this._workbook.rowCount || c >= this._workbook.colCount) {
+      return null;
+    }
+    return { r, c };
   }
 
   /**
@@ -742,8 +837,8 @@ export class RealtimeCollaborationPlugin {
   }
 
   _emitLockChange() {
-    if (this._workbook && typeof this._workbook._emit === 'function') {
-      this._workbook._emit('lock-change');
+    if (this._workbook && typeof this._workbook.emitEvent === 'function') {
+      this._workbook.emitEvent('lock-change');
     }
   }
 

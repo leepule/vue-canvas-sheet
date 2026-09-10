@@ -5,8 +5,11 @@ import { Events } from '../../src/core/events/EventEmitter';
 
 function createWorkbook(overrides = {}) {
   const handlers = new Map();
+  const dirtyCellsMap = new Map([['0-0', { v: 1 }]]);
+  const dataMatrixMock = { size: 1 };
   return {
-    _dirtyCells: new Map([['0-0', { v: 1 }]]),
+    getDirtyCells: () => dirtyCellsMap,
+    getDataMatrix: () => dataMatrixMock,
     enablePersistenceStorage: vi.fn(),
     savePendingChanges: vi.fn().mockResolvedValue({ mode: 'diff', sheetId: 'sheet-1' }),
     toJSON: vi.fn(() => ({ rowCount: 1, colCount: 1, data: { '0-0': { v: 1 } } })),
@@ -14,6 +17,7 @@ function createWorkbook(overrides = {}) {
       handlers.set(event, handler);
       return () => handlers.delete(event);
     }),
+    emitEvent: vi.fn(),
     _emit: vi.fn(),
     trigger(event, payload = {}) {
       handlers.get(event)?.({ type: event, ...payload });
@@ -56,8 +60,8 @@ describe('AutoSavePlugin', () => {
     });
     expect(workbook.savePendingChanges).toHaveBeenCalledWith('sheet-1');
     expect(localStorage.getItem(plugin.key)).toBeNull();
-    expect(workbook._emit).toHaveBeenCalledWith(Events.SAVE_STATUS, expect.objectContaining({ status: 'saving' }));
-    expect(workbook._emit).toHaveBeenCalledWith(Events.SAVE_STATUS, expect.objectContaining({ status: 'saved', backend: 'indexedDB' }));
+    expect(workbook.emitEvent).toHaveBeenCalledWith(Events.SAVE_STATUS, expect.objectContaining({ status: 'saving' }));
+    expect(workbook.emitEvent).toHaveBeenCalledWith(Events.SAVE_STATUS, expect.objectContaining({ status: 'saved', backend: 'indexedDB' }));
   });
 
   it('falls back to localStorage when IndexedDB save fails', async () => {
@@ -70,7 +74,7 @@ describe('AutoSavePlugin', () => {
     await plugin.saveNow();
 
     expect(localStorage.getItem('fallback-key')).toContain('"rowCount":1');
-    expect(workbook._emit).toHaveBeenCalledWith(Events.SAVE_STATUS, expect.objectContaining({
+    expect(workbook.emitEvent).toHaveBeenCalledWith(Events.SAVE_STATUS, expect.objectContaining({
       status: 'saved',
       backend: 'localStorage',
       fallback: true
@@ -90,7 +94,7 @@ describe('AutoSavePlugin', () => {
 
     await plugin.saveNow(workbook);
 
-    expect(workbook._emit).toHaveBeenCalledWith(Events.SAVE_STATUS, expect.objectContaining({ status: 'quotaExceeded' }));
+    expect(workbook.emitEvent).toHaveBeenCalledWith(Events.SAVE_STATUS, expect.objectContaining({ status: 'quotaExceeded' }));
     setItemSpy.mockRestore();
   });
 
@@ -118,5 +122,92 @@ describe('AutoSavePlugin', () => {
     await Promise.resolve();
 
     expect(workbook.savePendingChanges).toHaveBeenCalledTimes(1);
+  });
+
+  describe('localStorage 大表安全拦截 (缺陷修复)', () => {
+    it('行数超限 (>2000) 时应拒绝 localStorage 直接写入并抛出', () => {
+      const BIG_ROWS = 5000;
+      const workbook = createWorkbook({
+        savePendingChanges: vi.fn(),
+        toJSON: vi.fn(() => ({ rowCount: BIG_ROWS, colCount: 1, data: {} })),
+        rowCount: BIG_ROWS,
+        getDataMatrix: () => ({ size: 0 })
+      });
+      const plugin = new AutoSavePlugin({ backend: 'localStorage', interval: 0, key: 'big-table' });
+
+      expect(() => plugin._saveToLocalStorage(workbook))
+        .toThrow(/行数超限/);
+      expect(localStorage.getItem('big-table')).toBeNull();
+    });
+
+    it('有值单元格超限 (>10000) 时应拒绝 localStorage 写入', () => {
+      const CELL_COUNT = 25000;
+      const workbook = createWorkbook({
+        savePendingChanges: vi.fn(),
+        toJSON: vi.fn(() => ({ rowCount: 500, colCount: 50, data: {} })),
+        rowCount: 500,
+        getDataMatrix: () => ({ size: CELL_COUNT })
+      });
+      const plugin = new AutoSavePlugin({ backend: 'localStorage', interval: 0, key: 'dense-table' });
+
+      expect(() => plugin._saveToLocalStorage(workbook))
+        .toThrow(/有值单元格超限/);
+    });
+
+    it('正常小表 localStorage 写入仍可正常工作', () => {
+      const workbook = createWorkbook({
+        toJSON: vi.fn(() => ({ rowCount: 10, colCount: 5, data: { '1-1': { v: 42 } } })),
+        rowCount: 10,
+        getDataMatrix: () => ({ size: 5 })
+      });
+      const plugin = new AutoSavePlugin({ backend: 'localStorage', interval: 0, key: 'small-table' });
+
+      const result = plugin._saveToLocalStorage(workbook);
+      expect(result.backend).toBe('localStorage');
+      expect(localStorage.getItem('small-table')).toContain('"rowCount":10');
+    });
+
+    it('IndexedDB 失败降级时大表应发 tooLarge 状态而非白屏', async () => {
+      const BIG_ROWS = 50000;
+      const workbook = createWorkbook({
+        savePendingChanges: vi.fn().mockRejectedValue(new Error('idb unavailable')),
+        toJSON: vi.fn(() => ({ rowCount: BIG_ROWS, colCount: 10, data: {} })),
+        rowCount: BIG_ROWS,
+        getDataMatrix: () => ({ size: 0 })
+      });
+      const plugin = new AutoSavePlugin({ interval: 0, key: 'big-fallback', sheetId: 'sheet-1' });
+
+      await plugin.saveNow(workbook);
+
+      // 应该发出 tooLarge 状态，而非 saved 或 failed
+      expect(workbook.emitEvent).toHaveBeenCalledWith(
+        Events.SAVE_STATUS,
+        expect.objectContaining({
+          status: 'tooLarge',
+          reason: 'fallback'
+        })
+      );
+      // 不应写入 localStorage
+      expect(localStorage.getItem('big-fallback')).toBeNull();
+    });
+
+    it('JSON 序列化后字节数超限应被拦截', () => {
+      // 构造序列化后超过 4MB 的数据块
+      let hugeData = {};
+      const BIG_STRING = 'x'.repeat(500); // 每个单元格 ~500 字节
+      for (let i = 0; i < 9000; i++) {
+        hugeData[`${i}-0`] = { v: BIG_STRING };
+      }
+      // 9000 * ~550 ≈ 4.95MB (> 4MB 上限)
+      const workbook = createWorkbook({
+        toJSON: vi.fn(() => ({ rowCount: 1000, colCount: 10, data: hugeData })),
+        rowCount: 1000,
+        getDataMatrix: () => ({ size: 9000 })
+      });
+      const plugin = new AutoSavePlugin({ backend: 'localStorage', interval: 0, key: 'huge-cells' });
+
+      expect(() => plugin._saveToLocalStorage(workbook))
+        .toThrow(/过大/);
+    });
   });
 });

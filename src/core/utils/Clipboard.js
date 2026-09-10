@@ -54,8 +54,18 @@ function cloneRange(range) {
 }
 
 export class ClipboardManager {
-    constructor(workbook) {
-        this.workbook = workbook;
+    /**
+     * @param {{
+     *   getCell: (r: number, c: number) => any,
+     *   getRowCount: () => number,
+     *   getColCount: () => number,
+     *   setCellData: (r: number, c: number, val: any) => void,
+     *   recordHistory: (cmd: any) => void,
+     *   notify: (data?: any) => void
+     * }} deps
+     */
+    constructor(deps) {
+        this.d = deps;
         this.clipboardData = [];
     }
 
@@ -65,44 +75,49 @@ export class ClipboardManager {
         for (let r = range.s.r; r <= range.e.r; r++) {
           const rowData = [];
           for (let c = range.s.c; c <= range.e.c; c++) {
-            rowData.push(cloneCell(this.workbook.getCell(r, c)));
+            rowData.push(cloneCell(this.d.getCell(r, c)));
           }
           data.push(rowData);
         }
         this.clipboardData = data;
     }
 
-    paste(range) {
-        if (!this.clipboardData || this.clipboardData.length === 0) return;
-        const changes = [];
+	    paste(range) {
+	        if (!this.clipboardData || this.clipboardData.length === 0) return;
+	        const changes = [];
         const startR = range.s.r;
         const startC = range.s.c;
-        const rowCount = this.workbook.rowCount;
-        const colCount = this.workbook.colCount;
+        const rowCount = this.d.getRowCount();
+        const colCount = this.d.getColCount();
 
         for (let i = 0; i < this.clipboardData.length; i++) {
           for (let j = 0; j < this.clipboardData[i].length; j++) {
             const r = startR + i;
             const c = startC + j;
             if (r >= rowCount || c >= colCount) continue;
-            
+
             // 保存旧值用于撤销
-            const oldVal = cloneCell(this.workbook.getCell(r, c));
-            
+            const oldVal = cloneCell(this.d.getCell(r, c));
+
             // 克隆剪贴板数据
             const sourceVal = this.clipboardData[i][j];
             const newVal = cloneCell(sourceVal);
-            
+
             changes.push({ r, c, oldValue: oldVal, newValue: newVal });
-            this.workbook._setCellData(r, c, newVal);
+            this.d.setCellData(r, c, newVal);
           }
         }
         if (changes.length > 0) {
-          this.workbook.history.execute({ type: 'batch-set-cell', changes });
-          this.workbook.notify();
-        }
-    }
-}
+          this.d.recordHistory({ type: 'batch-set-cell', changes });
+	          this.d.notify();
+	        }
+	    }
+
+	    destroy() {
+	        this.clipboardData = [];
+	        this.d = null;
+	    }
+	}
 
 // 导出工具函数供其他模块使用
 export { cloneCell, cloneRange };

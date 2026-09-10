@@ -155,20 +155,6 @@ export class IndexedDBStorage {
 
 	// ==================== 单元格操作 ====================
 
-	/**
-	 * 保存单元格数据
-	 * @deprecated 单元格级事务在高频写入场景下会拖累性能（每次 put 都开新事务）。
-	 *             调用方应改用批量接口 `saveCells(sheetId, cells)` 或 `saveDiffs(sheetId, diffs)`。
-	 *             本方法保留为外部兼容，内部转发到 `saveCells` 共享同一事务管理路径。
-	 * @param {string} sheetId - 工作表ID
-	 * @param {number} row - 行号
-	 * @param {number} col - 列号
-	 * @param {Object} cellData - 单元格数据
-	 * @returns {Promise<void>}
-	 */
-	async saveCell(sheetId, row, col, cellData) {
-		return this.saveCells(sheetId, [{ row, col, data: cellData }]);
-	}
 
 	/**
 	 * 批量保存单元格数据

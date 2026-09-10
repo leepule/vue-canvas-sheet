@@ -84,6 +84,29 @@ describe('SharedValueStore TypedArray 批量拷贝', () => {
       expect(store.get(2000, 10)).toBe(700);
     });
 
+    it('低行高列写入会扩展列而不会串写同线性索引的单元格', () => {
+      const store = new SharedValueStore(100000, 16);
+      store.set(0, 0, 7);
+      store.set(1, 0, 8);
+      store.getBuffer();
+
+      store.set(0, 10, 700);
+
+      expect(store.get(0, 10)).toBe(700);
+      expect(store.get(5, 0)).toBe(EMPTY);
+      expect(store.get(0, 0)).toBe(7);
+      expect(store.get(1, 0)).toBe(8);
+    });
+
+    it('读取超出连续缓冲区列范围时不会别名到其他行', () => {
+      const store = new SharedValueStore(100000, 16);
+      store.set(5, 0, 500);
+      store.getBuffer();
+
+      expect(store.get(0, 10)).toBe(EMPTY);
+      expect(store.get(5, 0)).toBe(500);
+    });
+
     it('扩容触发 onGrow 回调', () => {
       const store = new SharedValueStore(100000, 4);
       store.set(0, 0, 1);
@@ -95,6 +118,83 @@ describe('SharedValueStore TypedArray 批量拷贝', () => {
 
       expect(grown).not.toBeNull();
       expect(grown.rows).toBeGreaterThan(0);
+    });
+  });
+
+  describe('serialize — Worker 端 WASM 重新绑定支持', () => {
+    it('未分配连续缓冲区时 continuousBuffer 为 undefined', () => {
+      const store = new SharedValueStore(10000, 4);
+      store.set(0, 0, 42);
+
+      const serialized = store.serialize();
+
+      expect(serialized).not.toBeNull();
+      expect(serialized.chunks).toBeDefined();
+      expect(serialized.continuousBuffer).toBeUndefined();
+      expect(serialized.continuousRows).toBe(0);
+      expect(serialized.continuousCols).toBe(0);
+    });
+
+    it('分配连续缓冲区后 continuousBuffer 为 SharedArrayBuffer 实例', () => {
+      const store = new SharedValueStore(10000, 4);
+      store.set(0, 0, 1);
+      store.set(0, 3, 2);
+      store.getBuffer(); // 触发连续缓冲区分配
+
+      const serialized = store.serialize();
+
+      expect(serialized.continuousBuffer).toBeInstanceOf(SharedArrayBuffer);
+      expect(serialized.continuousRows).toBeGreaterThan(0);
+      expect(serialized.continuousCols).toBeGreaterThan(0);
+      // continuousBuffer 引用应与内部缓冲区一致
+      expect(serialized.continuousBuffer).toBe(store.continuousBuffer);
+    });
+
+    it('扩容后 serialize 返回新的连续缓冲区引用', () => {
+      const store = new SharedValueStore(100000, 4);
+      store.set(0, 0, 1);
+      store.getBuffer();
+
+      const bufBefore = store.continuousBuffer;
+      const serBefore = store.serialize();
+      expect(serBefore.continuousBuffer).toBe(bufBefore);
+
+      // 触发行扩容：写入超出行容量的单元格
+      // getBuffer 分配的 rows = max((0+1)*2, 1024) = 1024，写第 5000 行应触发 _grow
+      store.set(5000, 0, 999);
+
+      const bufAfter = store.continuousBuffer;
+      expect(bufAfter).not.toBe(bufBefore); // 分配了新缓冲区
+
+      const serAfter = store.serialize();
+      // serialize 应返回扩容后的新缓冲区
+      expect(serAfter.continuousBuffer).toBe(bufAfter);
+      expect(serAfter.continuousRows).toBeGreaterThan(
+        serBefore.continuousRows
+      );
+    });
+
+    it('serialize 结果可被 updateFromSerialized 正确恢复', () => {
+      const store = new SharedValueStore(10000, 4);
+      store.set(0, 0, 10);
+      store.set(0, 1, 20);
+      store.set(10, 2, 30);
+      store.getBuffer();
+
+      const serialized = store.serialize();
+
+      // 模拟 Worker 端反序列化
+      const workerStore = new SharedValueStore(10000, 4);
+      workerStore.updateFromSerialized(serialized);
+
+      // 分块数据应正确恢复
+      expect(workerStore.get(0, 0)).toBe(10);
+      expect(workerStore.get(0, 1)).toBe(20);
+      expect(workerStore.get(10, 2)).toBe(30);
+
+      // 连续缓冲区引用应传递到 Worker 端（同一 SharedArrayBuffer）
+      expect(workerStore.continuousBuffer).toBeNull();
+      // updateFromSerialized 不应覆盖 continuousBuffer（Worker 端用独立的 WASM 绑定路径）
     });
   });
 });

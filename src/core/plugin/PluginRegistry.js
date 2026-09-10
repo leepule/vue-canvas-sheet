@@ -69,6 +69,9 @@ export class PluginRegistry {
     
     /** @type {Map<string, Set<Function>>} */
     this.hooks = new Map();
+
+    /** @type {Map<string, Function[]>} */
+    this._hookDisposersByPlugin = new Map();
     
     /** @type {Map<string, any>} */
     this.sharedState = new Map();
@@ -138,15 +141,11 @@ export class PluginRegistry {
     // 触发 before-init 钩子
     this._triggerHook(HookTypes.BEFORE_INIT, { plugin });
     
+    // 注册插件的钩子
+    this._registerPluginHooks(plugin);
+
     // 注册插件
     this.plugins.set(plugin.name, plugin);
-    
-    // 注册插件的钩子
-    if (plugin.hooks) {
-      Object.entries(plugin.hooks).forEach(([hookType, handler]) => {
-        this.on(hookType, handler.bind(plugin));
-      });
-    }
     
     // 调用插件的初始化方法
     if (plugin.onInit) {
@@ -168,15 +167,6 @@ export class PluginRegistry {
     }
     
     return this;
-  }
-
-  /**
-   * 别名，兼容旧版 API
-   * @param {PluginInterface} plugin - 插件实例
-   * @deprecated 使用 register() 替代
-   */
-  add(plugin) {
-    this.register(plugin);
   }
 
   /**
@@ -246,11 +236,7 @@ export class PluginRegistry {
     }
     
     // 移除插件的钩子
-    if (plugin.hooks) {
-      Object.entries(plugin.hooks).forEach(([hookType, handler]) => {
-        this.off(hookType, handler.bind(plugin));
-      });
-    }
+    this._unregisterPluginHooks(name);
     
     plugin._mounted = false;
     this.plugins.delete(name);
@@ -275,6 +261,26 @@ export class PluginRegistry {
       }
     });
     return dependents;
+  }
+
+  _registerPluginHooks(plugin) {
+    if (!plugin.hooks) return;
+    const hookEntries = Object.entries(plugin.hooks);
+    for (const [hookType, handler] of hookEntries) {
+      if (typeof handler !== 'function') {
+        throw new TypeError(`[PluginRegistry] Hook "${hookType}" in "${plugin.name}" must be a function`);
+      }
+    }
+    const disposers = hookEntries.map(([hookType, handler]) =>
+      this.on(hookType, handler.bind(plugin))
+    );
+    this._hookDisposersByPlugin.set(plugin.name, disposers);
+  }
+
+  _unregisterPluginHooks(pluginName) {
+    const disposers = this._hookDisposersByPlugin.get(pluginName) || [];
+    disposers.forEach(dispose => dispose());
+    this._hookDisposersByPlugin.delete(pluginName);
   }
 
   /**
@@ -334,7 +340,10 @@ export class PluginRegistry {
    * @param {Function} handler - 处理函数
    */
   off(hookType, handler) {
-    this.hooks.get(hookType)?.delete(handler);
+    const handlers = this.hooks.get(hookType);
+    if (!handlers) return;
+    handlers.delete(handler);
+    if (handlers.size === 0) this.hooks.delete(hookType);
   }
 
   /**
@@ -447,6 +456,7 @@ export class PluginRegistry {
     
     // 清理钩子
     this.hooks.clear();
+    this._hookDisposersByPlugin.clear();
     this.sharedState.clear();
     this._initialized = false;
     

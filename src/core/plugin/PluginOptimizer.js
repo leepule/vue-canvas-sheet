@@ -72,9 +72,9 @@ export class PluginOptimizer {
     }
     
     const stats = this.hookStats.get(key);
-    stats.count++;
     
     return (result) => {
+      stats.count++;
       // 原有处理
       const originalResult = handler(result);
       

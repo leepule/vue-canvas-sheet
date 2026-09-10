@@ -1,12 +1,28 @@
 /**
- * 样式管理器
- * 管理单元格样式、边框、数字格式的设置与清除
+ * 样式管理器 — 管理单元格样式、边框、数字格式的设置与清除。
+ *
+ * @typedef {Object} StyleManagerDeps
+ * @property {(range: Object, cb: Function) => void} iterateRange        — 遍历范围内单元格
+ * @property {(r: number, c: number, v: Object) => void} setCellData     — 设置单元格数据
+ * @property {(r: number, c: number) => Cell|null}     getCell           — 获取单元格
+ * @property {(r: number, c: number) => string}        getCellKey        — 行列 → 单元格键
+ * @property {() => SparseMatrix}                      getDataMatrix     — 数据矩阵引用
+ * @property {() => HistoryManager}                    getHistory        — 历史管理器
+ * @property {(r: number, c: number, v: number) => void} syncSharedValue — 同步到共享内存
+ * @property {(id: string, f: string) => void}         updateDependencyMap — 更新公式依赖图
+ * @property {(r: number, c: number) => void}          markCellChanged   — 标记单元格变更
+ * @property {(...args: any[]) => void}                emit              — 事件发射
+ * @property {(...args: any[]) => void}                notify            — UI 通知
  */
+
 import { cloneCell } from './utils/Clipboard.js';
 import { Events } from './events/EventEmitter.js';
-
 export class StyleManager {
+  /**
+   * @param {StyleManagerDeps} deps — 具名依赖注入，详见 StyleManagerDeps typedef
+   */
   constructor(deps) {
+    /** @type {StyleManagerDeps} */
     this.d = deps;
   }
 
