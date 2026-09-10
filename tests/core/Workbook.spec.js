@@ -4,6 +4,7 @@
  */
 
 import { Workbook } from '@/core/Workbook';
+import { FormulaEngineService } from '@/core/data/FormulaEngineService';
 import { Events } from '@/core/events/EventEmitter';
 
 
@@ -47,6 +48,57 @@ describe('Workbook', () => {
 
     test('应该初始化事件系统', () => {
       expect(workbook._events).toBeDefined();
+    });
+
+    test('默认 auto 模式不应在无公式时初始化 WASM', () => {
+      const initWasm = vi.spyOn(workbook._formulaEngine, 'initWasm');
+
+      expect(initWasm).not.toHaveBeenCalled();
+      expect(workbook.formulaEngine.wasmBridge.isLoaded).toBe(false);
+    });
+
+    test('auto 模式首次写入公式时才初始化 WASM', () => {
+      const wasmWorkbook = new Workbook({ enableWasm: 'auto' });
+      const initWasm = vi.spyOn(wasmWorkbook._formulaEngine, 'initWasm');
+
+      wasmWorkbook.setCell(0, 0, { v: '=1+1' });
+
+      expect(initWasm).toHaveBeenCalledTimes(1);
+      wasmWorkbook.destroy();
+    });
+
+    test('auto 模式加载带公式的初始数据时应初始化 WASM', () => {
+      const wasmWorkbook = new Workbook({ enableWasm: 'auto' });
+      const initWasm = vi.spyOn(wasmWorkbook._formulaEngine, 'initWasm');
+
+      wasmWorkbook.setData([[{ f: '=1+1' }]]);
+
+      expect(initWasm).toHaveBeenCalledTimes(1);
+      wasmWorkbook.destroy();
+    });
+
+    test('enableWasm 为 false 时即使写入公式也不自动初始化 WASM', () => {
+      const wasmWorkbook = new Workbook({ enableWasm: false });
+      const initWasm = vi.spyOn(wasmWorkbook._formulaEngine, 'initWasm');
+
+      wasmWorkbook.setCell(0, 0, { v: '=1+1' });
+
+      expect(initWasm).not.toHaveBeenCalled();
+      wasmWorkbook.destroy();
+    });
+
+    test('enableWasm 为 true 时应立即初始化 WASM', () => {
+      const initWasm = vi
+        .spyOn(FormulaEngineService.prototype, 'initWasm')
+        .mockResolvedValue();
+
+      try {
+        const wasmWorkbook = new Workbook({ enableWasm: true });
+        expect(initWasm).toHaveBeenCalledTimes(1);
+        wasmWorkbook.destroy();
+      } finally {
+        initWasm.mockRestore();
+      }
     });
   });
 

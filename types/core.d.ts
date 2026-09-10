@@ -32,7 +32,7 @@ export interface Cell {
 
 export interface WorkbookOptions {
   enablePersistence?: boolean;
-  enableWasm?: boolean;
+  enableWasm?: boolean | 'auto';
   sheetId?: string;
 }
 

@@ -45,6 +45,14 @@ describe('TableDesigner 数据重载 watcher', () => {
 
     expect(setData).not.toHaveBeenCalled();
   });
+
+  test('enableWasm 默认应使用公式触发懒加载的 auto 模式', () => {
+    expect(TableDesigner.props.enableWasm.default).toBe('auto');
+    expect(TableDesigner.props.enableWasm.validator('auto')).toBe(true);
+    expect(TableDesigner.props.enableWasm.validator(true)).toBe(true);
+    expect(TableDesigner.props.enableWasm.validator(false)).toBe(true);
+    expect(TableDesigner.props.enableWasm.validator('invalid')).toBe(false);
+  });
 });
 
 describe('TableDesigner 卸载持久化', () => {

@@ -28,6 +28,7 @@
  * @property {(event: string, payload?: Object) => void}       emit
  * @property {(data?: Object) => void}                         notify
  * @property {(r: number, c: number) => void}                  markCellChanged
+ * @property {() => void}                                      maybeInitWasm
  * @property {() => void}                                      recalcAll
  * @property {() => void}                                      rebuildContext
  */
@@ -140,6 +141,7 @@ export class DataLoader {
             Object.assign(cell.s, val.s);
           }
           if (cell.f) {
+            this.d.maybeInitWasm();
             cell.v = undefined;
             cell.dirty = true;
             formulaEval._updateDependencyMap(cellId, cell.f);
@@ -211,6 +213,7 @@ export class DataLoader {
         const cellId = this.d.cellKey(tr, c);
         const cell = matrix.get(tr, c);
         if (cell && cell.f) {
+          this.d.maybeInitWasm();
           cell.dirty = true;
           formulaEval._updateDependencyMap(cellId, cell.f);
         }
@@ -241,6 +244,7 @@ export class DataLoader {
         if (newVal.v && typeof newVal.v === 'string' && newVal.v.startsWith('=')) {
           newVal.f = newVal.v;
         }
+        if (newVal.f) this.d.maybeInitWasm();
         const { r, c } = this.d.parseKey(key);
         matrix.set(r, c, newVal);
         this.d.syncSharedValue(r, c, newVal.v);

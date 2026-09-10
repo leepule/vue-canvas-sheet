@@ -76,21 +76,20 @@ export class Workbook {
    * 创建工作簿实例
    * @param {Object} [options={}] - 配置选项
    * @param {boolean} [options.enablePersistence=false] - 是否启用持久化存储
-   * @param {boolean} [options.enableWasm=true] - 是否自动初始化 WASM 公式引擎
+   * @param {boolean|'auto'} [options.enableWasm='auto'] - WASM 初始化模式：
+   *        true 立即初始化；false 关闭自动初始化；auto 首次遇到公式时懒加载
    * @param {string} [options.sheetId='default'] - 工作表唯一标识（用于指纹识别与秒开）
    */
   constructor(options = {}) {
+    this._wasmInitMode = options.enableWasm === undefined ? 'auto' : options.enableWasm;
+    this._wasmInitPromise = null;
+
     // Phase 6: 委托给 WorkbookBuilder 工厂构造所有子系统
     WorkbookBuilder.build(this, options);
 
     // Post-init: 异步初始化
-    if (options.enableWasm !== false) {
-      this._formulaEngine.initWasm().catch(err => {
-        this.errorHandler.handle(
-          new SheetError(ErrorCodes.OPERATION_FAILED, 'WASM initialization failed', { originalError: err.message }),
-          { phase: 'init' }
-        );
-      });
+    if (this._wasmInitMode === true) {
+      this._startWasmInitialization();
     }
     this.plugins.init();
     this._setupPerformanceThresholds();
@@ -103,6 +102,24 @@ export class Workbook {
           { sheetId: this._sheetId }
         );
       });
+    }
+  }
+
+  _startWasmInitialization() {
+    if (this._wasmInitPromise) return this._wasmInitPromise;
+
+    this._wasmInitPromise = this._formulaEngine.initWasm().catch(err => {
+      this.errorHandler.handle(
+        new SheetError(ErrorCodes.OPERATION_FAILED, 'WASM initialization failed', { originalError: err.message }),
+        { phase: 'init' }
+      );
+    });
+    return this._wasmInitPromise;
+  }
+
+  _maybeStartWasmInitialization() {
+    if (this._wasmInitMode === 'auto') {
+      this._startWasmInitialization();
     }
   }
 
@@ -522,7 +539,8 @@ export class Workbook {
            }
           if (this._storage) this._dirtyCells.set(cellId, newVal);
           if (newVal.f) {
-             this._formulaEvaluator._updateDependencyMap(cellId, newVal.f);
+            this._maybeStartWasmInitialization();
+            this._formulaEvaluator._updateDependencyMap(cellId, newVal.f);
              newVal.dirty = true;
           } else {
              this._formulaEvaluator._updateDependencyMap(cellId, null);
@@ -607,6 +625,7 @@ export class Workbook {
       if (this._storage) this._dirtyCells.set(cellId, val);
 
       if (val.f) {
+        this._maybeStartWasmInitialization();
         this._formulaEvaluator._updateDependencyMap(cellId, val.f);
         val.dirty = true;
       } else {
@@ -755,8 +774,13 @@ export class Workbook {
   }
   rebuildDependencyMap() {
     this._formulaEvaluator._clearDependencyGraph();
+    let hasFormula = false;
     this._dataMatrix.forEach((r, c, cell) => {
       if (cell && cell.f) {
+        if (!hasFormula) {
+          this._maybeStartWasmInitialization();
+          hasFormula = true;
+        }
         const key = this._cellKey(r, c);
         this._formulaEvaluator._updateDependencyMap(key, cell.f);
         cell.dirty = true;
@@ -1083,7 +1107,10 @@ export class Workbook {
   resetCalculationStats() { if (this.calcEngine) this.calcEngine.resetStats(); }
   _fallbackExecutor(type, data) { return this._formulaEngine._fallbackExecutor(type, data); }
   _ensureSharedStore() { return this._formulaEngine._ensureSharedStore(); }
-  async initWasm() { await this._formulaEngine.initWasm(); }
+  async initWasm() {
+    this._startWasmInitialization();
+    await this._wasmInitPromise;
+  }
 
   getPerformanceMonitor() { return this._performanceMonitor; }
   getPerformanceReport() { return this._performanceMonitor.generateReport(); }

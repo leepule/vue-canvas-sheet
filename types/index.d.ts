@@ -167,6 +167,7 @@ export interface TableDesignerProps {
   toolbar?: string[];
   lazyLoad?: LazyLoadConfig;
   enablePersistence?: boolean;
+  enableWasm?: boolean | 'auto';
   sheetId?: string;
 }
 

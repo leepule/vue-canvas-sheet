@@ -610,6 +610,17 @@
 				default: false
 			},
 			/**
+			 * WASM 公式引擎初始化模式：
+			 * true 立即初始化；false 关闭；auto 首次遇到公式时懒加载
+			 */
+			enableWasm: {
+				type: [Boolean, String],
+				default: 'auto',
+				validator(value) {
+					return value === true || value === false || value === 'auto';
+				}
+			},
+			/**
 			 * 工作表 ID（用于持久化指纹识别）
 			 */
 			sheetId: {
@@ -665,7 +676,8 @@
 		created() {
 			this.workbook = markRaw(new Workbook({
 				enablePersistence: this.enablePersistence,
-				sheetId: this.sheetId
+				sheetId: this.sheetId,
+				enableWasm: this.enableWasm
 			}));
 			this.workbook.readOnly = this.readOnly;
 			this.workbook.enableWorker();

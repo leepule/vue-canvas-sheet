@@ -435,6 +435,7 @@ export class WorkbookBuilder {
       emit: (...a) => ctx._emit(...a),
       notify: (...a) => ctx.notify(...a),
       markCellChanged: (r, c) => ctx._markCellChanged(r, c),
+      maybeInitWasm: () => ctx._maybeStartWasmInitialization(),
       recalcAll: () => ctx.recalcAll(),
       rebuildContext: () => {
         ctx.history = new HistoryManager({
