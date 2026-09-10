@@ -150,13 +150,11 @@ export class SharedValueStore {
 
     // 2. 如果已存在连续缓冲区，同步更新（超出范围时扩容）
     if (this.continuousView) {
-      const idx = r * this._continuousCols + c;
-      if (idx < this.continuousView.length) {
-        this.continuousView[idx] = numericVal;
-      } else {
+      const continuousRows = Math.floor(this.continuousView.length / this._continuousCols);
+      if (r >= continuousRows || c >= this._continuousCols) {
         this._growContinuousBuffer(r + 1, c + 1);
-        this.continuousView[r * this._continuousCols + c] = numericVal;
       }
+      this.continuousView[r * this._continuousCols + c] = numericVal;
     }
   }
 
@@ -172,8 +170,9 @@ export class SharedValueStore {
 
     // 优先从连续缓冲区获取
     if (this.continuousView) {
-      const idx = r * this._continuousCols + c;
-      return idx < this.continuousView.length ? this.continuousView[idx] : SharedValueStore.EMPTY_VALUE;
+      const continuousRows = Math.floor(this.continuousView.length / this._continuousCols);
+      if (r >= continuousRows || c >= this._continuousCols) return SharedValueStore.EMPTY_VALUE;
+      return this.continuousView[r * this._continuousCols + c];
     }
 
     // 否则从分块获取
@@ -270,20 +269,29 @@ export class SharedValueStore {
 
   /**
    * 序列化数据（返回分块结构，用于 Worker 零拷贝）
+   *
+   * 同时包含连续缓冲区引用，供 Worker 端 WASM 引擎 bind/rebind 使用。
+   * 扩容后 continuousBuffer 是新的 SharedArrayBuffer 实例，Worker 端需据此重新绑定。
    */
   serialize() {
     if (!this.supported) return null;
-    
+
     const serializedChunks = {};
     for (const [idx, view] of this.chunks.entries()) {
       serializedChunks[idx] = view.buffer; // 传递 SharedArrayBuffer
     }
-    
+
     return {
       chunks: serializedChunks,
       maxRows: this.maxRows,
       maxCols: this.maxCols,
-      chunkSize: CHUNK_SIZE
+      chunkSize: CHUNK_SIZE,
+      // Worker 端 WASM 绑定所需：连续缓冲区引用及其维度
+      continuousBuffer: this.continuousBuffer || undefined,
+      continuousRows: this.continuousBuffer
+        ? Math.floor(this.continuousView.length / this._continuousCols)
+        : 0,
+      continuousCols: this.continuousBuffer ? this._continuousCols : 0,
     };
   }
 

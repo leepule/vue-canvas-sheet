@@ -1,6 +1,5 @@
-import { beforeAll, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { Workbook } from '../../src/core/Workbook.js';
-import { wasmBridge } from '../../src/core/worker/WasmBridge.js';
 import { CellPool } from '../../src/core/utils/ObjectPool.js';
 import { HistoryManager } from '../../src/core/history/History.js';
 import { buildCompactJSON, buildSparseExportSnapshot } from '../../src/plugins/utils/exportSnapshot.js';
@@ -8,8 +7,7 @@ import { buildWorksheetFromSparseSnapshot } from '../../src/plugins/utils/xlsxAd
 import { buildImportUpdates, applyMatrixInBatches } from '../../src/plugins/ImportPlugin.js';
 import {
   benchmark,
-  cleanupWorkbook,
-  disableWasmForBenchmarks
+  cleanupWorkbook
 } from './perfHarness.js';
 
 const TEN_K = 10_000;
@@ -17,7 +15,7 @@ const ONE_HUNDRED_K = 100_000;
 const PERF_COLUMNS = 100;
 
 function createWorkbook() {
-  const workbook = new Workbook();
+  const workbook = new Workbook({ enableWasm: false });
   if (workbook.calcEngine) {
     workbook.calcEngine.batchDelay = 60_000;
   }
@@ -135,10 +133,6 @@ function buildImportRows(rows, cols) {
 }
 
 describe('性能回归门禁', () => {
-  beforeAll(() => {
-    disableWasmForBenchmarks(wasmBridge);
-  });
-
   it('10k 单元格批量写入', async () => {
     const updates = buildNumericUpdates(TEN_K);
 
@@ -182,7 +176,7 @@ describe('性能回归门禁', () => {
       'formula_recalc_1k_dependents',
       (workbook) => {
         workbook.setCell(0, 0, { v: 2 });
-        workbook.recalcDirty();
+        workbook.formulaEvaluator.recalcDirty();
         clearScheduledCalculation(workbook);
         const stats = workbook.getCalculationStats();
 
@@ -209,7 +203,7 @@ describe('性能回归门禁', () => {
       'formula_recalc_10k_dependents',
       (workbook) => {
         workbook.setCell(0, 0, { v: 2 });
-        workbook.recalcDirty();
+        workbook.formulaEvaluator.recalcDirty();
         clearScheduledCalculation(workbook);
         const stats = workbook.getCalculationStats();
 

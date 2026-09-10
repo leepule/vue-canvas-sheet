@@ -157,16 +157,6 @@ export async function benchmark(name, runner, options = {}) {
   return metric;
 }
 
-export function disableWasmForBenchmarks(wasmBridge) {
-  if (!wasmBridge) return;
-  wasmBridge.engine = null;
-  wasmBridge.isLoaded = false;
-  wasmBridge.sharedMemoryEnabled = false;
-  wasmBridge.fallbackReason = 'Disabled during performance benchmarks.';
-  wasmBridge.lastError = null;
-  wasmBridge.loadPromise = Promise.resolve(false);
-}
-
 export function cleanupWorkbook(workbook) {
   if (!workbook) return;
   if (workbook.calcEngine?.batchTimeout) {

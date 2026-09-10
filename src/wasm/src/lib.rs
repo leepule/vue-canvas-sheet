@@ -65,11 +65,16 @@ impl FormulaEngine {
         } else {
             match FormulaParser::parse(Rule::formula, formula) {
                 Ok(pairs) => {
-                    let ast = self.build_ast(pairs.into_iter().next().unwrap());
-                    self.ast_cache.insert(formula.to_string(), ast.clone());
-                    ast
+                    match pairs.into_iter().next() {
+                        Some(first_pair) => {
+                            let ast = self.build_ast(first_pair);
+                            self.ast_cache.insert(formula.to_string(), ast.clone());
+                            ast
+                        },
+                        None => AstNode::String("#ERROR!".to_string()),
+                    }
                 },
-                Err(_) => AstNode::Boolean(false),
+                Err(_) => AstNode::String("#ERROR!".to_string()),
             }
         };
 
@@ -88,10 +93,19 @@ impl FormulaEngine {
         let ast = if let Some(cached) = self.ast_cache.get(formula) {
             cached.clone()
         } else {
-            let pairs = FormulaParser::parse(Rule::formula, formula).unwrap();
-            let ast = self.build_ast(pairs.into_iter().next().unwrap());
-            self.ast_cache.insert(formula.to_string(), ast.clone());
-            ast
+            match FormulaParser::parse(Rule::formula, formula) {
+                Ok(pairs) => {
+                    match pairs.into_iter().next() {
+                        Some(first_pair) => {
+                            let ast = self.build_ast(first_pair);
+                            self.ast_cache.insert(formula.to_string(), ast.clone());
+                            ast
+                        },
+                        None => AstNode::String("#ERROR!".to_string()),
+                    }
+                },
+                Err(_) => AstNode::String("#ERROR!".to_string()),
+            }
         };
 
         for i in 0..len {
@@ -113,11 +127,17 @@ impl FormulaEngine {
                     }
                 },
                 _ => {
+                    if let Some(ref buffer) = self.shared_buffer {
+                        if r < self.grid_rows && c < self.grid_cols {
+                            let idx = (r * self.grid_cols + c) as u32;
+                            buffer.set_index(idx, f64::NAN); // 写入 NaN 清除残余脏值
+                        }
+                    }
                     if !has_shared {
                         numeric_vals.push(f64::NAN); // 占位符
                     }
                     let cell_id = ids.get(i);
-                    Reflect::set(&non_numeric, &cell_id, &res.to_js_value()).unwrap();
+                    let _ = Reflect::set(&non_numeric, &cell_id, &res.to_js_value());
                 }
             }
         }
@@ -125,9 +145,9 @@ impl FormulaEngine {
         let output = Object::new();
         // 仅在无共享内存时返回 numeric_results（降级路径）
         if !has_shared {
-            Reflect::set(&output, &"numeric_results".into(), &Float64Array::from(numeric_vals.as_slice()).into()).unwrap();
+            let _ = Reflect::set(&output, &"numeric_results".into(), &Float64Array::from(numeric_vals.as_slice()).into());
         }
-        Reflect::set(&output, &"non_numeric_results".into(), &non_numeric.into()).unwrap();
+        let _ = Reflect::set(&output, &"non_numeric_results".into(), &non_numeric.into());
         output.into()
     }
 
@@ -144,15 +164,25 @@ impl FormulaEngine {
 
     /// 用 Shunting-Yard（操作数栈 + 运算符栈）按优先级构建左结合 AST。
     /// `operands.len() == operators.len() + 1`。
+    ///
+    /// **无恐慌保证**：所有栈操作均使用 `unwrap_or_else`，
+    /// 畸形输入（操作数/运算符数量失衡）安全降级为 `#ERROR!` 节点，不会 panic。
     fn build_with_precedence(operands: Vec<AstNode>, operators: Vec<String>) -> AstNode {
+        // 防御：空操作数不应到达此处（语法保证），但即使发生也不 panic
+        if operands.is_empty() {
+            return AstNode::String("#ERROR!".to_string());
+        }
+
         let mut out: Vec<AstNode> = Vec::new();
         let mut ops: Vec<String> = Vec::new();
         let mut operand_iter = operands.into_iter();
-        out.push(operand_iter.next().unwrap());
+        out.push(operand_iter.next().unwrap_or_else(|| AstNode::String("#ERROR!".to_string())));
 
+        // 归约闭包：从 out 栈弹出右/左操作数并构建 BinaryOp 节点。
+        // 栈空时用 `#ERROR!` 占位，避免 panic 导致 WASM 实例挂死。
         let reduce = |out: &mut Vec<AstNode>, op: String| {
-            let right = out.pop().unwrap();
-            let left = out.pop().unwrap();
+            let right = out.pop().unwrap_or_else(|| AstNode::String("#ERROR!".to_string()));
+            let left = out.pop().unwrap_or_else(|| AstNode::String("#ERROR!".to_string()));
             out.push(AstNode::BinaryOp { left: Box::new(left), op, right: Box::new(right) });
         };
 
@@ -161,6 +191,7 @@ impl FormulaEngine {
             // 左结合：栈顶优先级 >= 当前则先归约
             while let Some(top) = ops.last() {
                 if Self::op_precedence(top) >= prec {
+                    // 安全：while let Some 已保证栈非空
                     let top_op = ops.pop().unwrap();
                     reduce(&mut out, top_op);
                 } else {
@@ -168,27 +199,41 @@ impl FormulaEngine {
                 }
             }
             ops.push(op);
-            out.push(operand_iter.next().unwrap());
+            // 防御：操作数不足时用 #ERROR! 填充，不 panic
+            out.push(operand_iter.next().unwrap_or_else(|| AstNode::String("#ERROR!".to_string())));
         }
-        while let Some(top_op) = ops.pop() {
-            reduce(&mut out, top_op);
+        while let Some(_top_op) = ops.pop() {
+            reduce(&mut out, _top_op);
         }
-        out.pop().unwrap()
+        // 防御：最终结果栈空时返回 #ERROR!
+        out.pop().unwrap_or_else(|| AstNode::String("#ERROR!".to_string()))
     }
 
     fn build_ast(&self, pair: pest::iterators::Pair<Rule>) -> AstNode {
         match pair.as_rule() {
-            Rule::formula => self.build_ast(pair.into_inner().next().unwrap()),
+            Rule::formula => {
+                // 防御：语法规则保证 formula 有子节点，但不 panic
+                match pair.into_inner().next() {
+                    Some(child) => self.build_ast(child),
+                    None => AstNode::String("#ERROR!".to_string()),
+                }
+            },
             Rule::expr => {
                 // 收集扁平的 term/op 序列后，按标准运算符优先级构建 AST，
                 // 而非简单的从左到右折叠（保证 =1+2*3 得 7 而非 9）。
                 let mut inner = pair.into_inner();
                 let mut operands: Vec<AstNode> = Vec::new();
                 let mut operators: Vec<String> = Vec::new();
-                operands.push(self.build_ast(inner.next().unwrap()));
+                match inner.next() {
+                    Some(first) => operands.push(self.build_ast(first)),
+                    None => return AstNode::String("#ERROR!".to_string()),
+                }
                 while let Some(op) = inner.next() {
                     operators.push(op.as_str().to_string());
-                    operands.push(self.build_ast(inner.next().unwrap()));
+                    match inner.next() {
+                        Some(term) => operands.push(self.build_ast(term)),
+                        None => break, // 格式异常时安全截断
+                    }
                 }
                 Self::build_with_precedence(operands, operators)
             },
@@ -198,7 +243,12 @@ impl FormulaEngine {
                 AstNode::String(s[1..s.len()-1].to_string())
             },
             Rule::boolean => AstNode::Boolean(pair.as_str().to_uppercase() == "TRUE"),
-            Rule::cell_ref => self.build_ast(pair.into_inner().next().unwrap()),
+            Rule::cell_ref => {
+                match pair.into_inner().next() {
+                    Some(child) => self.build_ast(child),
+                    None => AstNode::String("#REF!".to_string()),
+                }
+            },
             Rule::a1_ref => {
                 let s = pair.as_str();
                 let (r, c) = self.parse_a1(s);
@@ -212,8 +262,14 @@ impl FormulaEngine {
             },
             Rule::range => {
                 let mut inner = pair.into_inner();
-                let p1 = inner.next().unwrap();
-                let p2 = inner.next().unwrap();
+                let p1 = match inner.next() {
+                    Some(p) => p,
+                    None => return AstNode::String("#REF!".to_string()),
+                };
+                let p2 = match inner.next() {
+                    Some(p) => p,
+                    None => return AstNode::String("#REF!".to_string()),
+                };
                 let node1 = self.build_ast(p1);
                 let node2 = self.build_ast(p2);
                 if let (AstNode::CellRef { r: r1, c: c1, abs_r: ar1, abs_c: ac1 }, 
@@ -225,7 +281,10 @@ impl FormulaEngine {
             },
             Rule::function_call => {
                 let mut inner = pair.into_inner();
-                let name = inner.next().unwrap().as_str().to_string();
+                let name = match inner.next() {
+                    Some(n) => n.as_str().to_string(),
+                    None => return AstNode::String("#NAME?".to_string()),
+                };
                 let mut args = Vec::new();
                 for p in inner {
                     args.push(self.build_ast(p));
@@ -338,9 +397,11 @@ impl FormulaEngine {
         let mut c = 0;
         let mut abs_r = true;
         let mut abs_c = true;
-        
-        let r_part = s.split('C').next().unwrap();
-        let c_part = s.split('C').nth(1).unwrap();
+
+        // 防御性拆分：避免无 "C" 字符时 nth(1) panic
+        let mut parts = s.split('C');
+        let r_part = parts.next().unwrap_or("R0");
+        let c_part = parts.next().unwrap_or("0");
         
         if r_part.contains('[') {
             abs_r = false;
@@ -370,8 +431,11 @@ impl FormulaEngine {
         }
         let mut col: usize = 0;
         for c in col_str.chars() { col = col * 26 + (c as usize - 'A' as usize + 1); }
-        let row: usize = row_str.parse::<usize>().unwrap_or(1) - 1;
-        (row, col - 1)
+        // 边界校验：防止解析为 0 后 usize 下溢越界（例如 "A0" 导致 row_str 为 "0"）
+        let parsed_row: usize = row_str.parse::<usize>().unwrap_or(1);
+        let row = if parsed_row > 0 { parsed_row - 1 } else { 0 };
+        let col_idx = if col > 0 { col - 1 } else { 0 };
+        (row, col_idx)
     }
 
     fn get_shared_value(&self, r: usize, c: usize) -> f64 {
@@ -386,5 +450,221 @@ impl FormulaEngine {
             }
         }
         0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_a1_normal() {
+        let engine = FormulaEngine::new();
+        let (row, col) = engine.parse_a1("A1");
+        assert_eq!(row, 0);
+        assert_eq!(col, 0);
+    }
+
+    #[test]
+    fn test_parse_a1_with_dollar() {
+        let engine = FormulaEngine::new();
+        let (row, col) = engine.parse_a1("$B$3");
+        assert_eq!(row, 2);
+        assert_eq!(col, 1);
+    }
+
+    #[test]
+    fn test_parse_a1_row_zero_no_underflow() {
+        // 验证 "A0" 不会触发 usize 下溢（原漏洞）
+        let engine = FormulaEngine::new();
+        let (row, col) = engine.parse_a1("A0");
+        // 行号 0 无效，被边界校验截断为 0，不会 panic
+        assert_eq!(row, 0);
+        assert_eq!(col, 0);
+    }
+
+    #[test]
+    fn test_parse_a1_empty_no_underflow() {
+        // 验证空字符不会触发 usize 下溢
+        let engine = FormulaEngine::new();
+        let (row, _) = engine.parse_a1("AA");
+        // 没有数字，row_str 为空，parse 用 unwrap_or(1)，结果为 0
+        assert_eq!(row, 0);
+    }
+
+    #[test]
+    fn test_parse_r1c1_normal() {
+        let engine = FormulaEngine::new();
+        let (r, c, abs_r, abs_c) = engine.parse_r1c1("R5C3");
+        assert_eq!(r, 4); // R5 -> 1-based -> index 4
+        assert_eq!(c, 2); // C3 -> 1-based -> index 2
+        assert!(abs_r);
+        assert!(abs_c);
+    }
+
+    #[test]
+    fn test_parse_r1c1_relative() {
+        let engine = FormulaEngine::new();
+        let (r, c, abs_r, abs_c) = engine.parse_r1c1("R[2]C[1]");
+        assert_eq!(r, 2);
+        assert_eq!(c, 1);
+        assert!(!abs_r);
+        assert!(!abs_c);
+    }
+
+    #[test]
+    fn test_parse_r1c1_no_c_suffix_no_panic() {
+        // 验证无 "C" 字符时不会触发 unwrap panic（原漏洞）
+        let engine = FormulaEngine::new();
+        // 此调用不应 panic（原始代码在 split('C').nth(1).unwrap() 会 panic）
+        let (r, c, _, _) = engine.parse_r1c1("R5");
+        // 防御性 fallback：r_part="R5", c_part="0"
+        assert_eq!(r, 4);  // R5 → 5 - 1 = 4
+        assert_eq!(c, -1); // c_part "0" → 0 - 1 = -1 (i32 安全承载)
+    }
+
+    #[test]
+    fn test_parse_r1c1_empty_suffix() {
+        let engine = FormulaEngine::new();
+        let (_, c, _, _) = engine.parse_r1c1("R1C");
+        // C 后为空，c_part 为空字符串
+        assert_eq!(c, 0);
+    }
+
+    // --- 语法错误不 panic 测试（通过 evaluate_internal，非 wasm-bindgen 导出） ---
+
+    #[test]
+    fn test_evaluate_syntax_error_unclosed_paren() {
+        // 未闭合括号不应 panic（原 evaluate_group 会 panic 崩溃）
+        let mut engine = FormulaEngine::new();
+        let result = engine.evaluate_internal("=SUM(A1+");
+        // 应返回 Error 类型而非 panic
+        match result {
+            CalcValue::Error(_) | CalcValue::String(_) => {}, // 优雅降级
+            _ => panic!("Expected error for malformed formula, got: {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_evaluate_syntax_error_garbage() {
+        // 完全不合法的公式不应 panic
+        let mut engine = FormulaEngine::new();
+        let result = engine.evaluate_internal("=@#$%!");
+        // 只要没 panic 就通过，不关心具体返回值
+        let _ = result;
+    }
+
+    #[test]
+    fn test_evaluate_syntax_error_missing_operand() {
+        // 二元运算符缺操作数不应 panic
+        let mut engine = FormulaEngine::new();
+        let result = engine.evaluate_internal("=1+");
+        let _ = result; // 不 panic 即通过
+    }
+
+    #[test]
+    fn test_evaluate_syntax_error_incomplete_range() {
+        // 不完整的范围引用不应 panic
+        let mut engine = FormulaEngine::new();
+        let result = engine.evaluate_internal("=SUM(A1:)");
+        let _ = result;
+    }
+
+    // ─── build_with_precedence 无恐慌测试 ───
+    // 以下用例覆盖语法解析通过但操作数/运算符失衡的畸形输入，
+    // 验证 build_with_precedence 的 unwrap 替换后不会触发 WASM panic。
+
+    #[test]
+    fn test_no_panic_trailing_operator() {
+        let mut engine = FormulaEngine::new();
+        let _ = engine.evaluate_internal("=1+");
+        let _ = engine.evaluate_internal("=1+2*");
+        let _ = engine.evaluate_internal("=1+2-");
+    }
+
+    #[test]
+    fn test_no_panic_double_operator() {
+        let mut engine = FormulaEngine::new();
+        let _ = engine.evaluate_internal("=1++2");
+        let _ = engine.evaluate_internal("=1**2");
+        let _ = engine.evaluate_internal("=1//2");
+    }
+
+    #[test]
+    fn test_no_panic_leading_operator() {
+        let mut engine = FormulaEngine::new();
+        let _ = engine.evaluate_internal("=+1");
+        let _ = engine.evaluate_internal("=-42");
+        let _ = engine.evaluate_internal("=*100");
+    }
+
+    #[test]
+    fn test_no_panic_consecutive_operators() {
+        let mut engine = FormulaEngine::new();
+        let _ = engine.evaluate_internal("=1+-*/2");
+    }
+
+    #[test]
+    fn test_no_panic_only_operator() {
+        let mut engine = FormulaEngine::new();
+        let _ = engine.evaluate_internal("=+");
+        let _ = engine.evaluate_internal("=-");
+        let _ = engine.evaluate_internal("=*");
+        let _ = engine.evaluate_internal("=/");
+    }
+
+    #[test]
+    fn test_no_panic_many_operators() {
+        let mut engine = FormulaEngine::new();
+        let _ = engine.evaluate_internal("=1+2+3+4+5+");
+    }
+
+    #[test]
+    fn test_no_panic_empty_parens() {
+        let mut engine = FormulaEngine::new();
+        let _ = engine.evaluate_internal("=()");
+        let _ = engine.evaluate_internal("=SUM()");
+        let _ = engine.evaluate_internal("=(1+)");
+    }
+
+    #[test]
+    fn test_no_panic_nested_malformed() {
+        let mut engine = FormulaEngine::new();
+        let _ = engine.evaluate_internal("=SUM(1+)");
+        let _ = engine.evaluate_internal("=SUM(1+2*))");
+        let _ = engine.evaluate_internal("=SUM((1+2)");
+    }
+
+    #[test]
+    fn test_no_panic_incomplete_expr_after_paren() {
+        let mut engine = FormulaEngine::new();
+        let _ = engine.evaluate_internal("=(1+2)+");
+        let _ = engine.evaluate_internal("=(1+2)-");
+        let _ = engine.evaluate_internal("=(1+2)*");
+    }
+
+    #[test]
+    fn test_no_panic_bulk_malformed() {
+        // 批量畸形公式，验证不会触发 WASM panic
+        let mut engine = FormulaEngine::new();
+        let malformed = vec![
+            "=1+", "=1-", "=1*", "=1/",
+            "=+", "=-", "=*", "=/",
+            "=1++2", "=1+-2", "=1+*2",
+            "=(1+2", "=1+2)", "=)",
+            "=SUM(1+", "=SUM(+1,)", "=SUM(,1)",
+            "=1+2+3+", "=1*2*3*", "=1+2*3/",
+            "=A1+", "=+A1", "=A1+*B2",
+        ];
+        for formula in malformed {
+            let _ = engine.evaluate_internal(formula);
+        }
+    }
+
+    #[test]
+    fn test_no_panic_very_long_operator_chain() {
+        // 长运算符链缺操作数，不应溢出栈
+        let mut engine = FormulaEngine::new();
+        let _ = engine.evaluate_internal("=1+2+3+4+5+6+7+8+9+10+");
     }
 }

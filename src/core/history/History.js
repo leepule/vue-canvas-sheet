@@ -16,6 +16,7 @@
 
 import { HistoryOptimizer } from './HistoryOptimizer.js';
 import { RingBuffer } from '../utils/Queues.js';
+import { cloneCell } from '../utils/Clipboard.js';
 
 
 const DEFAULT_MAX_DEPTH = 100;
@@ -27,10 +28,11 @@ const DEFAULT_MAX_DEPTH = 100;
 export class HistoryManager {
   /**
    * 创建历史管理器
-   * @param {import('./Workbook').Workbook} workbook - 工作簿实例
+   * @param {{ applyCommand: (cmd: HistoryCommand, isUndo: boolean) => void }} deps
    */
-  constructor(workbook) {
-    this.workbook = workbook;
+  constructor(deps) {
+    /** @type {{ applyCommand: (cmd: HistoryCommand, isUndo: boolean) => void }} */
+    this.d = deps;
     this._maxDepth = DEFAULT_MAX_DEPTH;
     // 容量自动淘汰：push 超出 maxDepth 时自动丢弃最旧条目（替代旧的 shift）
     this.undoStack = new RingBuffer(this._maxDepth);
@@ -53,6 +55,11 @@ export class HistoryManager {
    * @param {HistoryCommand} cmd - 命令对象
    */
   execute(cmd) {
+    // 记录时即克隆 newValue，使 history 快照与正向写入的活单元格彻底解耦：
+    // 正向操作（setBorder/bulkSetCells/粘贴等）的活 cell.s 与 change.newValue.s 是同一对象，
+    // 后续覆盖/撤销将活 cell 回收进对象池时会就地清空该样式对象，若不解耦会摧毁 history 快照。
+    this._decoupleNewValues(cmd);
+
     if (this.batching) {
       this.batchCmds.push(cmd);
       return;
@@ -92,6 +99,29 @@ export class HistoryManager {
    * @returns {boolean} 是否成功合并
    * @private
    */
+  /**
+   * 克隆命令中的 newValue，使 history 快照独立于活单元格。
+   * oldValue 无需处理：各生产者记录前已 cloneCell，且它从不作为正向活 cell。
+   * batch 类型的子命令在各自 execute 时已处理，此处仅递归兜底 endBatch 的包装命令。
+   * @param {HistoryCommand} cmd
+   * @private
+   */
+  _decoupleNewValues(cmd) {
+    if (cmd.type === 'set-cell') {
+      if (cmd.newValue && typeof cmd.newValue === 'object') cmd.newValue = cloneCell(cmd.newValue);
+    } else if (cmd.type === 'batch-set-cell') {
+      const changes = cmd.changes;
+      for (let i = 0; i < changes.length; i++) {
+        const ch = changes[i];
+        if (ch.newValue && typeof ch.newValue === 'object') ch.newValue = cloneCell(ch.newValue);
+      }
+    } else if (cmd.type === 'batch' && cmd.cmds) {
+      for (let i = 0; i < cmd.cmds.length; i++) {
+        this._decoupleNewValues(cmd.cmds[i]);
+      }
+    }
+  }
+
   _tryMerge(cmd, now) {
     // 检查是否可以合并
     if (now - this.lastOpTime > this.mergeWindow) {
@@ -175,7 +205,7 @@ export class HistoryManager {
     this.redoStack.push(cmd);
     this.optimizer.trackPush(cmd);
 
-    this.workbook.applyCommand(cmd, true);
+    this.d.applyCommand(cmd, true);
 
     // 重置合并状态
     this.lastOpTime = 0;
@@ -196,7 +226,7 @@ export class HistoryManager {
     this.undoStack.push(cmd);
     this.optimizer.trackPush(cmd);
 
-    this.workbook.applyCommand(cmd, false);
+    this.d.applyCommand(cmd, false);
 
     // 更新合并状态
     this._recordOpInfo(cmd, Date.now());

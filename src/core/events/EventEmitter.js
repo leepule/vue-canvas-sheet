@@ -31,6 +31,8 @@ export const Events = {
   ERROR: 'error',
   /** 保存状态变化 */
   SAVE_STATUS: 'save-status',
+  /** WASM 计算引擎降级（SharedArrayBuffer 不可用 / WASM 加载失败等） */
+  WASM_DOWNGRADE: 'wasm-downgrade',
   /** 通用更新（兼容旧版） */
   CHANGE: 'change'
 };

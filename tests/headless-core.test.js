@@ -24,8 +24,8 @@ describe('Headless Core Verification', () => {
     console.log('✅ Data set.');
 
     // 验证数据布局
-    const nameHeader = wb.getCellValue(0, 0);
-    const aliceValue = wb.getCellValue(1, 0);
+    const nameHeader = wb.formulaEvaluator.getCellValue(0, 0);
+    const aliceValue = wb.formulaEvaluator.getCellValue(1, 0);
     console.log(`📊 Layout Check - Row 0,0: ${nameHeader}, Row 1,0: ${aliceValue}`);
 
     // 3. 设置数值和公式
@@ -43,7 +43,7 @@ describe('Headless Core Verification', () => {
     const cellB5 = wb.getCell(4, 1);
     console.log('🔍 Cell B5 Object:', JSON.stringify(cellB5));
 
-    const result = wb.getCellValue(4, 1);
+    const result = wb.formulaEvaluator.getCellValue(4, 1);
     console.log(`✅ Formula result: ${result} (Type: ${typeof result})`);
 
     // 断言

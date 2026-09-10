@@ -13,64 +13,15 @@
 
 import { BufferWriter, BufferReader, deserializeCellData } from '../core/worker/TransferableSerializer.js';
 import { cellKey, parseCellKey } from '../core/data/CellKey.js';
+import { FormulaRPNEvaluator, createError, ErrorCodes } from '../core/data/FormulaRPNEvaluator.js';
+import { isWasmFormulaSupported } from '../core/data/WasmFormulaSupport.js';
 
 let wasmBridge = null;
 
-// ========== 常量定义 ==========
-
 // 数据类型标识（与 TransferableSerializer 保持一致）
 const DataType = {
-  NULL: 0,
-  UNDEFINED: 1,
-  BOOLEAN: 2,
-  NUMBER: 3,
-  STRING: 4,
-  OBJECT: 5,
-  ARRAY: 6,
-  CELL_DATA: 7,
-  FORMULA_BATCH: 8
-};
-
-const PATTERNS = [
-  // 使用 sticky flag (y) 替代 ^ 锚点，配合 regex.lastIndex 在原字符串上原地匹配
-  // 避免 tokenize 每个字符位置都创建 substring
-  { type: 'fn', regex: /[A-Z]+(?=\()/y },
-  { type: 'range', regex: /[A-Z]+[0-9]+:[A-Z]+[0-9]+/y },
-  { type: 'cell', regex: /[A-Z]+[0-9]+/y },
-  { type: 'string', regex: /"([^"]*)"/y },
-  { type: 'boolean', regex: /(TRUE|FALSE)(?![A-Z0-9])/iy },
-  { type: 'number', regex: /\d+(\.\d+)?/y },
-  { type: 'op', regex: /[\+\-\*\/]/y },
-  { type: 'compare', regex: /(<>|<=|>=|[<>=])/y },
-  { type: 'lparen', regex: /\(/y },
-  { type: 'rparen', regex: /\)/y },
-  { type: 'comma', regex: /,/y },
-  { type: 'ws', regex: /\s+/y }
-];
-
-const PRECEDENCE = {
-  '+': 1, '-': 1,
-  '*': 2, '/': 2,
-  '=': 0, '<': 0, '>': 0, '<=': 0, '>=': 0, '<>': 0
-};
-
-const FUNCTION_TYPES = {
-  AGGREGATE: ['SUM', 'AVERAGE', 'MAX', 'MIN', 'COUNT', 'COUNTA'],
-  MATH: ['ROUND', 'ABS', 'INT', 'MOD', 'POWER', 'SQRT', 'CEILING', 'FLOOR'],
-  TEXT: ['CONCAT', 'LEFT', 'RIGHT', 'LEN', 'UPPER', 'LOWER', 'TRIM', 'SUBSTITUTE'],
-  LOGIC: ['IF', 'AND', 'OR', 'NOT'],
-  DATE: ['TODAY', 'NOW', 'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE', 'SECOND', 'DATE', 'DATEDIF']
-};
-
-// 错误类型
-const ErrorCodes = {
-  FORMULA_ERROR: 'FORMULA_ERROR',
-  DIVISION_BY_ZERO: 'DIVISION_BY_ZERO',
-  CIRCULAR_REFERENCE: 'CIRCULAR_REFERENCE',
-  UNKNOWN_FUNCTION: 'UNKNOWN_FUNCTION',
-  INVALID_ARGUMENT: 'INVALID_ARGUMENT',
-  VALUE_ERROR: 'VALUE_ERROR',
-  NUM_ERROR: 'NUM_ERROR'
+  NULL: 0, UNDEFINED: 1, BOOLEAN: 2, NUMBER: 3,
+  STRING: 4, OBJECT: 5, ARRAY: 6, CELL_DATA: 7, FORMULA_BATCH: 8
 };
 
 // ========== 共享内存管理 (SharedArrayBuffer) ==========
@@ -123,921 +74,27 @@ function updateSharedChunks(data) {
   }
 }
 
-// ========== 工具函数 ==========
-
-/**
- * 创建 Excel 风格错误值
- */
-function createError(code, message) {
-  const errorMap = {
-    [ErrorCodes.DIVISION_BY_ZERO]: '#DIV/0!',
-    [ErrorCodes.CIRCULAR_REFERENCE]: '#CYCLE!',
-    [ErrorCodes.UNKNOWN_FUNCTION]: '#NAME?',
-    [ErrorCodes.INVALID_ARGUMENT]: '#VALUE!',
-    [ErrorCodes.NUM_ERROR]: '#NUM!',
-    [ErrorCodes.FORMULA_ERROR]: '#ERROR!',
-    [ErrorCodes.VALUE_ERROR]: '#VALUE!'
-  };
-  return errorMap[code] || '#ERROR!';
-}
-
-/**
- * 列索引转列名 (0 -> A, 1 -> B, ...)
- */
-function indexToColStr(index) {
-  let str = '';
-  let n = index + 1;
-  while (n > 0) {
-    let m = (n - 1) % 26;
-    str = String.fromCharCode(65 + m) + str;
-    n = Math.floor((n - m) / 26);
-  }
-  return str;
-}
-
-/**
- * 列名转列索引 (A -> 0, B -> 1, ...)
- */
-function colStrToIndex(str) {
-  let val = 0;
-  for (let i = 0; i < str.length; i++) {
-    val *= 26;
-    val += str.charCodeAt(i) - 64;
-  }
-  return val - 1;
-}
-
-/**
- * 单元格引用转行列索引
- */
-function refToRC(ref) {
-  const letter = ref.match(/[A-Z]+/)[0];
-  const num = ref.match(/[0-9]+/)[0];
-  const c = colStrToIndex(letter);
-  const r = parseInt(num, 10) - 1;
-  return { r, c };
-}
-
-/**
- * 范围引用转行列索引
- */
-function rangeToRC(range) {
-  const parts = range.split(':');
-  return {
-    start: refToRC(parts[0]),
-    end: refToRC(parts[1])
-  };
-}
-
-// ========== 公式解析器 ==========
-
-class FormulaWorkerParser {
-  constructor() {
-    this.rpnCache = new Map();
-    this.MAX_CACHE_SIZE = 500;
-  }
-
-  /**
-   * 词法分析
-   */
-  tokenize(expr) {
-    const tokens = [];
-    let i = 0;
-    const len = expr.length;
-
-    while (i < len) {
-      let matched = false;
-
-      for (let j = 0; j < PATTERNS.length; j++) {
-        const { type, regex } = PATTERNS[j];
-        // sticky flag (y) 让正则在 lastIndex 位置精确匹配，无需 substring
-        regex.lastIndex = i;
-        const match = regex.exec(expr);
-        if (match) {
-          if (type !== 'ws') {
-            if (type === 'string') {
-              tokens.push({ type, value: match[1] !== undefined ? match[1] : match[0] });
-            } else if (type === 'boolean') {
-              tokens.push({ type, value: match[0].toUpperCase() });
-            } else {
-              tokens.push({ type, value: match[0] });
-            }
-          }
-          i = regex.lastIndex;
-          matched = true;
-          break;
-        }
-      }
-
-      if (!matched) {
-        i++;
-      }
-    }
-    return tokens;
-  }
-
-  /**
-   * 调度场算法：中缀转后缀
-   */
-  shuntingYard(tokens) {
-    const outputQueue = [];
-    const operatorStack = [];
-
-    for (let i = 0; i < tokens.length; i++) {
-      const token = tokens[i];
-      const tokenType = token.type;
-
-      if (tokenType === 'number' || tokenType === 'cell' || tokenType === 'range' ||
-          tokenType === 'string' || tokenType === 'boolean') {
-        outputQueue.push(token);
-      } else if (tokenType === 'fn') {
-        token.value = token.value.toUpperCase();
-        operatorStack.push(token);
-      } else if (tokenType === 'comma') {
-        while (operatorStack.length && operatorStack[operatorStack.length - 1].type !== 'lparen') {
-          outputQueue.push(operatorStack.pop());
-        }
-      } else if (tokenType === 'op' || tokenType === 'compare') {
-        const tokenValue = token.value;
-        while (operatorStack.length) {
-          const top = operatorStack[operatorStack.length - 1];
-          if ((top.type === 'op' || top.type === 'compare') &&
-              PRECEDENCE[top.value] >= PRECEDENCE[tokenValue]) {
-            outputQueue.push(operatorStack.pop());
-          } else {
-            break;
-          }
-        }
-        operatorStack.push(token);
-      } else if (tokenType === 'lparen') {
-        operatorStack.push(token);
-      } else if (tokenType === 'rparen') {
-        while (operatorStack.length && operatorStack[operatorStack.length - 1].type !== 'lparen') {
-          outputQueue.push(operatorStack.pop());
-        }
-        operatorStack.pop();
-        if (operatorStack.length && operatorStack[operatorStack.length - 1].type === 'fn') {
-          outputQueue.push(operatorStack.pop());
-        }
-      }
-    }
-
-    while (operatorStack.length) {
-      outputQueue.push(operatorStack.pop());
-    }
-
-    return outputQueue;
-  }
-
-  /**
-   * 解析公式并缓存 RPN
-   */
-  parse(formula) {
-    if (!formula || !formula.startsWith('=')) {
-      return null;
-    }
-
-    const expression = formula.substring(1);
-    const cacheKey = expression.toUpperCase();
-
-    if (this.rpnCache.has(cacheKey)) {
-      // LRU：命中时删后重插，移到 Map 末尾（最近使用）
-      const rpn = this.rpnCache.get(cacheKey);
-      this.rpnCache.delete(cacheKey);
-      this.rpnCache.set(cacheKey, rpn);
-      return rpn;
-    }
-
-    const tokens = this.tokenize(expression);
-    if (!tokens.length) {
-      return null;
-    }
-
-    const rpn = this.shuntingYard(tokens);
-
-    // 缓存管理
-    if (this.rpnCache.size >= this.MAX_CACHE_SIZE) {
-      const firstKey = this.rpnCache.keys().next().value;
-      this.rpnCache.delete(firstKey);
-    }
-    this.rpnCache.set(cacheKey, rpn);
-
-    return rpn;
-  }
-
-  /**
-   * 从公式中提取依赖
-   * @returns {Set<string>} 单元格键格式的依赖集合
-   */
-  getDependencies(formula) {
-    if (!formula || !formula.startsWith('=')) return new Set();
-
-    const expression = formula.substring(1).toUpperCase();
-    const tokens = this.tokenize(expression);
-    const dependencies = new Set();
-
-    tokens.forEach(token => {
-      if (token.type === 'cell') {
-        const { r, c } = refToRC(token.value);
-        dependencies.add(cellKey(r, c));
-      } else if (token.type === 'range') {
-        const { start, end } = rangeToRC(token.value);
-        const startR = Math.min(start.r, end.r);
-        const endR = Math.max(start.r, end.r);
-        const startC = Math.min(start.c, end.c);
-        const endC = Math.max(start.c, end.c);
-        for (let i = startR; i <= endR; i++) {
-          for (let j = startC; j <= endC; j++) {
-            dependencies.add(cellKey(i, j));
-          }
-        }
-      }
-    });
-
-    return dependencies;
-  }
-}
-
-// ========== 公式计算器 ==========
-
-class FormulaWorkerEvaluator {
-  constructor(dataProvider) {
-    this.dataProvider = dataProvider;
-    this.parser = new FormulaWorkerParser();
-  }
-
-  /**
-   * 获取单元格值
-   */
-  getCellFromData(r, c, stack = []) {
-    const key = cellKey(r, c);
-    if (stack.includes(key)) {
-      throw new Error('#CYCLE!');
-    }
-    return this.dataProvider(key, stack);
-  }
-
-  /**
-   * 解析单元格值为合适类型
-   */
-  parseCellValue(val) {
-    if (val === null || val === undefined || val === '') {
-      return '';
-    }
-    if (typeof val === 'number' || typeof val === 'boolean') {
-      return val;
-    }
-    const str = String(val);
-    const cleanStr = str.replace(/,/g, '');
-    const n = parseFloat(cleanStr);
-    if (!isNaN(n) && str.trim() !== '') {
-      return n;
-    }
-    return str;
-  }
-
-  /**
-   * 将值解析为标量
-   */
-  resolveToScalar(val, context) {
-    if (val === null || val === undefined) {
-      return 0;
-    }
-    if (typeof val === 'number' || typeof val === 'string' || typeof val === 'boolean') {
-      return val;
-    }
-    if (val && typeof val === 'object' && val.type === 'REF_RANGE') {
-      let firstVal = null;
-      let found = false;
-      this.iterateRange(val.ref, context, (v) => {
-        if (!found) {
-          firstVal = this.parseCellValue(v);
-          found = true;
-        }
-      });
-      return firstVal !== null ? firstVal : 0;
-    }
-    return 0;
-  }
-
-  /**
-   * 遍历范围
-   */
-  iterateRange(rangeRef, context, callback) {
-    const { start, end } = rangeToRC(rangeRef);
-    const startR = Math.min(start.r, end.r);
-    const endR = Math.max(start.r, end.r);
-    const startC = Math.min(start.c, end.c);
-    const endC = Math.max(start.c, end.c);
-
-    const stack = context?.stack || [];
-
-    for (let i = startR; i <= endR; i++) {
-      for (let j = startC; j <= endC; j++) {
-        const val = this.getCellFromData(i, j, stack);
-        callback(val);
-      }
-    }
-  }
-
-  /**
-   * 收集函数参数
-   */
-  collectArgs(stack) {
-    // 反向 pop 入 args 后一次 reverse，等价旧实现但是 O(n)；
-    // 旧实现 args.unshift 在长参数列表（如 SUM(a,b,...,zz)）下是 O(n²)。
-    const args = [];
-    while (stack.length) {
-      const top = stack[stack.length - 1];
-      if (top && typeof top === 'object' && top.type === 'ARGS') {
-        stack.pop();
-        break;
-      }
-      args.push(stack.pop());
-    }
-    args.reverse();
-    return args;
-  }
-
-  /**
-   * 比较运算
-   */
-  compare(a, b, op) {
-    const typeA = typeof a;
-    const typeB = typeof b;
-
-    if (typeA === 'string' && typeB === 'string') {
-      a = a.toLowerCase();
-      b = b.toLowerCase();
-    }
-
-    switch (op) {
-      case '=': return a === b;
-      case '<>': return a !== b;
-      case '<': return a < b;
-      case '>': return a > b;
-      case '<=': return a <= b;
-      case '>=': return a >= b;
-      default: return false;
-    }
-  }
-
-  /**
-   * 计算函数
-   */
-  evaluateFunction(fnName, args, context) {
-    if (FUNCTION_TYPES.AGGREGATE.includes(fnName)) {
-      return this.evalAggregate(fnName, args, context);
-    }
-    if (FUNCTION_TYPES.MATH.includes(fnName)) {
-      return this.evalMath(fnName, args, context);
-    }
-    if (FUNCTION_TYPES.TEXT.includes(fnName)) {
-      return this.evalText(fnName, args, context);
-    }
-    if (FUNCTION_TYPES.LOGIC.includes(fnName)) {
-      return this.evalLogic(fnName, args, context);
-    }
-    if (FUNCTION_TYPES.DATE.includes(fnName)) {
-      return this.evalDate(fnName, args, context);
-    }
-
-    return createError(ErrorCodes.UNKNOWN_FUNCTION);
-  }
-
-  /**
-   * 聚合函数
-   */
-  evalAggregate(fnName, args, context) {
-    let result = 0;
-    let count = 0;
-    let min = Infinity;
-    let max = -Infinity;
-    let countA = 0;
-
-    const processRange = (rangeRef) => {
-      this.iterateRange(rangeRef, context, (val) => {
-        const cleanVal = typeof val === 'string' ? val.replace(/,/g, '') : val;
-        const numVal = parseFloat(cleanVal);
-        if (!isNaN(numVal)) {
-          if (fnName === 'SUM' || fnName === 'AVERAGE') result += numVal;
-          if (fnName === 'MAX') max = Math.max(max, numVal);
-          if (fnName === 'MIN') min = Math.min(min, numVal);
-          count++;
-        }
-        if (val !== null && val !== undefined && val !== '') {
-          countA++;
-        }
-      });
-    };
-
-    const processValue = (val) => {
-      const cleanVal = typeof val === 'string' ? val.replace(/,/g, '') : val;
-      const numVal = parseFloat(cleanVal);
-      if (!isNaN(numVal)) {
-        if (fnName === 'SUM' || fnName === 'AVERAGE') result += numVal;
-        if (fnName === 'MAX') max = Math.max(max, numVal);
-        if (fnName === 'MIN') min = Math.min(min, numVal);
-        count++;
-      }
-      if (val !== null && val !== undefined && val !== '') {
-        countA++;
-      }
-    };
-
-    for (const arg of args) {
-      if (arg && typeof arg === 'object' && arg.type === 'REF_RANGE') {
-        processRange(arg.ref);
-      } else {
-        processValue(arg);
-      }
-    }
-
-    switch (fnName) {
-      case 'SUM': return result;
-      case 'AVERAGE':
-        if (count === 0) return createError(ErrorCodes.DIVISION_BY_ZERO);
-        return result / count;
-      case 'MAX': return count === 0 ? 0 : max;
-      case 'MIN': return count === 0 ? 0 : min;
-      case 'COUNT': return count;
-      case 'COUNTA': return countA;
-      default: return 0;
-    }
-  }
-
-  /**
-   * 数学函数
-   */
-  evalMath(fnName, args, context) {
-    if (args.length === 0) {
-      return createError(ErrorCodes.INVALID_ARGUMENT);
-    }
-
-    const getNum = (arg) => {
-      if (arg && typeof arg === 'object' && arg.type === 'REF_RANGE') {
-        return this.resolveToScalar(arg, context);
-      }
-      if (typeof arg === 'string' && arg.startsWith('#')) {
-        throw new Error(arg);
-      }
-      const cleanArg = typeof arg === 'string' ? arg.replace(/,/g, '') : arg;
-      const n = parseFloat(cleanArg);
-      if (isNaN(n)) {
-        throw new Error(`无法将 "${arg}" 转换为数字`);
-      }
-      return n;
-    };
-
-    try {
-      switch (fnName) {
-        case 'ROUND': {
-          if (args.length < 1) return createError(ErrorCodes.VALUE_ERROR);
-          const num = getNum(args[0]);
-          const digits = args.length > 1 ? Math.floor(getNum(args[1])) : 0;
-          const factor = Math.pow(10, digits);
-          return Math.round(num * factor) / factor;
-        }
-        case 'ABS': {
-          const num = getNum(args[0]);
-          return Math.abs(num);
-        }
-        case 'INT': {
-          const num = getNum(args[0]);
-          return Math.floor(num);
-        }
-        case 'MOD': {
-          if (args.length < 2) return createError(ErrorCodes.VALUE_ERROR);
-          const num = getNum(args[0]);
-          const divisor = getNum(args[1]);
-          if (divisor === 0) return createError(ErrorCodes.DIVISION_BY_ZERO);
-          return num - divisor * Math.floor(num / divisor);
-        }
-        case 'POWER': {
-          if (args.length < 2) return createError(ErrorCodes.VALUE_ERROR);
-          const base = getNum(args[0]);
-          const exponent = getNum(args[1]);
-          return Math.pow(base, exponent);
-        }
-        case 'SQRT': {
-          const num = getNum(args[0]);
-          if (num < 0) return createError(ErrorCodes.NUM_ERROR);
-          return Math.sqrt(num);
-        }
-        case 'CEILING': {
-          if (args.length < 2) return createError(ErrorCodes.VALUE_ERROR);
-          const num = getNum(args[0]);
-          const significance = getNum(args[1]);
-          if (significance === 0) return 0;
-          return Math.ceil(num / significance) * significance;
-        }
-        case 'FLOOR': {
-          if (args.length < 2) return createError(ErrorCodes.VALUE_ERROR);
-          const num = getNum(args[0]);
-          const significance = getNum(args[1]);
-          if (significance === 0) return 0;
-          return Math.floor(num / significance) * significance;
-        }
-        default:
-          return createError(ErrorCodes.UNKNOWN_FUNCTION);
-      }
-    } catch (e) {
-      if (e.message && e.message.startsWith('#')) return e.message;
-      return createError(ErrorCodes.VALUE_ERROR);
-    }
-  }
-
-  /**
-   * 文本函数
-   */
-  evalText(fnName, args, context) {
-    const getStr = (arg) => {
-      if (arg && typeof arg === 'object' && arg.type === 'REF_RANGE') {
-        arg = this.resolveToScalar(arg, context);
-      }
-      if (typeof arg === 'string' && arg.startsWith('#')) {
-        throw new Error(arg);
-      }
-      return String(arg ?? '');
-    };
-
-    const requireArgs = (minCount) => {
-      if (args.length < minCount) {
-        throw new Error(`${fnName} 至少需要 ${minCount} 个参数`);
-      }
-    };
-
-    try {
-      switch (fnName) {
-        case 'CONCAT':
-          return args.map(arg => getStr(arg)).join('');
-        case 'LEFT': {
-          requireArgs(1);
-          const str = getStr(args[0]);
-          const numChars = args.length > 1 ? Math.floor(parseFloat(args[1]) || 0) : 1;
-          return str.substring(0, Math.max(0, numChars));
-        }
-        case 'RIGHT': {
-          requireArgs(1);
-          const str = getStr(args[0]);
-          const numChars = args.length > 1 ? Math.floor(parseFloat(args[1]) || 0) : 1;
-          const len = str.length;
-          return str.substring(Math.max(0, len - numChars));
-        }
-        case 'LEN': {
-          requireArgs(1);
-          return getStr(args[0]).length;
-        }
-        case 'UPPER': {
-          requireArgs(1);
-          return getStr(args[0]).toUpperCase();
-        }
-        case 'LOWER': {
-          requireArgs(1);
-          return getStr(args[0]).toLowerCase();
-        }
-        case 'TRIM': {
-          requireArgs(1);
-          return getStr(args[0]).trim();
-        }
-        case 'SUBSTITUTE': {
-          requireArgs(3);
-          const text = getStr(args[0]);
-          const oldText = getStr(args[1]);
-          const newText = getStr(args[2]);
-          const instanceNum = args.length > 3 ? Math.floor(parseFloat(args[3]) || 0) : 0;
-
-          if (instanceNum === 0) {
-            return text.split(oldText).join(newText);
-          } else {
-            let count = 0;
-            let result = '';
-            for (let i = 0; i < text.length; i++) {
-              if (text.substring(i, i + oldText.length) === oldText) {
-                count++;
-                if (count === instanceNum) {
-                  result += newText;
-                  i += oldText.length - 1;
-                  continue;
-                }
-              }
-              result += text[i];
-            }
-            return result;
-          }
-        }
-        default:
-          return createError(ErrorCodes.UNKNOWN_FUNCTION);
-      }
-    } catch (e) {
-      if (e.message && e.message.startsWith('#')) return e.message;
-      return createError(ErrorCodes.VALUE_ERROR);
-    }
-  }
-
-  /**
-   * 逻辑函数
-   */
-  evalLogic(fnName, args, context) {
-    const toBool = (val) => {
-      if (typeof val === 'string' && val.startsWith('#')) throw new Error(val);
-      if (typeof val === 'boolean') return val;
-      if (typeof val === 'number') return val !== 0;
-      if (typeof val === 'string') {
-        const upper = val.toUpperCase();
-        if (upper === 'TRUE') return true;
-        if (upper === 'FALSE') return false;
-        return val !== '';
-      }
-      return Boolean(val);
-    };
-
-    const requireArgs = (minCount) => {
-      if (args.length < minCount) {
-        throw new Error(`${fnName} 至少需要 ${minCount} 个参数`);
-      }
-    };
-
-    try {
-      switch (fnName) {
-        case 'IF': {
-          requireArgs(2);
-          const condition = toBool(args[0]);
-          return condition ? args[1] : (args.length > 2 ? args[2] : false);
-        }
-        case 'AND': {
-          requireArgs(1);
-          for (const arg of args) {
-            if (!toBool(arg)) return false;
-          }
-          return true;
-        }
-        case 'OR': {
-          requireArgs(1);
-          for (const arg of args) {
-            if (toBool(arg)) return true;
-          }
-          return false;
-        }
-        case 'NOT': {
-          requireArgs(1);
-          return !toBool(args[0]);
-        }
-        default:
-          return createError(ErrorCodes.UNKNOWN_FUNCTION);
-      }
-    } catch (e) {
-      if (e.message && e.message.startsWith('#')) return e.message;
-      return createError(ErrorCodes.VALUE_ERROR);
-    }
-  }
-
-  /**
-   * 日期函数
-   */
-  evalDate(fnName, args, context) {
-    const parseDate = (val) => {
-      if (typeof val === 'string' && val.startsWith('#')) throw new Error(val);
-      if (val instanceof Date) return val;
-      if (typeof val === 'number') {
-        return new Date((val - 25569) * 86400 * 1000);
-      }
-      const d = new Date(val);
-      return isNaN(d.getTime()) ? null : d;
-    };
-
-    const toExcelDate = (date) => {
-      return Math.floor((date.getTime() / 86400000) + 25569);
-    };
-
-    const requireArgs = (minCount) => {
-      if (args.length < minCount) {
-        throw new Error(`${fnName} 至少需要 ${minCount} 个参数`);
-      }
-    };
-
-    try {
-      switch (fnName) {
-        case 'TODAY': {
-          const now = new Date();
-          return toExcelDate(new Date(now.getFullYear(), now.getMonth(), now.getDate()));
-        }
-        case 'NOW': {
-          const now = new Date();
-          const datePart = toExcelDate(new Date(now.getFullYear(), now.getMonth(), now.getDate()));
-          const timePart = (now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds()) / 86400;
-          return datePart + timePart;
-        }
-        case 'YEAR': {
-          requireArgs(1);
-          const date = parseDate(args[0]);
-          if (!date) return createError(ErrorCodes.VALUE_ERROR);
-          return date.getFullYear();
-        }
-        case 'MONTH': {
-          requireArgs(1);
-          const date = parseDate(args[0]);
-          if (!date) return createError(ErrorCodes.VALUE_ERROR);
-          return date.getMonth() + 1;
-        }
-        case 'DAY': {
-          requireArgs(1);
-          const date = parseDate(args[0]);
-          if (!date) return createError(ErrorCodes.VALUE_ERROR);
-          return date.getDate();
-        }
-        case 'HOUR': {
-          requireArgs(1);
-          const date = parseDate(args[0]);
-          if (!date) return createError(ErrorCodes.VALUE_ERROR);
-          return date.getHours();
-        }
-        case 'MINUTE': {
-          requireArgs(1);
-          const date = parseDate(args[0]);
-          if (!date) return createError(ErrorCodes.VALUE_ERROR);
-          return date.getMinutes();
-        }
-        case 'SECOND': {
-          requireArgs(1);
-          const date = parseDate(args[0]);
-          if (!date) return createError(ErrorCodes.VALUE_ERROR);
-          return date.getSeconds();
-        }
-        case 'DATE': {
-          requireArgs(3);
-          const year = Math.floor(parseFloat(args[0]) || 0);
-          const month = Math.floor(parseFloat(args[1]) || 0) - 1;
-          const day = Math.floor(parseFloat(args[2]) || 0);
-          const date = new Date(year, month, day);
-          return toExcelDate(date);
-        }
-        case 'DATEDIF': {
-          requireArgs(3);
-          const startDate = parseDate(args[0]);
-          const endDate = parseDate(args[1]);
-          const unit = String(args[2]).toUpperCase();
-
-          if (!startDate || !endDate) return createError(ErrorCodes.VALUE_ERROR);
-
-          switch (unit) {
-            case 'Y': {
-              let years = endDate.getFullYear() - startDate.getFullYear();
-              if (endDate.getMonth() < startDate.getMonth() ||
-                  (endDate.getMonth() === startDate.getMonth() && endDate.getDate() < startDate.getDate())) {
-                years--;
-              }
-              return years;
-            }
-            case 'M': {
-              const months = (endDate.getFullYear() - startDate.getFullYear()) * 12 +
-                            endDate.getMonth() - startDate.getMonth();
-              if (endDate.getDate() < startDate.getDate()) {
-                return months - 1;
-              }
-              return months;
-            }
-            case 'D': {
-              return Math.floor((endDate - startDate) / 86400000);
-            }
-            case 'YM': {
-              let months = endDate.getMonth() - startDate.getMonth();
-              if (endDate.getDate() < startDate.getDate()) {
-                months--;
-              }
-              return months < 0 ? months + 12 : months;
-            }
-            case 'YD': {
-              const start = new Date(startDate);
-              const end = new Date(endDate);
-              start.setFullYear(endDate.getFullYear());
-              if (start > end) {
-                start.setFullYear(endDate.getFullYear() - 1);
-              }
-              return Math.floor((end - start) / 86400000);
-            }
-            case 'MD': {
-              let days = endDate.getDate() - startDate.getDate();
-              return days < 0 ? days + 32 : days;
-            }
-            default:
-              return createError(ErrorCodes.VALUE_ERROR);
-          }
-        }
-        default:
-          return createError(ErrorCodes.UNKNOWN_FUNCTION);
-      }
-    } catch (e) {
-      if (e.message && e.message.startsWith('#')) return e.message;
-      return createError(ErrorCodes.VALUE_ERROR);
-    }
-  }
-
-  /**
-   * 计算 RPN 表达式
-   */
-  evaluateRPN(rpn, context) {
-    const stack = [];
-    const REF_RANGE_TYPE = 'REF_RANGE';
-
-    for (let i = 0; i < rpn.length; i++) {
-      const token = rpn[i];
-      const tokenType = token.type;
-
-      if (tokenType === 'number') {
-        stack.push(parseFloat(token.value) || 0);
-      } else if (tokenType === 'string') {
-        stack.push(token.value);
-      } else if (tokenType === 'boolean') {
-        stack.push(token.value === 'TRUE');
-      } else if (tokenType === 'cell') {
-        const { r, c } = refToRC(token.value);
-        const val = this.getCellFromData(r, c, context?.stack || []);
-        stack.push(this.parseCellValue(val));
-      } else if (tokenType === 'range') {
-        stack.push({ type: REF_RANGE_TYPE, ref: token.value.toUpperCase() });
-      } else if (tokenType === 'op') {
-        const b = this.resolveToScalar(stack.pop(), context);
-        const a = this.resolveToScalar(stack.pop(), context);
-        
-        if (typeof a === 'string' && a.startsWith('#')) { stack.push(a); continue; }
-        if (typeof b === 'string' && b.startsWith('#')) { stack.push(b); continue; }
-
-        const op = token.value;
-        if (op === '+') {
-          if (typeof a === 'string' || typeof b === 'string') {
-            stack.push(String(a) + String(b));
-          } else {
-            stack.push(a + b);
-          }
-        } else if (op === '-') stack.push(a - b);
-        else if (op === '*') stack.push(a * b);
-        else if (op === '/') {
-          if (b === 0) {
-            return createError(ErrorCodes.DIVISION_BY_ZERO);
-          }
-          stack.push(a / b);
-        }
-      } else if (tokenType === 'compare') {
-        const b = this.resolveToScalar(stack.pop(), context);
-        const a = this.resolveToScalar(stack.pop(), context);
-        
-        if (typeof a === 'string' && a.startsWith('#')) { stack.push(a); continue; }
-        if (typeof b === 'string' && b.startsWith('#')) { stack.push(b); continue; }
-        
-        stack.push(this.compare(a, b, token.value));
-      } else if (tokenType === 'fn') {
-        const args = this.collectArgs(stack);
-        const fnName = token.value;
-        stack.push(this.evaluateFunction(fnName, args, context));
-      }
-    }
-
-    if (stack.length === 0) {
-      return createError(ErrorCodes.FORMULA_ERROR);
-    }
-
-    const final = stack[0];
-    if (final && typeof final === 'object' && final.type === REF_RANGE_TYPE) {
-      return this.resolveToScalar(final, context);
-    }
-
-    return final;
-  }
-
-  /**
-   * 计算单个公式
-   */
-  evaluate(formula, context = {}) {
-    if (!formula || !formula.startsWith('=')) return formula;
-
-    try {
-      const rpn = this.parser.parse(formula);
-      if (!rpn) {
-        return createError(ErrorCodes.FORMULA_ERROR);
-      }
-      return this.evaluateRPN(rpn, context);
-    } catch (e) {
-      if (e.message === '#CYCLE!') {
-        return createError(ErrorCodes.CIRCULAR_REFERENCE);
-      }
-      return createError(ErrorCodes.FORMULA_ERROR);
-    }
-  }
-}
-
 // ========== Worker 消息处理 ==========
 
+/** @type {FormulaRPNEvaluator|null} */
 let evaluator = null;
 
 /**
- * 初始化计算器（复用实例，仅更新 dataProvider）
+ * 创建/更新 Worker 端共享公式求值器实例。
+ * 通过 getCellValue 回调桥接 Worker 的 dataProvider 模式到共享 RPN 引擎。
  */
-function initEvaluator(dataProvider) {
+function ensureEvaluator(dataProvider) {
+  const getCellValue = (r, c, stack) => {
+    const key = cellKey(r, c);
+    // 循环引用检测由共享引擎内置的 _getCell 处理，此处仅提供原始值
+    return dataProvider(key, stack);
+  };
+
   if (evaluator) {
-    evaluator.dataProvider = dataProvider;
+    // 更新 getCellValue 回调以使用新的 dataProvider
+    evaluator._getCellValue = getCellValue;
   } else {
-    evaluator = new FormulaWorkerEvaluator(dataProvider);
+    evaluator = new FormulaRPNEvaluator({ getCellValue });
   }
 }
 
@@ -1046,11 +103,6 @@ function initEvaluator(dataProvider) {
  */
 function handleEvaluate(task) {
   const { formula, cellId, context } = task;
-
-  // WASM 路径加速尝试
-  if (wasmBridge && wasmBridge.isLoaded) {
-    // 逻辑：如果公式属于高性能算子，则调用 WASM
-  }
 
   let result = evaluator.evaluate(formula, context);
   if (typeof result === 'number' && isNaN(result)) {
@@ -1096,17 +148,41 @@ function handleEvaluateBatch(task) {
   };
 
   // 初始化计算器
-  initEvaluator(dataProvider);
+  ensureEvaluator(dataProvider);
 
   // 按拓扑顺序计算
   const sortedFormulas = topologicalSort(formulas, data, evaluator.parser);
 
-  for (const { cellId, formula } of sortedFormulas) {
-    let result = evaluator.evaluate(formula, { stack: [cellId] });
-    if (typeof result === 'number' && isNaN(result)) {
-      result = createError(ErrorCodes.VALUE_ERROR);
+  const hasSharedMemory = sharedBufferView !== null || sharedChunks.size > 0;
+
+  for (const { cellId, formula, hasCycle } of sortedFormulas) {
+    let result;
+    if (hasCycle) {
+      result = '#CYCLE!';
+    } else {
+      try {
+        result = evaluator.evaluate(formula, { stack: [cellId] });
+        if (typeof result === 'number' && isNaN(result)) {
+          result = createError(ErrorCodes.VALUE_ERROR);
+        }
+      } catch (e) {
+        // 防御性捕获：当局部拓扑排序因缺少全局依赖图而漏检环时，
+        // RPN 求值器会通过栈检测发现环引用并抛出 #CYCLE! 异常。
+        if (e.message === '#CYCLE!') {
+          result = '#CYCLE!';
+        } else {
+          result = createError(ErrorCodes.FORMULA_ERROR);
+        }
+      }
     }
     results[cellId] = result;
+    // 关键修复：非数字结果（如 #CYCLE!）必须在 SharedArrayBuffer 中
+    // 写入 EMPTY_VALUE（-Infinity），防止主线程 getCellValue 读取到
+    // WASM 引擎残留的默认值 0.0，导致渲染层显示 0 而非错误字符串。
+    if (hasSharedMemory && (typeof result !== 'number' || isNaN(result))) {
+      const { r, c } = parseCellKey(cellId);
+      setSharedValue(r, c, EMPTY_VALUE);
+    }
     // 更新数据以供后续公式使用
     if (data[cellId]) {
       data[cellId].v = result;
@@ -1121,7 +197,7 @@ function handleEvaluateBatch(task) {
  * 拓扑排序
  */
 function topologicalSort(formulas, data, parser) {
-  if (!parser) parser = new FormulaWorkerParser();
+  if (!parser) parser = new FormulaRPNEvaluator({ getCellValue: () => null }).parser;
   const cellMap = new Map();
   const inDegree = new Map();
   const reverseDeps = new Map(); // 逆向依赖映射: A -> [B, C] 表示 B 和 C 都依赖 A
@@ -1185,6 +261,7 @@ function topologicalSort(formulas, data, parser) {
     const resultKeys = new Set(result.map(fc => fc.cellId));
     for (const fc of formulas) {
       if (!resultKeys.has(fc.cellId)) {
+        fc.hasCycle = true;
         result.push(fc);
       }
     }
@@ -1268,26 +345,69 @@ function serializeResultsTransferable(results) {
 
 // ========== Worker 入口 ==========
 
+/**
+ * Worker 端 WASM 共享内存绑定 / 重新绑定
+ *
+ * 当 sharedChunks 包含 continuousBuffer（连续缓冲区）时，优先使用其绑定 WASM；
+ * 兼容旧格式直接传入 SharedArrayBuffer 实例的场景。
+ *
+ * 每次主线程发送消息时都会调用此函数：
+ * - WASM 已加载：立即 re-bind（缓冲区扩容后 continuousBuffer 指向新 SAB）
+ * - WASM 未加载：跳过（由异步初始化路径处理首次绑定）
+ */
+function tryBindWasmMemory(sharedChunks) {
+  if (!wasmBridge || !wasmBridge.isLoaded) return;
+
+  if (sharedChunks && sharedChunks.continuousBuffer instanceof SharedArrayBuffer) {
+    // 新格式：从序列化对象中获取连续缓冲区
+    wasmBridge.rebindSharedMemory(
+      sharedChunks.continuousBuffer,
+      sharedChunks.continuousRows || sharedMaxRows,
+      sharedChunks.continuousCols || sharedMaxCols
+    );
+  } else if (sharedChunks instanceof SharedArrayBuffer) {
+    // 旧格式兼容：直接传入 SharedArrayBuffer
+    wasmBridge.bindSharedMemory(sharedChunks, sharedMaxRows, sharedMaxCols);
+  }
+}
+
+function postWasmInitFailed(error, phase = 'wasm-bridge') {
+  const message = error?.message || String(error || 'Unknown WASM initialization error');
+  console.warn('WASM bridge loading skipped:', error);
+  self.postMessage({
+    type: 'init-failed',
+    subsystem: 'wasm',
+    phase,
+    error: message,
+    fallback: 'js'
+  });
+}
+
 self.onmessage = function(e) {
   const { type, taskId, useTransferable, buffer, sharedChunks, sharedRows, sharedCols, ...task } = e.data;
-  
+
   if (sharedRows) sharedMaxRows = sharedRows;
   if (sharedCols) sharedMaxCols = sharedCols;
 
-  // 更新共享内存
+  // 更新共享内存分块视图 + WASM 绑定/重新绑定
   if (sharedChunks) {
     updateSharedChunks(sharedChunks);
-    
-    // 异步加载 WASM 桥接
+
+    // 同步路径：WASM 已加载 → 立即重新绑定（处理缓冲区扩容后的 rebind）
+    tryBindWasmMemory(sharedChunks);
+
+    // 异步路径：首次加载 WASM 桥接
     if (!wasmBridge) {
       import('../core/worker/WasmBridge.js').then(m => {
-        wasmBridge = m.wasmBridge;
-        wasmBridge.init().then(() => {
-          if (sharedChunks instanceof SharedArrayBuffer) {
-             wasmBridge.bindSharedMemory(sharedChunks, sharedMaxRows, sharedMaxCols);
-          }
-        });
-      }).catch(err => console.warn('WASM bridge loading skipped:', err));
+        wasmBridge = new m.WasmBridge();
+        return wasmBridge.init();
+      }).then((loaded) => {
+        if (!loaded) {
+          const status = wasmBridge?.getStatus ? wasmBridge.getStatus() : {};
+          throw new Error(status.fallbackReason || 'WASM bridge initialization returned false');
+        }
+        tryBindWasmMemory(sharedChunks);
+      }).catch(err => postWasmInitFailed(err));
     }
   }
   const startTime = performance.now();
@@ -1378,18 +498,19 @@ function handleRecalcAll(task) {
     return cell.v;
   };
 
-  initEvaluator(dataProvider);
+  ensureEvaluator(dataProvider);
 
   // 2. 拓扑排序
   const sortedFormulas = topologicalSort(formulas, data, evaluator.parser);
   
   // 3. 顺序计算
   for (const fc of sortedFormulas) {
-    const { cellId, formula } = fc;
+    const { cellId, formula, hasCycle } = fc;
     let result;
 
-    // 尝试 WASM 加速 (如果适用)
-    if (wasmBridge && wasmBridge.isLoaded && isWasmFastPathSupported(formula)) {
+    if (hasCycle) {
+      result = '#CYCLE!';
+    } else if (wasmBridge && wasmBridge.isLoaded && isWasmFormulaSupported(formula)) {
         try {
             const wasmResult = wasmBridge.evaluate(formula);
             if ((typeof wasmResult === 'number' && !isNaN(wasmResult)) || (typeof wasmResult === 'string' && !wasmResult.startsWith('#'))) {
@@ -1410,12 +531,19 @@ function handleRecalcAll(task) {
     
     // 4. 写回结果
     const { r, c } = parseCellKey(cellId);
-    if (typeof result === 'number' && !isNaN(result)) {
-        // 如果是数字且非 NaN，直接更新共享内存，减少消息传输体积
+    // 检测共享内存是否实际可用（Worker 中是否有有效视图/分块）
+    // 在缺少 COOP/COEP 头或浏览器不支持 SharedArrayBuffer 时，
+    // sharedBufferView 和 sharedChunks 均为空，必须走 results 回传路径
+    const hasSharedMemory = sharedBufferView !== null || sharedChunks.size > 0;
+    if (typeof result === 'number' && !isNaN(result) && hasSharedMemory) {
+        // 数字结果且共享内存可用时，写入共享内存减少传输体积
         setSharedValue(r, c, result);
     } else {
-        // 否则记录到结果集返回 (包括错误字符串和 NaN 转换后的错误)
+        // 共享内存不可用时回退到 results 传输，或非数字结果
         results[cellId] = result;
+        if (hasSharedMemory) {
+            setSharedValue(r, c, EMPTY_VALUE);
+        }
     }
     
     // 更新本地数据引用，供后续公式依赖使用
@@ -1425,11 +553,6 @@ function handleRecalcAll(task) {
   }
 
   return results;
-}
-
-function isWasmFastPathSupported(formula) {
-    // 简单数学公式优先走 WASM
-    return !formula.includes('"') && !formula.includes('CONCAT');
 }
 
 function setSharedValue(r, c, val) {

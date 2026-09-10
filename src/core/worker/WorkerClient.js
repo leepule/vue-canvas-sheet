@@ -26,6 +26,7 @@ export class WorkerClient {
     this.requestIdField = options.requestIdField || 'taskId';
     this.waitForReady = options.waitForReady === true;
     this.isReadyMessage = options.isReadyMessage || ((data) => data && data.type === 'ready');
+    this.isFatalMessage = options.isFatalMessage || null;
     this.createWorker = options.createWorker;
     this.onError = options.onError || null;
 
@@ -80,6 +81,14 @@ export class WorkerClient {
 
   _handleMessage(event) {
     const data = event.data;
+    if (this.isFatalMessage && this.isFatalMessage(data)) {
+      const error = new Error(data?.error || `${this.name} initialization failed`);
+      error.code = data?.type || 'WORKER_FATAL_MESSAGE';
+      error.detail = data;
+      this._handleError(error);
+      return;
+    }
+
     if (this.waitForReady && this.isReadyMessage(data)) {
       this._resolveReady();
       return;

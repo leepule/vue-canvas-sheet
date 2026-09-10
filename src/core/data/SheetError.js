@@ -272,22 +272,16 @@ export class ErrorHandler {
   }
 
   /**
-   * 包装函数，自动捕获错误
+   * 包装函数，自动捕获错误（同步 throw 与异步 Promise rejection 均覆盖）
    * @param {Function} fn - 要包装的函数
    * @param {Object} [defaultContext] - 默认上下文
-   * @returns {Function} 包装后的函数
+   * @returns {Function} 包装后的 async 函数
    */
   wrap(fn, defaultContext = {}) {
-    return (...args) => {
+    return async (...args) => {
       try {
-        const result = fn(...args);
-        // 处理 Promise 返回值
-        if (result && typeof result.then === 'function') {
-          return result.catch(err => {
-            throw this.handle(err, { ...defaultContext, args });
-          });
-        }
-        return result;
+        // await 统一处理同步/异步：同步 throw 会被 await 转为 reject 进入 catch
+        return await fn(...args);
       } catch (err) {
         throw this.handle(err, { ...defaultContext, args });
       }
@@ -295,19 +289,19 @@ export class ErrorHandler {
   }
 
   /**
-   * 安全执行函数，错误时返回默认值
+   * 安全执行函数，错误时返回默认值。
+   * 改为 async 以正确捕获同步 throw 与异步 Promise rejection，
+   * 保证调用方始终拿到同步的 defaultValue（通过 await 解包）。
    * @param {Function} fn - 要执行的函数
    * @param {*} defaultValue - 错误时的默认值
    * @param {Object} [context] - 错误上下文
-   * @returns {*} 函数结果或默认值
+   * @returns {Promise<*>} 函数结果或默认值（总是 Promise，需 await）
    */
-  safeExecute(fn, defaultValue, context = {}) {
+  async safeExecute(fn, defaultValue, context = {}) {
     try {
-      const result = fn();
-      if (result && typeof result.then === 'function') {
-        return result.catch(() => defaultValue);
-      }
-      return result;
+      // await 统一处理同步/异步函数：同步 throw → rejected Promise → catch
+      // Promise reject → await 抛出 → catch
+      return await fn();
     } catch (err) {
       this.handle(err, context);
       return defaultValue;
@@ -378,12 +372,12 @@ export function handleError(error, context) {
 }
 
 /**
- * 便捷方法：安全执行
+ * 便捷方法：安全执行（async — 总是返回 Promise）
  * @param {Function} fn - 函数
  * @param {*} defaultValue - 默认值
  * @param {Object} [context] - 上下文
- * @returns {*}
+ * @returns {Promise<*>}
  */
-export function safeExecute(fn, defaultValue, context) {
+export async function safeExecute(fn, defaultValue, context) {
   return defaultErrorHandler.safeExecute(fn, defaultValue, context);
 }

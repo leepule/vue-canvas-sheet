@@ -12,6 +12,19 @@
  * 2. 绑定 SharedArrayBuffer
  * 3. 调度求值请求
  */
+const defaultWasmLoader = () => import('../../wasm/pkg/table_wasm_engine.js');
+let defaultWasmRuntimePromise = null;
+
+function loadDefaultWasmRuntime() {
+  if (!defaultWasmRuntimePromise) {
+    defaultWasmRuntimePromise = defaultWasmLoader().then(async (wasmModule) => {
+      await wasmModule.default();
+      return wasmModule;
+    });
+  }
+  return defaultWasmRuntimePromise;
+}
+
 export class WasmBridge {
   constructor(options = {}) {
     this.engine = null;
@@ -20,9 +33,11 @@ export class WasmBridge {
     this.sharedMemoryEnabled = false;
     this.fallbackReason = null;
     this.lastError = null;
+    this._lifecycleVersion = 0;
+    this._usesDefaultRuntime = !options.wasmLoader && !options.wasmUrl && !options.wasmBinary;
     
     // 灵活的加载选项
-    this.wasmLoader = options.wasmLoader || (() => import('../../wasm/pkg/table_wasm_engine.js'));
+    this.wasmLoader = options.wasmLoader || defaultWasmLoader;
 
     this.wasmUrl = options.wasmUrl || null;
     this.wasmBinary = options.wasmBinary || null;
@@ -34,25 +49,16 @@ export class WasmBridge {
   async init() {
     if (this.loadPromise) return this.loadPromise;
 
+    const lifecycleVersion = this._lifecycleVersion;
     this.loadPromise = (async () => {
       try {
         this.fallbackReason = null;
         this.lastError = null;
         
-        // 1. 获取胶水代码模块
-        const wasm = await this.wasmLoader();
-        
-        // 2. 确定输入源 (优先级: 二进制 > 显式URL > 默认行为)
-        let input = undefined;
-        if (this.wasmBinary) {
-          input = this.wasmBinary;
-        } else if (this.wasmUrl) {
-          input = this.wasmUrl;
-        }
-
-        // 3. 执行 WASM 实例化 (wasm-pack 生成的默认导出是 init 函数)
-        // 在 Vite 环境下，如果不传 input，它会尝试 fetch('table_wasm_engine_bg.wasm')
-        await wasm.default(input);
+        const wasm = this._usesDefaultRuntime
+          ? await loadDefaultWasmRuntime()
+          : await this._loadConfiguredRuntime();
+        if (lifecycleVersion !== this._lifecycleVersion) return false;
         
         this.engine = new wasm.FormulaEngine();
         this.isLoaded = true;
@@ -60,6 +66,7 @@ export class WasmBridge {
         console.log('WASM Formula Engine Loaded');
         return true;
       } catch (err) {
+        if (lifecycleVersion !== this._lifecycleVersion) return false;
         this.engine = null;
         this.isLoaded = false;
         this.sharedMemoryEnabled = false;
@@ -71,6 +78,13 @@ export class WasmBridge {
     })();
 
     return this.loadPromise;
+  }
+
+  async _loadConfiguredRuntime() {
+    const wasmModule = await this.wasmLoader();
+    const input = this.wasmBinary || this.wasmUrl || undefined;
+    await wasmModule.default(input);
+    return wasmModule;
   }
 
   /**
@@ -145,7 +159,7 @@ export class WasmBridge {
    * 消除 JS 与 WASM 之间的字符串跨界拷贝开销
    */
   evaluateGroups(groupedTasks) {
-    if (!this.isLoaded || !this.engine) return {};
+    if (!this.isLoaded || !this.engine) return null;
 
     let allNonNumeric = {};
 
@@ -162,15 +176,26 @@ export class WasmBridge {
 
         // 零拷贝路径：Rust 已直接写入 SharedArrayBuffer，跳过 JS 侧循环
         // 降级路径：无共享内存时 numeric_results 存在，从 JS 侧写回
-        if (numeric_results && this.sharedView) {
+        if (numeric_results) {
           const len = rows.length;
-          const gridCols = this.engine.get_grid_cols();
-          for (let i = 0; i < len; i++) {
-            const val = numeric_results[i];
-            if (!isNaN(val)) {
-              const idx = rows[i] * gridCols + cols[i];
-              if (idx < this.sharedView.length) {
-                this.sharedView[idx] = val;
+          if (this.sharedView) {
+            const gridCols = this.engine.get_grid_cols();
+            for (let i = 0; i < len; i++) {
+              const val = numeric_results[i];
+              if (!isNaN(val)) {
+                const idx = rows[i] * gridCols + cols[i];
+                if (idx < this.sharedView.length) {
+                  this.sharedView[idx] = val;
+                }
+              }
+            }
+          } else {
+            // 无共享内存：数值结果通过返回值交付主线程。
+            // NaN 为非数字单元的占位符，其正确值已在 non_numeric_results 中，跳过以免覆盖。
+            for (let i = 0; i < len; i++) {
+              const val = numeric_results[i];
+              if (!isNaN(val)) {
+                allNonNumeric[ids[i]] = val;
               }
             }
           }
@@ -179,7 +204,7 @@ export class WasmBridge {
       return allNonNumeric;
     } catch (err) {
       console.error('[WasmBridge] Group Evaluation Crash:', err);
-      return {};
+      return null;
     }
   }
 
@@ -198,6 +223,7 @@ export class WasmBridge {
   rebindSharedMemory(sab, rows, cols) {
     if (this.isLoaded && this.engine) {
       this.engine.init_shared_memory(sab, rows, cols);
+      this.sharedView = new Float64Array(sab); // 关键修复：绑定新视图，防止使用旧的被回收的 SharedArrayBuffer
     }
   }
 
@@ -224,6 +250,8 @@ export class WasmBridge {
    * 销毁 WASM 引擎并释放资源
    */
   destroy() {
+    this._lifecycleVersion++;
+    const engine = this.engine;
     this.engine = null;
     this.sharedView = null;
     this.isLoaded = false;
@@ -231,8 +259,8 @@ export class WasmBridge {
     this.loadPromise = null;
     this.fallbackReason = null;
     this.lastError = null;
+    if (engine && typeof engine.free === 'function') {
+      engine.free();
+    }
   }
 }
-
-// 单例模式
-export const wasmBridge = new WasmBridge();

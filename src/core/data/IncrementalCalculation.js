@@ -5,14 +5,33 @@
  */
 import { DirtyBitset } from './DirtyBitset.js';
 import { Events } from '../events/EventEmitter.js';
-import { formulaCompiler } from './FormulaCompiler.js';
 import { cellKey, cellKeyNumeric, decodeNumeric } from './CellKey.js';
-import { wasmBridge } from '../worker/WasmBridge.js';
 
 export class IncrementalCalculationEngine {
-  constructor(workbook) {
-    this.workbook = workbook;
-    
+  /**
+   * @param {{
+   *   getColCount: () => number,
+   *   getDataMatrix: () => Object,
+   *   parseKey: (k: string|number) => {r:number,c:number},
+   *   cellKey: (r: number, c: number) => string,
+   *   getNumericDepIndex: () => Map<number, Set<number>>,
+   *   getDependencyMap: () => Map,
+   *   getReverseDependencyMap: () => Map,
+   *   getRangeDependencyIndex: () => Object,
+   *   dropNumericDepSource: (src: string) => void,
+   *   evaluateFormula: (formula: string, r: number, c: number, stack?: string[]) => any,
+   *   checkCycle: (r: number, c: number, cache?: Set) => boolean,
+   *   syncSharedValue: (r: number, c: number, v: any) => void,
+   *   emit: (event: string, payload: object) => void,
+   *   isWorkerEnabled: () => boolean,
+   *   getWorkerManager: () => any,
+   *   recalcDirtyWithWorker: (cellIds: string[]) => Promise<object>,
+   * }} deps
+   */
+  constructor(deps) {
+    /** @type {Object} */
+    this.d = deps;
+
     // 计算缓存
     this.calcCache = new Map();
     this.cacheVersion = 0;
@@ -20,7 +39,7 @@ export class IncrementalCalculationEngine {
 
     // 依赖图优化
     // colHint 来自 workbook，用于让 DirtyBitset 行初始字数按实际列数预留，避免扩容
-    this.dirtyBitset = new DirtyBitset({ colHint: workbook && workbook.colCount });
+    this.dirtyBitset = new DirtyBitset({ colHint: deps && deps.getColCount() });
 
     // 依赖图压缩节流：每累计 N 个批次调度一次孤儿条目清理，避免长会话累积
     this._compactBatchInterval = 32;
@@ -51,7 +70,7 @@ export class IncrementalCalculationEngine {
       lastWorkerPayloadBytes: 0
     };
   }
-  
+
   /**
    * 标记单元格为脏（优化版本：使用位图）
    */
@@ -65,7 +84,7 @@ export class IncrementalCalculationEngine {
   }
 
   _markDirtyGraphNumeric(numericKeys) {
-    const wb = this.workbook;
+    const d = this.d;
     const queue = this._reusableQueue;
     const visited = this._reusableVisited;
     queue.length = 0;
@@ -73,7 +92,9 @@ export class IncrementalCalculationEngine {
     let newDirty = false;
 
     // 常驻 numeric 依赖索引（在 Workbook 写入点增量维护），无需每次重建
-    const numericDepIndex = wb._numericDepIndex;
+    const numericDepIndex = d.getNumericDepIndex();
+    const dataMatrix = d.getDataMatrix();
+    const rangeDependencyIndex = d.getRangeDependencyIndex();
 
     const enqueue = (nk) => {
       if (visited.has(nk)) return;
@@ -94,7 +115,7 @@ export class IncrementalCalculationEngine {
         newDirty = true;
       }
 
-      const cell = wb._dataMatrix.get(r, c);
+      const cell = dataMatrix.get(r, c);
       if (cell && cell.f) {
         cell.dirty = true;
       }
@@ -107,10 +128,10 @@ export class IncrementalCalculationEngine {
         }
       }
 
-      if (wb.rangeDependencyIndex) {
-        const rangeDependents = wb.rangeDependencyIndex.findDependents(r, c);
+      if (rangeDependencyIndex) {
+        const rangeDependents = rangeDependencyIndex.findDependents(r, c);
         for (const depId of rangeDependents) {
-          const parsed = wb._parseKey(depId);
+          const parsed = d.parseKey(depId);
           if (Number.isFinite(parsed.r) && Number.isFinite(parsed.c) && parsed.r >= 0 && parsed.c >= 0) {
             enqueue(cellKeyNumeric(parsed.r, parsed.c));
           }
@@ -120,7 +141,7 @@ export class IncrementalCalculationEngine {
 
     return newDirty;
   }
-  
+
   /**
    * 调度批量计算
    */
@@ -132,7 +153,7 @@ export class IncrementalCalculationEngine {
       this._processDirtyCells();
     }, this.batchDelay);
   }
-  
+
   /**
    * 处理脏单元格（优化版本：基于位图遍历）
    */
@@ -143,12 +164,11 @@ export class IncrementalCalculationEngine {
     const { queue } = this._collectDirtyGraph();
 
     // 批量计算
-    const dispatchedToWorker = this._calculateBatch(queue);
+    this._calculateBatch(queue);
 
-    // Worker 路径不立即清空位图，等 Worker 完成后再清；主线程路径直接清
-    if (!dispatchedToWorker) {
-      this.dirtyBitset.clear();
-    }
+    // 无论是否分发到 Worker，我们都直接清空位图。
+    // 如果有并发编辑，新标记的脏单元格又会被加入位图，并在 Worker 完成后重新执行重算。
+    this.dirtyBitset.clear();
     this.stats.lastDirtyCount = dirtyCount;
 
     // 累计批次到阈值后，调度依赖图压缩（清理公式删改产生的孤儿反向依赖）
@@ -187,7 +207,7 @@ export class IncrementalCalculationEngine {
   }
 
   _collectDirtyGraph() {
-    const wb = this.workbook;
+    const d = this.d;
     const queue = this._reusableQueue;
     const visited = this._reusableVisited;
     const priorityMap = this._reusablePriorityMap;
@@ -196,7 +216,8 @@ export class IncrementalCalculationEngine {
     priorityMap.clear();
 
     // 常驻 numeric 依赖索引（在 Workbook 写入点增量维护），无需每次重建
-    const numericDepIndex = wb._numericDepIndex;
+    const numericDepIndex = d.getNumericDepIndex();
+    const rangeDependencyIndex = d.getRangeDependencyIndex();
 
     const enqueue = (nk, priority) => {
       if (!visited.has(nk)) {
@@ -230,10 +251,10 @@ export class IncrementalCalculationEngine {
         }
       }
 
-      if (wb.rangeDependencyIndex && r >= 0 && c >= 0) {
-        const rangeDependents = wb.rangeDependencyIndex.findDependents(r, c);
+      if (rangeDependencyIndex && r >= 0 && c >= 0) {
+        const rangeDependents = rangeDependencyIndex.findDependents(r, c);
         for (const depId of rangeDependents) {
-          const parsed = wb._parseKey(depId);
+          const parsed = d.parseKey(depId);
           if (Number.isFinite(parsed.r) && Number.isFinite(parsed.c) && parsed.r >= 0 && parsed.c >= 0) {
             enqueue(cellKeyNumeric(parsed.r, parsed.c), currentPriority + 1);
           }
@@ -244,28 +265,29 @@ export class IncrementalCalculationEngine {
     queue.sort((a, b) => priorityMap.get(a) - priorityMap.get(b));
     return { queue, priorityMap };
   }
-  
+
   /**
    * 批量计算（带缓存）
    */
   _calculateBatch(numericKeys) {
     const startTime = this._now();
-    const wb = this.workbook;
+    const d = this.d;
+    const dataMatrix = d.getDataMatrix();
     const results = [];
     this.stats.batches++;
     this.stats.lastQueueSize = numericKeys.length;
-    
+
     const uncachedNumeric = [];
     for (const nk of numericKeys) {
       const { r, c } = decodeNumeric(nk);
-      const cell = wb._dataMatrix.get(r, c);
+      const cell = dataMatrix.get(r, c);
       if (!cell || !cell.f) {
         this.stats.formulasSkipped++;
         continue;
       }
 
       const cacheKey = this._getCacheKey(r, c);
-      
+
       if (this.calcCache.has(cacheKey)) {
         const cached = this.calcCache.get(cacheKey);
         if (this._isCacheValid(cached, r, c)) {
@@ -279,26 +301,24 @@ export class IncrementalCalculationEngine {
           continue;
         }
       }
-      
+
       this.stats.cacheMisses++;
       uncachedNumeric.push(nk);
     }
 
-    if (uncachedNumeric.length > 0 && wb._useWorker && wb._workerManager && typeof wb._recalcDirtyWithWorker === 'function') {
+    if (uncachedNumeric.length > 0 && d.isWorkerEnabled() && d.getWorkerManager() && typeof d.recalcDirtyWithWorker === 'function') {
       const uncachedIds = uncachedNumeric.map(nk => {
         const { r, c } = decodeNumeric(nk);
         return cellKey(r, c);
       });
-      // 保存当前脏位图快照，Worker 完成后再清除
-      const dirtySnapshotSize = this.dirtyBitset.size;
       this._workerBusy = true;
-      wb._recalcDirtyWithWorker(uncachedIds)
+      d.recalcDirtyWithWorker(uncachedIds)
         .then((workerResults) => {
           const workerResultList = Object.entries(workerResults || {}).map(([cellId, value]) => ({ cellId, value }));
           this.stats.formulasEvaluated += workerResultList.length;
           this.stats.lastResultCount = results.length + workerResultList.length;
           this.stats.lastDuration = this._now() - startTime;
-          wb._emit(Events.FORMULAS_CALCULATED, {
+          d.emit(Events.FORMULAS_CALCULATED, {
             results: results.concat(workerResultList),
             count: results.length + workerResultList.length,
             worker: true
@@ -313,7 +333,7 @@ export class IncrementalCalculationEngine {
           this._calculateBatchOnMainThread(uncachedNumeric, results);
           this.stats.lastResultCount = results.length;
           this.stats.lastDuration = this._now() - startTime;
-          wb._emit(Events.FORMULAS_CALCULATED, { results, count: results.length, worker: false });
+          d.emit(Events.FORMULAS_CALCULATED, { results, count: results.length, worker: false });
           this._workerBusy = false;
           if (this.dirtyBitset.size > 0) {
             this._scheduleBatchCalc();
@@ -325,85 +345,58 @@ export class IncrementalCalculationEngine {
     this._calculateBatchOnMainThread(uncachedNumeric, results);
     this.stats.lastResultCount = results.length;
     this.stats.lastDuration = this._now() - startTime;
-    wb._emit(Events.FORMULAS_CALCULATED, { results, count: results.length, worker: false });
+    d.emit(Events.FORMULAS_CALCULATED, { results, count: results.length, worker: false });
     return false;
   }
 
+  /**
+   * 主线程批量计算（增量路径）。
+   *
+   * 关键修复：增量重算路径不再使用 WASM evaluateGroups()。
+   * WASM 引擎只能读取 SharedArrayBuffer 中的 Float64 数值，对文本单元格
+   * （如 CONCAT 引用的字符串值）或错误值（#CYCLE! 等），WASM 会将
+   * EMPTY_VALUE (-Infinity) 转为 0.0，导致计算结果错误。
+   *
+   * 增量重算仅涉及少量脏单元格，主线程 JS 求值性能完全足够。
+   * WASM 的 evaluateGroups() 仅在全量重算且整批公式均命中
+   * WasmFormulaSupport 支持矩阵时使用。
+   */
    _calculateBatchOnMainThread(numericKeys, results) {
-    const wb = this.workbook;
-    
-    if (wasmBridge.isLoaded) {
-      const groupedTasks = new Map();
-      const formulaCellMap = new Map();
-
-      for (const nk of numericKeys) {
-        const { r, c } = decodeNumeric(nk);
-        const cell = wb._dataMatrix.get(r, c);
-        
-        if (cell && cell.f) {
-          if (!cell._r1c1) {
-            cell._r1c1 = '=' + formulaCompiler.toR1C1(cell.f, wb, r, c);
-          }
-          const f = cell._r1c1;
-          
-          if (!groupedTasks.has(f)) {
-            groupedTasks.set(f, { rows: [], cols: [], ids: [] });
-          }
-          const group = groupedTasks.get(f);
-          group.rows.push(r);
-          group.cols.push(c);
-          const cellId = cellKey(r, c);
-          group.ids.push(cellId);
-          formulaCellMap.set(cellId, { r, c, cell });
-        }
-      }
-
-      if (groupedTasks.size > 0) {
-        const nonNumericResults = wasmBridge.evaluateGroups(groupedTasks);
-        
-        if (nonNumericResults) {
-          for (const [id, value] of Object.entries(nonNumericResults)) {
-            const info = formulaCellMap.get(id);
-            if (info) info.cell.v = value;
-          }
-        }
-        
-        for (const [cellId, info] of formulaCellMap.entries()) {
-          const { cell } = info;
-          cell.dirty = false;
-          this.stats.formulasEvaluated++;
-          
-          if (wb.sharedValueStore) {
-            let val = wb.getCellValue(info.r, info.c);
-            if (typeof val === 'number' && isNaN(val)) {
-              val = cell.v;
-            }
-            results.push({ cellId, value: val });
-          } else {
-            results.push({ cellId, value: cell.v });
-          }
-          
-          this._cacheResult(info.r, info.c, cell.v, cell.f);
-        }
-        return;
-      }
-    }
+    const d = this.d;
+    const dataMatrix = d.getDataMatrix();
+    // 批次级记忆化缓存：已确认无环的单元格集合。
+    // 避免每个待重算单元格独立发起全向 DFS，将环检测总体复杂度从 O(N·(V+E)) 降至 O(V+E)。
+    const cycleFreeCache = new Set();
 
     for (const nk of numericKeys) {
       const { r, c } = decodeNumeric(nk);
-      const cell = wb._dataMatrix.get(r, c);
-      
+      const cell = dataMatrix.get(r, c);
+
       if (cell && cell.f) {
+        // 环检测：防止自引用（E9=E9）或间接环引用，传入批次缓存以复用 DFS 结果
+        if (d.checkCycle(r, c, cycleFreeCache)) {
+          console.log('[DEBUG] Main thread cycle detected via IncrementalCalculation at:', r, c);
+          cell.v = '#CYCLE!';
+          cell.dirty = false;
+          // 必须显式清空共享内存，否则 getCellValue 渲染热路径可能读取到残留数值
+          d.syncSharedValue(r, c, '#CYCLE!');
+          const cellId = cellKey(r, c);
+          results.push({ cellId, value: '#CYCLE!' });
+          this._cacheResult(r, c, '#CYCLE!', cell.f);
+          continue;
+        }
+
         try {
-          const value = wb.evaluateFormula(cell.f, r, c);
+          // 统一使用 JS RPN 求值器：正确支持数值/文本/逻辑/日期函数及错误传播
+          const value = d.evaluateFormula(cell.f, r, c);
           cell.v = value;
           cell.dirty = false;
+          // 同步到共享内存（数值直接写入，非数值清空为 EMPTY_VALUE）
+          d.syncSharedValue(r, c, value);
           this.stats.formulasEvaluated++;
-          
-          this._cacheResult(r, c, value, cell.f);
-          
           const cellId = cellKey(r, c);
           results.push({ cellId, value });
+          this._cacheResult(r, c, value, cell.f);
         } catch (error) {
           const cellId = cellKey(r, c);
           results.push({ cellId, error });
@@ -411,7 +404,7 @@ export class IncrementalCalculationEngine {
       }
     }
   }
-  
+
   /**
    * 获取缓存键（数字键，避免字符串分配）
    * 使用 r * 1000000 + c 编码，支持最大 100 万列
@@ -419,7 +412,7 @@ export class IncrementalCalculationEngine {
   _getCacheKey(r, c) {
     return r * 1000000 + c;
   }
-  
+
   /**
    * 缓存计算结果
    */
@@ -445,39 +438,36 @@ export class IncrementalCalculationEngine {
 
   /**
    * 解析公式依赖供缓存使用。
-   *
-   * 公式写入时 `_updateDependencyMap` 已对同一公式调用 `getDependencies` 并把
-   * `{cells, ranges}` 存入 `reverseDependencyMap`；这里直接复用该结果，避免对每次
-   * cache miss 重复跑两遍正则与 `_refToRC` 解析（热路径上的正则/字符串分配大头）。
-   *
-   * 注意：必须浅克隆而非共享引用——`compactDependencyGraph` 会原地 `cells.delete`
-   * 修改 `reverseDependencyMap` 中的 Set，若共享会破坏缓存快照导致 `_isCacheValid`
-   * 漏检脏依赖。ranges 元素对象不会被原地修改，`slice` 浅拷贝即可。
-   *
-   * 反向依赖缺失（理论上公式单元格不会发生）时回退到完整解析。
    */
   _resolveDependencies(r, c, formula) {
-    const wb = this.workbook;
-    const reverse = wb.reverseDependencyMap.get(wb._cellKey(r, c));
+    const d = this.d;
+    const cellId = d.cellKey(r, c);
+    const reverseMap = d.getReverseDependencyMap();
+    const reverse = reverseMap.get(cellId);
     if (reverse && (reverse.cells || reverse.ranges)) {
       return {
         cells: reverse.cells ? new Set(reverse.cells) : new Set(),
         ranges: reverse.ranges ? reverse.ranges.slice() : []
       };
     }
-    return wb.getDependencies(formula);
+    // 反向依赖缺失时回退到公式解析
+    if (d.getDependencies) {
+      return d.getDependencies(formula);
+    }
+    return { cells: new Set(), ranges: [] };
   }
 
   /**
    * 检查缓存是否有效
    */
   _isCacheValid(cached, r, c) {
-    const cell = this.workbook._dataMatrix.get(r, c);
+    const d = this.d;
+    const dataMatrix = d.getDataMatrix();
+    const cell = dataMatrix.get(r, c);
     if (!cell || cached.formula !== cell.f) {
       return false;
     }
 
-    // 版本号快路径：自缓存上次校验/创建以来 DirtyBitset 未变更，则无新脏位能影响校验结果
     const currentVersion = this.dirtyBitset.version;
     if (cached.dirtyVersion === currentVersion) {
       return true;
@@ -487,17 +477,15 @@ export class IncrementalCalculationEngine {
       return false;
     }
 
-    // 检查依赖的单元格是否发生变化
     if (cached.dependencies && cached.dependencies.cells) {
       for (const depId of cached.dependencies.cells) {
-        const { r: depR, c: depC } = this.workbook._parseKey(depId);
+        const { r: depR, c: depC } = d.parseKey(depId);
 
-        // 核心修复：如果依赖项本身就在本次变更名单中，或者它是脏的公式，则缓存失效
         if (this.dirtyBitset.has(depR, depC)) {
           return false;
         }
 
-        const depCell = this.workbook._dataMatrix.get(depR, depC);
+        const depCell = dataMatrix.get(depR, depC);
         if (depCell && depCell.dirty) {
           return false;
         }
@@ -512,31 +500,26 @@ export class IncrementalCalculationEngine {
       }
     }
 
-    // 完整校验通过，记录当前版本号供下次快路径使用
     cached.dirtyVersion = currentVersion;
     return true;
   }
-  
+
   /**
    * 压缩依赖图（清理无效的依赖关系，可重入）
-   *
-   * 长会话中公式被反复增删时，workbook 的 dependencyMap / reverseDependencyMap
-   * 会累积指向已不存在公式的孤儿条目。本方法按需扫描清理，
-   * 由 _maybeScheduleCompact 节流触发，也可显式调用。
    */
   compactDependencyGraph() {
-    const wb = this.workbook;
-    const depMap = wb.dependencyMap;
-    const reverseDepMap = wb.reverseDependencyMap;
+    const d = this.d;
+    const depMap = d.getDependencyMap();
+    const reverseDepMap = d.getReverseDependencyMap();
     if (!depMap) return;
 
-    // 移除不存在的单元格的依赖
+    const dataMatrix = d.getDataMatrix();
+
     for (const [srcId, dependents] of depMap) {
-      const { r, c } = wb._parseKey(srcId);
-      const cell = wb._dataMatrix.get(r, c);
+      const { r, c } = d.parseKey(srcId);
+      const cell = dataMatrix.get(r, c);
 
       if (!cell || !cell.f) {
-        // 单元格不存在或不是公式，清理依赖
         for (const depId of dependents) {
           const revDeps = reverseDepMap.get(depId);
           if (revDeps) {
@@ -556,17 +539,13 @@ export class IncrementalCalculationEngine {
           }
         }
         depMap.delete(srcId);
-        // 同步清理常驻 numeric 索引中该源的整条出边
-        if (typeof wb._dropNumericDepSource === 'function') {
-          wb._dropNumericDepSource(srcId);
+        if (d.dropNumericDepSource) {
+          d.dropNumericDepSource(srcId);
         }
       }
     }
   }
 
-  /**
-   * 重置计算引擎状态
-   */
   reset() {
     this.clearCache();
     this.dirtyBitset.clear();
@@ -574,18 +553,12 @@ export class IncrementalCalculationEngine {
     this._batchesSinceCompact = 0;
     this._cancelScheduledCompact();
   }
-  
-  /**
-   * 清空缓存
-   */
+
   clearCache() {
     this.calcCache.clear();
     this.cacheVersion++;
   }
-  
-  /**
-   * 获取缓存统计
-   */
+
   getCacheStats() {
     return {
       size: this.calcCache.size,
@@ -594,7 +567,7 @@ export class IncrementalCalculationEngine {
       ...this.stats
     };
   }
-  
+
   _calculateHitRate() {
     const total = this.stats.cacheHits + this.stats.cacheMisses;
     return total === 0 ? 0 : this.stats.cacheHits / total;
@@ -626,7 +599,7 @@ export class IncrementalCalculationEngine {
       ? performance.now()
       : Date.now();
   }
-  
+
   destroy() {
     if (this.batchTimeout) {
       clearTimeout(this.batchTimeout);

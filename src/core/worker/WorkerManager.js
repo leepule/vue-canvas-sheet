@@ -68,6 +68,7 @@ export class WorkerManager {
         timeout: this.timeout,
         requestIdField: 'taskId',
         waitForReady: true,
+        isFatalMessage: (data) => data && data.type === 'init-failed',
         createWorker: this.createWorker || (() => {
           if (this.workerUrl) {
             return new Worker(this.workerUrl, { type: 'module' });
@@ -76,6 +77,12 @@ export class WorkerManager {
 
         }),
         onError: (error) => {
+          if (error.detail && error.detail.type === 'init-failed') {
+            const phase = error.detail.phase || 'initialization';
+            const subsystem = error.detail.subsystem || 'worker';
+            this._enableFallback(`${subsystem} ${phase} failed: ${error.message || 'unknown'}`);
+            return;
+          }
           this._enableFallback(`Worker error: ${error.message || error.type || 'unknown'}`);
         }
       });
@@ -120,9 +127,15 @@ export class WorkerManager {
     // 惰性初始化：首次 ready/execute 时才创建 Worker
     if (!this.client && !this._initialized) {
       this._initialized = true;
-      this._initWorker();
+      try {
+        this._initWorker();
+      } catch (error) {
+        this._initialized = false;
+        throw error;
+      }
     }
 
+    if (this.isReady) return Promise.resolve();
     if (this.client) return this.client.ready();
     return new Promise((resolve) => {
       this.readyCallbacks.push(resolve);

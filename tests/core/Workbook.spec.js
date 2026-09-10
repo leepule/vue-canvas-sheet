@@ -98,11 +98,11 @@ describe('Workbook', () => {
       test('应该返回单元格值', () => {
         workbook.setCell(0, 0, { v: 42 });
         
-        expect(workbook.getCellValue(0, 0)).toBe(42);
+        expect(workbook.formulaEvaluator.getCellValue(0, 0)).toBe(42);
       });
 
       test('不存在的单元格应返回 null', () => {
-        expect(workbook.getCellValue(100, 100)).toBeNull();
+        expect(workbook.formulaEvaluator.getCellValue(100, 100)).toBeNull();
       });
 
       test('应该正确计算简单公式', () => {
@@ -110,7 +110,7 @@ describe('Workbook', () => {
         workbook.setCell(0, 1, { v: 20 });
         workbook.setCell(0, 2, { v: '=A1+B1' });
         
-        expect(workbook.getCellValue(0, 2)).toBe(30);
+        expect(workbook.formulaEvaluator.getCellValue(0, 2)).toBe(30);
       });
     });
 
@@ -135,6 +135,53 @@ describe('Workbook', () => {
         workbook.undo();
 
         expect(workbook.getCell(0, 0)).toBeNull();
+      });
+
+      test('带样式的批量设置 undo→redo 应保留值与样式（快照解耦）', () => {
+        workbook.bulkSetCells([
+          { r: 0, c: 0, val: { v: 'x', s: { bold: true, color: '#ff0000' } } }
+        ]);
+        workbook.undo();
+        expect(workbook.getCell(0, 0)).toBeNull();
+        workbook.redo();
+        const cell = workbook.getCell(0, 0);
+        expect(cell.v).toBe('x');
+        expect(cell.s.bold).toBe(true);
+        expect(cell.s.color).toBe('#ff0000');
+      });
+    });
+
+    describe('setCell skipEvent/skipHistory（协同远程应用）', () => {
+      test('skipHistory 不写入 history 栈', () => {
+        const before = workbook.history.undoStackSize;
+        workbook.setCell(0, 0, { v: 'remote' }, null, { skipEvent: true, skipHistory: true });
+        expect(workbook.history.undoStackSize).toBe(before);
+      });
+
+      test('不污染活单元格（无 skipEvent 属性泄漏）', () => {
+        workbook.setCell(0, 0, { v: 'remote' }, null, { skipEvent: true, skipHistory: true });
+        const cell = workbook.getCell(0, 0);
+        expect(cell.v).toBe('remote');
+        expect('skipEvent' in cell).toBe(false);
+        expect('skipHistory' in cell).toBe(false);
+      });
+
+      test('skipEvent 不发 CELL_CHANGE 事件', () => {
+        const handler = vi.fn();
+        workbook.on('cell-change', handler);
+        workbook.setCell(0, 0, { v: 'remote' }, null, { skipEvent: true, skipHistory: true });
+        expect(handler).not.toHaveBeenCalled();
+        workbook.off('cell-change', handler);
+      });
+
+      test('默认（无 options）行为不变：发事件且入历史栈', () => {
+        const handler = vi.fn();
+        workbook.on('cell-change', handler);
+        const before = workbook.history.undoStackSize;
+        workbook.setCell(0, 0, { v: 'local' });
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(workbook.history.undoStackSize).toBe(before + 1);
+        workbook.off('cell-change', handler);
       });
     });
 
@@ -214,89 +261,89 @@ describe('Workbook', () => {
       test('getRowPos 应该返回正确的 Y 坐标', () => {
         workbook.setRowHeight(0, 30);
         
-        expect(workbook.getRowPos(0)).toBe(0);
-        expect(workbook.getRowPos(1)).toBe(30);
-        expect(workbook.getRowPos(2)).toBe(55); // 30 + 25
+        expect(workbook.layoutEngine.getRowPos(0)).toBe(0);
+        expect(workbook.layoutEngine.getRowPos(1)).toBe(30);
+        expect(workbook.layoutEngine.getRowPos(2)).toBe(55); // 30 + 25
       });
 
       test('getColPos 应该返回正确的 X 坐标', () => {
         workbook.setColWidth(0, 150);
         
-        expect(workbook.getColPos(0)).toBe(0);
-        expect(workbook.getColPos(1)).toBe(150);
-        expect(workbook.getColPos(2)).toBe(250); // 150 + 100
+        expect(workbook.layoutEngine.getColPos(0)).toBe(0);
+        expect(workbook.layoutEngine.getColPos(1)).toBe(150);
+        expect(workbook.layoutEngine.getColPos(2)).toBe(250); // 150 + 100
       });
 
       test('setRowHeight 应该增量更新已有行偏移缓存', () => {
-        workbook.getRowPos(5);
-        const rowOffsets = workbook._rowOffsets;
+        workbook.layoutEngine.getRowPos(5);
+        const rowOffsets = workbook.layoutEngine._rowOffsets;
 
         workbook.setRowHeight(2, 40);
 
-        expect(workbook._offsetsDirty).toBe(false);
-        expect(workbook._rowOffsets).toBe(rowOffsets);
-        expect(workbook.getRowPos(2)).toBe(50);
-        expect(workbook.getRowPos(3)).toBe(90);
+        expect(workbook.layoutEngine._offsetsDirty).toBe(false);
+        expect(workbook.layoutEngine._rowOffsets).toBe(rowOffsets);
+        expect(workbook.layoutEngine.getRowPos(2)).toBe(50);
+        expect(workbook.layoutEngine.getRowPos(3)).toBe(90);
       });
 
       test('setColWidth 应该增量更新已有列偏移缓存', () => {
-        workbook.getColPos(5);
-        const colOffsets = workbook._colOffsets;
+        workbook.layoutEngine.getColPos(5);
+        const colOffsets = workbook.layoutEngine._colOffsets;
 
         workbook.setColWidth(2, 160);
 
-        expect(workbook._offsetsDirty).toBe(false);
-        expect(workbook._colOffsets).toBe(colOffsets);
-        expect(workbook.getColPos(2)).toBe(200);
-        expect(workbook.getColPos(3)).toBe(360);
+        expect(workbook.layoutEngine._offsetsDirty).toBe(false);
+        expect(workbook.layoutEngine._colOffsets).toBe(colOffsets);
+        expect(workbook.layoutEngine.getColPos(2)).toBe(200);
+        expect(workbook.layoutEngine.getColPos(3)).toBe(360);
       });
 
       test('增量更新行偏移时应该保留已有前缀并补齐数组长度', () => {
         workbook.rowCount = 3;
-        expect(workbook.getRowPos(3)).toBe(75);
+        expect(workbook.layoutEngine.getRowPos(3)).toBe(75);
         workbook._dataStore.setState({ rowCount: 4 });
 
-        workbook._updateRowOffsetsFrom(3);
+        workbook.layoutEngine._updateRowOffsetsFrom(3);
 
-        expect(workbook._offsetsDirty).toBe(false);
-        expect(workbook._rowOffsets).toEqual([0, 25, 50, 75, 100]);
+        expect(workbook.layoutEngine._offsetsDirty).toBe(false);
+        expect(workbook.layoutEngine._rowOffsets).toEqual([0, 25, 50, 75, 100]);
       });
 
       test('增量更新列偏移时应该保留已有前缀并补齐数组长度', () => {
         workbook.colCount = 3;
-        expect(workbook.getColPos(3)).toBe(300);
+        expect(workbook.layoutEngine.getColPos(3)).toBe(300);
         workbook._dataStore.setState({ colCount: 4 });
 
-        workbook._updateColOffsetsFrom(3);
+        workbook.layoutEngine._updateColOffsetsFrom(3);
 
-        expect(workbook._offsetsDirty).toBe(false);
-        expect(workbook._colOffsets).toEqual([0, 100, 200, 300, 400]);
+        expect(workbook.layoutEngine._offsetsDirty).toBe(false);
+        expect(workbook.layoutEngine._colOffsets).toEqual([0, 100, 200, 300, 400]);
       });
 
       test('getRowIndexAt 应该返回正确的行索引', () => {
         workbook.setRowHeight(0, 30);
         
-        expect(workbook.getRowIndexAt(0)).toBe(0);
-        expect(workbook.getRowIndexAt(15)).toBe(0);
-        expect(workbook.getRowIndexAt(30)).toBe(1);
-        expect(workbook.getRowIndexAt(55)).toBe(2);
+        expect(workbook.layoutEngine.getRowIndexAt(0)).toBe(0);
+        expect(workbook.layoutEngine.getRowIndexAt(15)).toBe(0);
+        expect(workbook.layoutEngine.getRowIndexAt(30)).toBe(1);
+        expect(workbook.layoutEngine.getRowIndexAt(55)).toBe(2);
       });
 
       test('getColIndexAt 应该返回正确的列索引', () => {
         workbook.setColWidth(0, 150);
         
-        expect(workbook.getColIndexAt(0)).toBe(0);
-        expect(workbook.getColIndexAt(75)).toBe(0);
-        expect(workbook.getColIndexAt(150)).toBe(1);
-        expect(workbook.getColIndexAt(250)).toBe(2);
+        expect(workbook.layoutEngine.getColIndexAt(0)).toBe(0);
+        expect(workbook.layoutEngine.getColIndexAt(75)).toBe(0);
+        expect(workbook.layoutEngine.getColIndexAt(150)).toBe(1);
+        expect(workbook.layoutEngine.getColIndexAt(250)).toBe(2);
       });
 
       test('totalWidth / totalHeight 应该返回正确的总尺寸', () => {
         workbook.colCount = 5;
         workbook.rowCount = 10;
         
-        expect(workbook.totalWidth).toBe(5 * 100 + 15);
-        expect(workbook.totalHeight).toBe(10 * 25 + 15);
+        expect(workbook.layoutEngine.totalWidth).toBe(5 * 100 + 15);
+        expect(workbook.layoutEngine.totalHeight).toBe(10 * 25 + 15);
       });
     });
   });
@@ -306,7 +353,7 @@ describe('Workbook', () => {
       test('应该在第0行位置插入行', () => {
         workbook.setCell(0, 0, { v: 'original' });
         
-        workbook.insertRow(0);
+        workbook.sheetStructure.insertRow(0);
         
         // 原第0行的数据应该移动到第1行
         expect(workbook.getCell(0, 0)).toBeNull();
@@ -318,7 +365,7 @@ describe('Workbook', () => {
         workbook.setCell(0, 0, { v: 'row0' });
         workbook.setCell(1, 0, { v: 'row1' });
         
-        workbook.insertRow(1);
+        workbook.sheetStructure.insertRow(1);
         
         expect(workbook.getCell(0, 0).v).toBe('row0');
         expect(workbook.getCell(1, 0)).toBeNull();
@@ -330,7 +377,7 @@ describe('Workbook', () => {
         workbook.setCell(1, 0, { v: 'row1' });
         workbook.setCell(2, 0, { v: 'row2' });
         
-        workbook.deleteRow(1);
+        workbook.sheetStructure.deleteRow(1);
         
         expect(workbook.getCell(0, 0).v).toBe('row0');
         expect(workbook.getCell(1, 0).v).toBe('row2');
@@ -341,7 +388,7 @@ describe('Workbook', () => {
         workbook.setCell(0, 0, { v: 'row0' });
         workbook.setCell(1, 0, { v: 'row1' });
         
-        workbook.deleteRow(0);
+        workbook.sheetStructure.deleteRow(0);
         workbook.undo();
         
         expect(workbook.getCell(0, 0).v).toBe('row0');
@@ -351,19 +398,19 @@ describe('Workbook', () => {
       test('插入和删除行后应该重新构建偏移缓存', () => {
         workbook.rowCount = 3;
         workbook.setRowHeight(0, 30);
-        expect(workbook.getRowPos(3)).toBe(80);
+        expect(workbook.layoutEngine.getRowPos(3)).toBe(80);
 
-        workbook.insertRow(1);
+        workbook.sheetStructure.insertRow(1);
 
-        expect(workbook._offsetsDirty).toBe(true);
-        expect(workbook.getRowPos(4)).toBe(105);
-        expect(workbook._rowOffsets).toEqual([0, 30, 55, 80, 105]);
+        expect(workbook.layoutEngine._offsetsDirty).toBe(true);
+        expect(workbook.layoutEngine.getRowPos(4)).toBe(105);
+        expect(workbook.layoutEngine._rowOffsets).toEqual([0, 30, 55, 80, 105]);
 
-        workbook.deleteRow(2);
+        workbook.sheetStructure.deleteRow(2);
 
-        expect(workbook._offsetsDirty).toBe(true);
-        expect(workbook.getRowPos(3)).toBe(80);
-        expect(workbook._rowOffsets).toEqual([0, 30, 55, 80]);
+        expect(workbook.layoutEngine._offsetsDirty).toBe(true);
+        expect(workbook.layoutEngine.getRowPos(3)).toBe(80);
+        expect(workbook.layoutEngine._rowOffsets).toEqual([0, 30, 55, 80]);
       });
     });
 
@@ -371,7 +418,7 @@ describe('Workbook', () => {
       test('应该在第0列位置插入列', () => {
         workbook.setCell(0, 0, { v: 'original' });
         
-        workbook.insertColumn(0);
+        workbook.sheetStructure.insertColumn(0);
         
         expect(workbook.getCell(0, 0)).toBeNull();
         expect(workbook.getCell(0, 1).v).toBe('original');
@@ -382,7 +429,7 @@ describe('Workbook', () => {
         workbook.setCell(0, 0, { v: 'col0' });
         workbook.setCell(0, 1, { v: 'col1' });
         
-        workbook.insertColumn(1);
+        workbook.sheetStructure.insertColumn(1);
         
         expect(workbook.getCell(0, 0).v).toBe('col0');
         expect(workbook.getCell(0, 1)).toBeNull();
@@ -394,7 +441,7 @@ describe('Workbook', () => {
         workbook.setCell(0, 1, { v: 'col1' });
         workbook.setCell(0, 2, { v: 'col2' });
         
-        workbook.deleteColumn(1);
+        workbook.sheetStructure.deleteColumn(1);
         
         expect(workbook.getCell(0, 0).v).toBe('col0');
         expect(workbook.getCell(0, 1).v).toBe('col2');
@@ -405,7 +452,7 @@ describe('Workbook', () => {
         workbook.setCell(0, 0, { v: 'col0' });
         workbook.setCell(0, 1, { v: 'col1' });
         
-        workbook.deleteColumn(0);
+        workbook.sheetStructure.deleteColumn(0);
         workbook.undo();
         
         expect(workbook.getCell(0, 0).v).toBe('col0');
@@ -415,19 +462,19 @@ describe('Workbook', () => {
       test('插入和删除列后应该重新构建偏移缓存', () => {
         workbook.colCount = 3;
         workbook.setColWidth(0, 120);
-        expect(workbook.getColPos(3)).toBe(320);
+        expect(workbook.layoutEngine.getColPos(3)).toBe(320);
 
-        workbook.insertColumn(1);
+        workbook.sheetStructure.insertColumn(1);
 
-        expect(workbook._offsetsDirty).toBe(true);
-        expect(workbook.getColPos(4)).toBe(420);
-        expect(workbook._colOffsets).toEqual([0, 120, 220, 320, 420]);
+        expect(workbook.layoutEngine._offsetsDirty).toBe(true);
+        expect(workbook.layoutEngine.getColPos(4)).toBe(420);
+        expect(workbook.layoutEngine._colOffsets).toEqual([0, 120, 220, 320, 420]);
 
-        workbook.deleteColumn(2);
+        workbook.sheetStructure.deleteColumn(2);
 
-        expect(workbook._offsetsDirty).toBe(true);
-        expect(workbook.getColPos(3)).toBe(320);
-        expect(workbook._colOffsets).toEqual([0, 120, 220, 320]);
+        expect(workbook.layoutEngine._offsetsDirty).toBe(true);
+        expect(workbook.layoutEngine.getColPos(3)).toBe(320);
+        expect(workbook.layoutEngine._colOffsets).toEqual([0, 120, 220, 320]);
       });
     });
 
@@ -459,25 +506,25 @@ describe('Workbook', () => {
     describe('addMerge / removeMerge', () => {
       test('应该添加合并区域', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        workbook.addMerge(range);
+        workbook.mergeManager.addMerge(range);
         
         expect(workbook.merges).toHaveLength(1);
-        expect(workbook.getMerge(0, 0)).toEqual(range);
-        expect(workbook.getMerge(1, 1)).toEqual(range);
+        expect(workbook.mergeManager.getMerge(0, 0)).toEqual(range);
+        expect(workbook.mergeManager.getMerge(1, 1)).toEqual(range);
       });
 
       test('应该移除合并区域', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        workbook.addMerge(range);
+        workbook.mergeManager.addMerge(range);
         
-        workbook.removeMerge(range);
+        workbook.mergeManager.removeMerge(range);
         
         expect(workbook.merges).toHaveLength(0);
-        expect(workbook.getMerge(0, 0)).toBeNull();
+        expect(workbook.mergeManager.getMerge(0, 0)).toBeNull();
       });
 
       test('getMerge 应该返回 null 对于非合并单元格', () => {
-        expect(workbook.getMerge(0, 0)).toBeNull();
+        expect(workbook.mergeManager.getMerge(0, 0)).toBeNull();
       });
     });
 
@@ -488,7 +535,7 @@ describe('Workbook', () => {
         workbook.setCell(1, 0, { v: 'data' });
         
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        workbook.mergeCells(range);
+        workbook.mergeManager.mergeCells(range);
         
         expect(workbook.merges).toHaveLength(1);
         expect(workbook.getCell(0, 1)).toBeNull();
@@ -497,9 +544,9 @@ describe('Workbook', () => {
 
       test('unmergeCells 应该取消合并', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        workbook.mergeCells(range);
+        workbook.mergeManager.mergeCells(range);
         
-        workbook.unmergeCells(range);
+        workbook.mergeManager.unmergeCells(range);
         
         expect(workbook.merges).toHaveLength(0);
       });
@@ -508,24 +555,24 @@ describe('Workbook', () => {
     describe('allowsMerge / allowsUnmerge', () => {
       test('allowsMerge 对于多单元格区域应返回 true', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        expect(workbook.allowsMerge(range)).toBe(true);
+        expect(workbook.mergeManager.allowsMerge(range)).toBe(true);
       });
 
       test('allowsMerge 对于单个单元格应返回 false', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-        expect(workbook.allowsMerge(range)).toBe(false);
+        expect(workbook.mergeManager.allowsMerge(range)).toBe(false);
       });
 
       test('allowsUnmerge 对于有合并的区域应返回 true', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        workbook.addMerge(range);
+        workbook.mergeManager.addMerge(range);
         
-        expect(workbook.allowsUnmerge(range)).toBe(true);
+        expect(workbook.mergeManager.allowsUnmerge(range)).toBe(true);
       });
 
       test('allowsUnmerge 对于无合并的区域应返回 false', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        expect(workbook.allowsUnmerge(range)).toBe(false);
+        expect(workbook.mergeManager.allowsUnmerge(range)).toBe(false);
       });
     });
 
@@ -533,11 +580,11 @@ describe('Workbook', () => {
       test('应该返回相交的合并区域', () => {
         const merge1 = { s: { r: 0, c: 0 }, e: { r: 2, c: 2 } };
         const merge2 = { s: { r: 5, c: 5 }, e: { r: 7, c: 7 } };
-        workbook.addMerge(merge1);
-        workbook.addMerge(merge2);
+        workbook.mergeManager.addMerge(merge1);
+        workbook.mergeManager.addMerge(merge2);
         
         const range = { s: { r: 1, c: 1 }, e: { r: 3, c: 3 } };
-        const intersecting = workbook.getIntersectingMerges(range);
+        const intersecting = workbook.mergeManager.getIntersectingMerges(range);
         
         expect(intersecting).toHaveLength(1);
         expect(intersecting[0]).toEqual(merge1);
@@ -545,10 +592,10 @@ describe('Workbook', () => {
 
       test('不相交的范围应返回空数组', () => {
         const merge = { s: { r: 0, c: 0 }, e: { r: 2, c: 2 } };
-        workbook.addMerge(merge);
+        workbook.mergeManager.addMerge(merge);
         
         const range = { s: { r: 5, c: 5 }, e: { r: 7, c: 7 } };
-        const intersecting = workbook.getIntersectingMerges(range);
+        const intersecting = workbook.mergeManager.getIntersectingMerges(range);
         
         expect(intersecting).toHaveLength(0);
       });
@@ -557,6 +604,17 @@ describe('Workbook', () => {
 
   describe('选区管理', () => {
     describe('setSelection', () => {
+      test('应该通过独立 selectionManager 管理选区', () => {
+        expect(workbook.selectionManager).toBeDefined();
+        workbook.selectionManager.setSelection(1, 1, 2, 2);
+
+        expect(workbook.selection).toEqual({
+          s: { r: 1, c: 1 },
+          e: { r: 2, c: 2 }
+        });
+        expect(workbook.activeCell).toEqual({ r: 1, c: 1 });
+      });
+
       test('应该设置选区', () => {
         workbook.setSelection(0, 0, 2, 2);
         
@@ -569,7 +627,7 @@ describe('Workbook', () => {
 
       test('选区应该自动扩展到合并区域', () => {
         const merge = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        workbook.addMerge(merge);
+        workbook.mergeManager.addMerge(merge);
         
         workbook.setSelection(0, 0, 0, 0);
         
@@ -587,6 +645,32 @@ describe('Workbook', () => {
           e: { r: 2, c: 2 }
         });
       });
+
+      test('应该支持对象格式选区以兼容插件历史恢复', () => {
+        workbook.setSelection({ startRow: 2, startCol: 1, endRow: 3, endCol: 4 });
+
+        expect(workbook.selection).toEqual({
+          s: { r: 2, c: 1 },
+          e: { r: 3, c: 4 }
+        });
+        expect(workbook.activeCell).toEqual({ r: 2, c: 1 });
+      });
+
+      test('应该支持 selection-change 事件载荷格式回放', () => {
+        workbook.setSelection({
+          selection: {
+            s: { r: 1, c: 2 },
+            e: { r: 3, c: 4 }
+          },
+          activeCell: { r: 1, c: 2 }
+        });
+
+        expect(workbook.selection).toEqual({
+          s: { r: 1, c: 2 },
+          e: { r: 3, c: 4 }
+        });
+        expect(workbook.activeCell).toEqual({ r: 1, c: 2 });
+      });
     });
 
     describe('setCopyRange / clearCopyRange', () => {
@@ -595,6 +679,7 @@ describe('Workbook', () => {
         workbook.setCopyRange(range);
         
         expect(workbook.copyRange).toEqual(range);
+        expect(workbook.clipboardManager).toBe(workbook.clipboard);
       });
 
       test('应该清除复制范围', () => {
@@ -612,7 +697,7 @@ describe('Workbook', () => {
     describe('setStyle', () => {
       test('应该设置范围样式', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        workbook.setStyle(range, { fontWeight: 'bold', color: 'red' });
+        workbook.styleManager.setStyle(range, { fontWeight: 'bold', color: 'red' });
         
         expect(workbook.getStyle(0, 0).fontWeight).toBe('bold');
         expect(workbook.getStyle(0, 0).color).toBe('red');
@@ -621,7 +706,7 @@ describe('Workbook', () => {
 
       test('设置样式应该支持撤销', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-        workbook.setStyle(range, { fontWeight: 'bold' });
+        workbook.styleManager.setStyle(range, { fontWeight: 'bold' });
         
         workbook.undo();
         
@@ -632,7 +717,7 @@ describe('Workbook', () => {
     describe('setBorder', () => {
       test('应该设置全边框', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        workbook.setBorder(range, 'all', '#000000', 'solid');
+        workbook.styleManager.setBorder(range, 'all', '#000000', 'solid');
         
         const style = workbook.getStyle(0, 0);
         expect(style.border.top).toBeDefined();
@@ -643,7 +728,7 @@ describe('Workbook', () => {
 
       test('应该设置外边框', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        workbook.setBorder(range, 'outer', '#000000', 'solid');
+        workbook.styleManager.setBorder(range, 'outer', '#000000', 'solid');
         
         // 左上角单元格
         const style00 = workbook.getStyle(0, 0);
@@ -660,26 +745,55 @@ describe('Workbook', () => {
 
       test('应该清除边框', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
-        workbook.setBorder(range, 'all', '#000000', 'solid');
-        workbook.setBorder(range, 'none');
-        
+        workbook.styleManager.setBorder(range, 'all', '#000000', 'solid');
+        workbook.styleManager.setBorder(range, 'none');
+
         const style = workbook.getStyle(0, 0);
         expect(style.border.top).toBeUndefined();
         expect(style.border.bottom).toBeUndefined();
+      });
+
+      test('单次 setBorder 后 undo→redo 应恢复边框（history 快照与活单元格解耦）', () => {
+        const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
+        workbook.styleManager.setBorder(range, 'all', '#123456', 'solid');
+        workbook.history.undo();
+        expect(workbook.getStyle(0, 0).border?.top).toBeUndefined();
+        workbook.history.redo();
+        expect(workbook.getStyle(0, 0).border.top.color).toBe('#123456');
+      });
+
+      test('连续两次 setBorder 后多轮 undo/redo 往返稳定', () => {
+        const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
+        workbook.styleManager.setBorder(range, 'all', '#AAAAAA', 'solid');
+        workbook.styleManager.setBorder(range, 'all', '#BBBBBB', 'solid');
+
+        workbook.history.undo(); // → #AAAAAA
+        expect(workbook.getStyle(0, 0).border.top.color).toBe('#AAAAAA');
+        workbook.history.undo(); // → 无边框
+        expect(workbook.getStyle(0, 0).border?.top).toBeUndefined();
+        workbook.history.redo(); // → #AAAAAA
+        expect(workbook.getStyle(0, 0).border.top.color).toBe('#AAAAAA');
+        workbook.history.redo(); // → #BBBBBB
+        expect(workbook.getStyle(0, 0).border.top.color).toBe('#BBBBBB');
+        // 再往返一轮验证稳定
+        workbook.history.undo();
+        expect(workbook.getStyle(0, 0).border.top.color).toBe('#AAAAAA');
+        workbook.history.redo();
+        expect(workbook.getStyle(0, 0).border.top.color).toBe('#BBBBBB');
       });
     });
 
     describe('setFormat', () => {
       test('应该设置数字格式', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-        workbook.setFormat(range, 'comma');
+        workbook.styleManager.setFormat(range, 'comma');
         
         expect(workbook.getStyle(0, 0).fmt).toBe('comma');
       });
 
       test('应该设置百分比格式', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-        workbook.setFormat(range, 'percent');
+        workbook.styleManager.setFormat(range, 'percent');
         
         expect(workbook.getStyle(0, 0).fmt).toBe('percent');
         expect(workbook.getStyle(0, 0).decimals).toBe(0);
@@ -689,28 +803,28 @@ describe('Workbook', () => {
     describe('setDecimals', () => {
       test('应该增加小数位数', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-        workbook.setDecimals(range, 1);
+        workbook.styleManager.setDecimals(range, 1);
         
         expect(workbook.getStyle(0, 0).decimals).toBe(3);
       });
 
       test('应该减少小数位数', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-        workbook.setDecimals(range, -1);
+        workbook.styleManager.setDecimals(range, -1);
         
         expect(workbook.getStyle(0, 0).decimals).toBe(1);
       });
 
       test('小数位数不应小于0', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-        workbook.setDecimals(range, -10);
+        workbook.styleManager.setDecimals(range, -10);
         
         expect(workbook.getStyle(0, 0).decimals).toBe(0);
       });
 
       test('小数位数不应大于10', () => {
         const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-        workbook.setDecimals(range, 20);
+        workbook.styleManager.setDecimals(range, 20);
         
         expect(workbook.getStyle(0, 0).decimals).toBe(10);
       });
@@ -721,7 +835,7 @@ describe('Workbook', () => {
         workbook.setCell(0, 0, { v: 'test', s: { fontWeight: 'bold' } });
         
         const range = { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } };
-        workbook.clearContent(range);
+        workbook.styleManager.clearContent(range);
         
         const cell = workbook.getCell(0, 0);
         expect(cell.v).toBeUndefined();
@@ -751,7 +865,7 @@ describe('Workbook', () => {
     test('getFrozenSize 应该返回正确的冻结区域尺寸', () => {
       workbook.setFreeze(2, 2);
       
-      const size = workbook.getFrozenSize();
+      const size = workbook.layoutEngine.getFrozenSize();
       
       expect(size.w).toBe(200); // 2 * 100
       expect(size.h).toBe(50);  // 2 * 25
@@ -759,40 +873,40 @@ describe('Workbook', () => {
 
     test('冻结区域内尺寸变更在撤销后应该刷新冻结尺寸缓存', () => {
       workbook.setFreeze(2, 2);
-      expect(workbook.getFrozenSize()).toEqual({ w: 200, h: 50 });
+      expect(workbook.layoutEngine.getFrozenSize()).toEqual({ w: 200, h: 50 });
 
       workbook.setRowHeight(0, 40);
-      expect(workbook.getFrozenSize()).toEqual({ w: 200, h: 65 });
+      expect(workbook.layoutEngine.getFrozenSize()).toEqual({ w: 200, h: 65 });
 
       workbook.undo();
-      expect(workbook.getFrozenSize()).toEqual({ w: 200, h: 50 });
+      expect(workbook.layoutEngine.getFrozenSize()).toEqual({ w: 200, h: 50 });
 
       workbook.setColWidth(0, 150);
-      expect(workbook.getFrozenSize()).toEqual({ w: 250, h: 50 });
+      expect(workbook.layoutEngine.getFrozenSize()).toEqual({ w: 250, h: 50 });
 
       workbook.undo();
-      expect(workbook.getFrozenSize()).toEqual({ w: 200, h: 50 });
+      expect(workbook.layoutEngine.getFrozenSize()).toEqual({ w: 200, h: 50 });
     });
 
     test('插入和删除行列应该让冻结尺寸缓存失效', () => {
       workbook.setFreeze(1, 1);
-      workbook.getFrozenSize();
-      expect(workbook._frozenSizeDirty).toBe(false);
+      workbook.layoutEngine.getFrozenSize();
+      expect(workbook.layoutEngine._frozenSizeDirty).toBe(false);
 
-      workbook.insertRow(0);
-      expect(workbook._frozenSizeDirty).toBe(true);
-      workbook.getFrozenSize();
+      workbook.sheetStructure.insertRow(0);
+      expect(workbook.layoutEngine._frozenSizeDirty).toBe(true);
+      workbook.layoutEngine.getFrozenSize();
 
-      workbook.deleteRow(0);
-      expect(workbook._frozenSizeDirty).toBe(true);
-      workbook.getFrozenSize();
+      workbook.sheetStructure.deleteRow(0);
+      expect(workbook.layoutEngine._frozenSizeDirty).toBe(true);
+      workbook.layoutEngine.getFrozenSize();
 
-      workbook.insertColumn(0);
-      expect(workbook._frozenSizeDirty).toBe(true);
-      workbook.getFrozenSize();
+      workbook.sheetStructure.insertColumn(0);
+      expect(workbook.layoutEngine._frozenSizeDirty).toBe(true);
+      workbook.layoutEngine.getFrozenSize();
 
-      workbook.deleteColumn(0);
-      expect(workbook._frozenSizeDirty).toBe(true);
+      workbook.sheetStructure.deleteColumn(0);
+      expect(workbook.layoutEngine._frozenSizeDirty).toBe(true);
     });
   });
 
@@ -815,32 +929,32 @@ describe('Workbook', () => {
     test('应该计算 SUM 函数', () => {
       workbook.setCell(1, 0, { v: '=SUM(A1:C1)' });
       
-      expect(workbook.getCellValue(1, 0)).toBe(60);
+      expect(workbook.formulaEvaluator.getCellValue(1, 0)).toBe(60);
     });
 
     test('应该计算 AVERAGE 函数', () => {
       workbook.setCell(1, 0, { v: '=AVERAGE(A1:C1)' });
       
-      expect(workbook.getCellValue(1, 0)).toBe(20);
+      expect(workbook.formulaEvaluator.getCellValue(1, 0)).toBe(20);
     });
 
     test('应该计算 MAX 函数', () => {
       workbook.setCell(1, 0, { v: '=MAX(A1:C1)' });
       
-      expect(workbook.getCellValue(1, 0)).toBe(30);
+      expect(workbook.formulaEvaluator.getCellValue(1, 0)).toBe(30);
     });
 
     test('应该计算 MIN 函数', () => {
       workbook.setCell(1, 0, { v: '=MIN(A1:C1)' });
       
-      expect(workbook.getCellValue(1, 0)).toBe(10);
+      expect(workbook.formulaEvaluator.getCellValue(1, 0)).toBe(10);
     });
 
     test('应该正确处理公式依赖', () => {
       workbook.setCell(1, 0, { v: '=A1+B1' }); // 30
       workbook.setCell(2, 0, { v: '=A2*2' });  // 60
       
-      expect(workbook.getCellValue(2, 0)).toBe(60);
+      expect(workbook.formulaEvaluator.getCellValue(2, 0)).toBe(60);
       
       // 修改依赖的单元格
       workbook.setCell(0, 0, { v: 20 });
@@ -858,20 +972,37 @@ describe('Workbook', () => {
       workbook.setCell(0, 1, { v: '=A1' });
 
       // 尝试获取值时应该返回错误
-      const result = workbook.getCellValue(0, 0);
+      const result = workbook.formulaEvaluator.getCellValue(0, 0);
       // 循环引用会抛出错误，返回 #ERROR! 或 #CYCLE!
       expect(result).toMatch(/#(ERROR|CYCLE)!/);
     });
 
+    test('循环引用在触发重新计算后仍应保持为 #CYCLE!', () => {
+      consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      workbook.setCell(0, 0, { v: '=B1' });
+      workbook.setCell(0, 1, { v: '=A1' });
+
+      // 初始计算
+      expect(workbook.formulaEvaluator.getCellValue(0, 0)).toMatch(/#(ERROR|CYCLE)!/);
+
+      // 模拟重新计算
+      workbook.formulaEvaluator.triggerRecalc(0, 0);
+      workbook.formulaEvaluator.recalcDirty();
+
+      expect(workbook.formulaEvaluator.getCellValue(0, 0)).toMatch(/#(ERROR|CYCLE)!/);
+      expect(workbook.formulaEvaluator.getCellValue(0, 1)).toMatch(/#(ERROR|CYCLE)!/);
+    });
+
     describe('getDependencies', () => {
       test('应该返回单元格依赖', () => {
-        const deps = workbook.getDependencies('=A1+B1');
+        const deps = workbook.formulaEvaluator.getDependencies('=A1+B1');
         
         expect(deps.size).toBe(2);
       });
 
       test('应该返回范围依赖', () => {
-        const deps = workbook.getDependencies('=SUM(A1:C1)');
+        const deps = workbook.formulaEvaluator.getDependencies('=SUM(A1:C1)');
         
         expect(deps.size).toBe(3);
       });
@@ -884,7 +1015,7 @@ describe('Workbook', () => {
         workbook.setCell(0, 0, { v: 'test' });
         workbook.setColWidth(0, 150);
         workbook.setRowHeight(0, 30);
-        workbook.addMerge({ s: { r: 0, c: 0 }, e: { r: 1, c: 1 } });
+        workbook.mergeManager.addMerge({ s: { r: 0, c: 0 }, e: { r: 1, c: 1 } });
         workbook.setFreeze(1, 1);
         
         const json = workbook.toJSON();
@@ -928,6 +1059,40 @@ describe('Workbook', () => {
         
         // fromJSON 会清除历史栈
         expect(workbook.history.undoStackSize).toBe(0);
+      });
+
+      test.each([
+        ['空 merge', { rowCount: 10, colCount: 10, data: {}, merges: [{}] }],
+        ['反向 merge', {
+          rowCount: 10,
+          colCount: 10,
+          data: {},
+          merges: [{ s: { r: 2, c: 2 }, e: { r: 1, c: 1 } }]
+        }],
+        ['超大 merge', {
+          rowCount: 1048576,
+          colCount: 16384,
+          data: {},
+          merges: [{ s: { r: 0, c: 0 }, e: { r: 1048575, c: 16383 } }]
+        }],
+        ['非法 cell key', { rowCount: 10, colCount: 10, data: { A1: { v: 1 } } }],
+        ['非法公式类型', { rowCount: 10, colCount: 10, data: { '0-0': { f: 42 } } }],
+        ['越界尺寸', { rowCount: 1048577, colCount: 10, data: {} }]
+      ])('%s 导入失败后应保持状态且不锁住 History', (_scenario, invalidJSON) => {
+        workbook.setCell(3, 4, { v: 'existing' });
+        workbook.setColWidth(4, 180);
+        workbook.setFreeze(1, 1);
+        const beforeImport = workbook.toJSON();
+
+        expect(() => workbook.fromJSON(invalidJSON)).toThrow();
+
+        expect(workbook.toJSON()).toEqual(beforeImport);
+        expect(workbook.history.batching).toBe(false);
+
+        workbook.history.clear();
+        workbook.setCell(0, 0, { v: 'after-failure' });
+        workbook.undo();
+        expect(workbook.getCell(0, 0)).toBeNull();
       });
     });
   });
@@ -1007,6 +1172,66 @@ describe('Workbook', () => {
     });
   });
 
+  describe('公式解析鲁棒性 - 畸形引用不应崩溃', () => {
+    test('=A0 畸形引用不应崩溃并返回错误值', () => {
+      // A0 行号为 0 是无效单元格，解析不应 panic
+      const result = workbook._fallbackExecutor('evaluate', { formula: '=A0', r: 0, c: 0 });
+      // 系统应优雅降级，返回错误类型或数值，不抛出异常
+      expect(typeof result === 'string' || typeof result === 'number').toBe(true);
+    });
+
+    test('=AA 纯字母列引用不应崩溃', () => {
+      // 只有列字母没有行数字的畸形引用
+      const result = workbook._fallbackExecutor('evaluate', { formula: '=AA', r: 0, c: 0 });
+      expect(typeof result === 'string' || typeof result === 'number').toBe(true);
+    });
+
+    test('=R5 无 C 后缀的畸形 R1C1 不应崩溃', () => {
+      // 原始代码在此情况下 unwrap panic
+      const result = workbook._fallbackExecutor('evaluate', { formula: '=R5', r: 0, c: 0 });
+      expect(typeof result === 'string' || typeof result === 'number').toBe(true);
+    });
+
+    test('=$A$0 带 $ 符号的零行引用不应崩溃', () => {
+      const result = workbook._fallbackExecutor('evaluate', { formula: '=$A$0', r: 0, c: 0 });
+      expect(typeof result === 'string' || typeof result === 'number').toBe(true);
+    });
+  });
+
+  describe('公式解析鲁棒性 - 语法错误不应导致 Worker 崩溃', () => {
+    test('=SUM(A1+ 未闭合括号不应崩溃', () => {
+      // 语法错误的公式不应导致 panic 或 Worker 死锁
+      expect(() => {
+        workbook._fallbackExecutor('evaluate', { formula: '=SUM(A1+', r: 0, c: 0 });
+      }).not.toThrow();
+    });
+
+    test('=1+ 缺操作数不应崩溃', () => {
+      expect(() => {
+        workbook._fallbackExecutor('evaluate', { formula: '=1+', r: 0, c: 0 });
+      }).not.toThrow();
+    });
+
+    test('=@#$ 完全不合法的公式不应崩溃', () => {
+      // 任意垃圾输入不应导致引擎崩溃
+      expect(() => {
+        workbook._fallbackExecutor('evaluate', { formula: '=@#$', r: 0, c: 0 });
+      }).not.toThrow();
+    });
+
+    test('=SUM(A1:) 不完整范围引用不应崩溃', () => {
+      expect(() => {
+        workbook._fallbackExecutor('evaluate', { formula: '=SUM(A1:)', r: 0, c: 0 });
+      }).not.toThrow();
+    });
+
+    test('=IF( 未完成函数调用不应崩溃', () => {
+      expect(() => {
+        workbook._fallbackExecutor('evaluate', { formula: '=IF(', r: 0, c: 0 });
+      }).not.toThrow();
+    });
+  });
+
   describe('事件系统', () => {
     test('应该触发 CELL_CHANGE 事件', () => {
       const handler = vi.fn();
@@ -1030,16 +1255,7 @@ describe('Workbook', () => {
       const handler = vi.fn();
       workbook.on(Events.MERGE_CHANGE, handler);
       
-      workbook.addMerge({ s: { r: 0, c: 0 }, e: { r: 1, c: 1 } });
-      
-      expect(handler).toHaveBeenCalled();
-    });
-
-    test('subscribe 应该向后兼容', () => {
-      const handler = vi.fn();
-      workbook.subscribe(handler);
-      
-      workbook.setCell(0, 0, { v: 'test' });
+      workbook.mergeManager.addMerge({ s: { r: 0, c: 0 }, e: { r: 1, c: 1 } });
       
       expect(handler).toHaveBeenCalled();
     });
@@ -1141,6 +1357,37 @@ describe('Workbook', () => {
       // 基本信息应该被合并
       expect(workbook.merges.length).toBeGreaterThan(0);
     });
+
+    test('应该保持嵌套表头解析结构一致', () => {
+      const columns = [
+        {
+          title: '基本信息',
+          children: [
+            { field: 'name', title: '姓名', width: 120 },
+            { field: 'age', title: '年龄', width: 80 }
+          ]
+        },
+        { field: 'score', title: '成绩', width: 90 }
+      ];
+
+      workbook.setColumns(columns);
+
+      expect(workbook.headerDepth).toBe(2);
+      expect(workbook.colCount).toBe(3);
+      expect(workbook.fieldMap).toEqual({ name: 0, age: 1, score: 2 });
+      expect(workbook.colWidths).toEqual({ 0: 120, 1: 80, 2: 90 });
+      expect(workbook.getCell(0, 0)).toEqual({
+        v: '基本信息',
+        s: { fontWeight: 'bold', align: 'center', bg: '#f8f8f9' }
+      });
+      expect(workbook.getCell(1, 0).v).toBe('姓名');
+      expect(workbook.getCell(1, 1).v).toBe('年龄');
+      expect(workbook.getCell(0, 2).v).toBe('成绩');
+      expect(workbook.merges).toEqual([
+        { s: { r: 0, c: 0 }, e: { r: 0, c: 1 } },
+        { s: { r: 0, c: 2 }, e: { r: 1, c: 2 } }
+      ]);
+    });
   });
 
   describe('fillAuto', () => {
@@ -1152,11 +1399,11 @@ describe('Workbook', () => {
       const sourceRange = { s: { r: 0, c: 0 }, e: { r: 0, c: 2 } };
       const targetRange = { s: { r: 0, c: 0 }, e: { r: 0, c: 5 } };
       
-      workbook.fillAuto(sourceRange, targetRange);
+      workbook.sheetStructure.fillAuto(sourceRange, targetRange);
       
-      expect(workbook.getCellValue(0, 3)).toBe(4);
-      expect(workbook.getCellValue(0, 4)).toBe(5);
-      expect(workbook.getCellValue(0, 5)).toBe(6);
+      expect(workbook.formulaEvaluator.getCellValue(0, 3)).toBe(4);
+      expect(workbook.formulaEvaluator.getCellValue(0, 4)).toBe(5);
+      expect(workbook.formulaEvaluator.getCellValue(0, 5)).toBe(6);
     });
 
     test('应该垂直填充', () => {
@@ -1167,11 +1414,11 @@ describe('Workbook', () => {
       const sourceRange = { s: { r: 0, c: 0 }, e: { r: 2, c: 0 } };
       const targetRange = { s: { r: 0, c: 0 }, e: { r: 5, c: 0 } };
       
-      workbook.fillAuto(sourceRange, targetRange);
+      workbook.sheetStructure.fillAuto(sourceRange, targetRange);
       
-      expect(workbook.getCellValue(3, 0)).toBe(4);
-      expect(workbook.getCellValue(4, 0)).toBe(5);
-      expect(workbook.getCellValue(5, 0)).toBe(6);
+      expect(workbook.formulaEvaluator.getCellValue(3, 0)).toBe(4);
+      expect(workbook.formulaEvaluator.getCellValue(4, 0)).toBe(5);
+      expect(workbook.formulaEvaluator.getCellValue(5, 0)).toBe(6);
     });
 
     test('水平填充应该批量写入并只记录一个历史命令', () => {
@@ -1186,7 +1433,7 @@ describe('Workbook', () => {
       const sourceRange = { s: { r: 0, c: 0 }, e: { r: 0, c: 2 } };
       const targetRange = { s: { r: 0, c: 0 }, e: { r: 0, c: 5 } };
 
-      workbook.fillAuto(sourceRange, targetRange);
+      workbook.sheetStructure.fillAuto(sourceRange, targetRange);
 
       expect(setCellSpy).not.toHaveBeenCalled();
       expect(bulkSetCellsSpy).toHaveBeenCalledTimes(1);
@@ -1214,14 +1461,14 @@ describe('Workbook', () => {
       const sourceRange = { s: { r: 0, c: 0 }, e: { r: 1, c: 1 } };
       const targetRange = { s: { r: 0, c: 0 }, e: { r: 4, c: 1 } };
 
-      workbook.fillAuto(sourceRange, targetRange);
+      workbook.sheetStructure.fillAuto(sourceRange, targetRange);
 
       expect(bulkSetCellsSpy).toHaveBeenCalledTimes(1);
       expect(bulkSetCellsSpy.mock.calls[0][0]).toHaveLength(6);
       expect(notifySpy).toHaveBeenCalledTimes(1);
-      expect(workbook.getCellValue(2, 0)).toBe(3);
-      expect(workbook.getCellValue(3, 1)).toBe('B');
-      expect(workbook.getCellValue(4, 1)).toBe('A');
+      expect(workbook.formulaEvaluator.getCellValue(2, 0)).toBe(3);
+      expect(workbook.formulaEvaluator.getCellValue(3, 1)).toBe('B');
+      expect(workbook.formulaEvaluator.getCellValue(4, 1)).toBe('A');
     });
   });
 
@@ -1235,11 +1482,11 @@ describe('Workbook', () => {
     });
 
     test('_colStrToIndex 应该正确转换列字母', () => {
-      expect(workbook._colStrToIndex('A')).toBe(0);
-      expect(workbook._colStrToIndex('B')).toBe(1);
-      expect(workbook._colStrToIndex('Z')).toBe(25);
-      expect(workbook._colStrToIndex('AA')).toBe(26);
-      expect(workbook._colStrToIndex('AB')).toBe(27);
+      expect(workbook.formulaEvaluator._colStrToIndex('A')).toBe(0);
+      expect(workbook.formulaEvaluator._colStrToIndex('B')).toBe(1);
+      expect(workbook.formulaEvaluator._colStrToIndex('Z')).toBe(25);
+      expect(workbook.formulaEvaluator._colStrToIndex('AA')).toBe(26);
+      expect(workbook.formulaEvaluator._colStrToIndex('AB')).toBe(27);
     });
   });
 
@@ -1276,7 +1523,7 @@ describe('Workbook', () => {
   describe('销毁', () => {
     test('destroy 应该清理所有资源', () => {
       workbook.setCell(0, 0, { v: 'test' });
-      workbook.addMerge({ s: { r: 0, c: 0 }, e: { r: 1, c: 1 } });
+      workbook.mergeManager.addMerge({ s: { r: 0, c: 0 }, e: { r: 1, c: 1 } });
       
       workbook.destroy();
       
@@ -1318,7 +1565,7 @@ describe('Workbook', () => {
       const cell2 = workbook.getCell(0, 1);
       const spy = vi.spyOn(workbook._cellPool, 'releaseCell');
       
-      workbook.deleteRow(0);
+      workbook.sheetStructure.deleteRow(0);
       
       expect(spy).toHaveBeenCalledWith(cell1);
       expect(spy).toHaveBeenCalledWith(cell2);
@@ -1330,7 +1577,7 @@ describe('Workbook', () => {
       const cell = workbook.getCell(0, 0);
       const spy = vi.spyOn(workbook._cellPool, 'releaseCell');
       
-      workbook.insertRow(0); // 单元格从 0,0 移到 1,0
+      workbook.sheetStructure.insertRow(0); // 单元格从 0,0 移到 1,0
       
       // 应该没有被回收
       expect(spy).not.toHaveBeenCalledWith(cell);

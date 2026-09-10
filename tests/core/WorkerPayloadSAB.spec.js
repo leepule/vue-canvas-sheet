@@ -20,7 +20,7 @@ describe('Workbook._buildFormulaWorkerPayload - SAB 数值去重 (#23)', () => {
     // 前置确认：A1 数值已同步进 SAB
     expect(sab.get(0, 0)).toBe(5);
 
-    const payload = wb._buildFormulaWorkerPayload([b1]);
+    const payload = wb.formulaEngine._buildFormulaWorkerPayload([b1]);
     const data = payload.task.data;
 
     expect(data[b1]).toBeDefined();      // 公式单元格保留
@@ -39,7 +39,7 @@ describe('Workbook._buildFormulaWorkerPayload - SAB 数值去重 (#23)', () => {
     const b1 = wb._cellKey(0, 1);
     const a1 = wb._cellKey(0, 0);
 
-    const payload = wb._buildFormulaWorkerPayload([b1]);
+    const payload = wb.formulaEngine._buildFormulaWorkerPayload([b1]);
     const data = payload.task.data;
 
     expect(data[b1]).toBeDefined();
@@ -57,7 +57,7 @@ describe('Workbook._buildFormulaWorkerPayload - SAB 数值去重 (#23)', () => {
     // 人为制造 SAB 与单元格值不一致：直接改写 SAB
     sab.set(0, 0, 999);
 
-    const payload = wb._buildFormulaWorkerPayload([wb._cellKey(0, 1)]);
+    const payload = wb.formulaEngine._buildFormulaWorkerPayload([wb._cellKey(0, 1)]);
     // get(0,0)=999 ≠ cell.v=7 → 守卫不命中 → 保留 A1
     expect(payload.task.data[a1]).toBeDefined();
     expect(payload.task.data[a1].v).toBe(7);

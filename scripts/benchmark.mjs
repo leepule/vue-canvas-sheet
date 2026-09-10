@@ -25,6 +25,7 @@ async function runBenchmark() {
 
   // --- 准备数据 ---
   const wb = new Workbook({ enablePersistence: false });
+  wb.wasmBridge = wb._formulaEngine.wasmBridge;
   
   // 注入 WASM 二进制
   if (wasmBinary) {

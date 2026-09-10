@@ -141,4 +141,76 @@ describe('WorkerManager', () => {
 
     manager.destroy();
   });
+
+  test('Worker init-failed 消息应该切换到 JS fallback 并接住当前任务', async () => {
+    const worker = new ControllableWorker();
+    const fallbackExecutor = vi.fn((type, data) => `fallback-${data.formula}`);
+    const manager = new WorkerManager({
+      createWorker: () => worker,
+      timeout: 100,
+      fallbackExecutor,
+      useTransferable: false
+    });
+
+    worker.emitMessage({ type: 'ready' });
+    const running = manager.execute('evaluate', { formula: '=1+1', r: 0, c: 0 });
+
+    worker.emitMessage({
+      type: 'init-failed',
+      subsystem: 'wasm',
+      phase: 'wasm-bridge',
+      error: 'broken wasm',
+      fallback: 'js'
+    });
+
+    await expect(running).resolves.toBe('fallback-=1+1');
+    expect(worker.terminated).toBe(true);
+    expect(manager.pendingTasks.size).toBe(0);
+    expect(manager.useFallback).toBe(true);
+
+    await expect(manager.execute('evaluate', { formula: '=2+2', r: 0, c: 1 })).resolves.toBe('fallback-=2+2');
+    expect(fallbackExecutor).toHaveBeenCalledWith('evaluate', { formula: '=2+2', r: 0, c: 1 });
+
+    manager.destroy();
+  });
+
+  test('createWorker 同步失败时 ready 应立即完成并切换 fallback', async () => {
+    const manager = new WorkerManager({
+      createWorker: () => {
+        throw new Error('sync init failure');
+      },
+      fallbackEnabled: true,
+      useTransferable: false
+    });
+
+    const outcome = await Promise.race([
+      manager.ready().then(() => 'ready'),
+      new Promise(resolve => queueMicrotask(() => resolve('pending')))
+    ]);
+
+    expect(outcome).toBe('ready');
+    expect(manager.isReady).toBe(true);
+    expect(manager.useFallback).toBe(true);
+
+    manager.destroy();
+  });
+
+  test('createWorker 同步失败且禁用 fallback 时 ready 每次都应明确抛错', () => {
+    const manager = new WorkerManager({
+      createWorker: () => {
+        throw new Error('sync init failure');
+      },
+      fallbackEnabled: false,
+      useTransferable: false
+    });
+
+    expect(() => manager.ready()).toThrow(
+      'Failed to create worker: sync init failure'
+    );
+    expect(() => manager.ready()).toThrow(
+      'Failed to create worker: sync init failure'
+    );
+
+    manager.destroy();
+  });
 });

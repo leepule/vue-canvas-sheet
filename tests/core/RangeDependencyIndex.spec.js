@@ -13,7 +13,7 @@ describe('Workbook range dependency parsing and index', () => {
   });
 
   it('parses single-cell dependencies separately from ranges', () => {
-    const deps = workbook.getDependencies('=A1+B2');
+    const deps = workbook.formulaEvaluator.getDependencies('=A1+B2');
 
     expect(Array.from(deps.cells).sort()).toEqual([
       workbook._cellKey(0, 0),
@@ -23,7 +23,7 @@ describe('Workbook range dependency parsing and index', () => {
   });
 
   it('parses small rectangular ranges without expanding every cell', () => {
-    const deps = workbook.getDependencies('=SUM(A1:C3)');
+    const deps = workbook.formulaEvaluator.getDependencies('=SUM(A1:C3)');
 
     expect(deps.cells.size).toBe(0);
     expect(deps.ranges).toEqual([

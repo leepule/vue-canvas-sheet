@@ -23,7 +23,7 @@ describe('IncrementalCalculationEngine', () => {
     workbook.getCell(0, 1).dirty = false;
     workbook.getCell(0, 2).dirty = false;
 
-    const triggerSpy = vi.spyOn(workbook, 'triggerRecalc');
+    const triggerSpy = vi.spyOn(workbook.formulaEvaluator, 'triggerRecalc');
     workbook.setCell(0, 0, { v: 2 });
 
     expect(triggerSpy).not.toHaveBeenCalled();
@@ -149,7 +149,7 @@ describe('IncrementalCalculationEngine', () => {
     workbook.setCell(10, 10, { v: 'unrelated' });
     workbook.setCell(0, 2, { v: '=A1+B1' });
 
-    const payload = workbook._buildFormulaWorkerPayload([workbook._cellKey(0, 2)]);
+    const payload = workbook.formulaEngine._buildFormulaWorkerPayload([workbook._cellKey(0, 2)]);
 
     expect(payload.formulas).toHaveLength(1);
     expect(Object.keys(payload.task.data).sort()).toEqual([
@@ -279,7 +279,7 @@ describe('IncrementalCalculationEngine', () => {
       workbook.setCell(0, 2, { v: '=A1+B1' });
 
       const engine = workbook.calcEngine;
-      const spy = vi.spyOn(workbook, 'getDependencies');
+      const spy = vi.spyOn(workbook.formulaEvaluator, 'getDependencies');
       engine._cacheResult(0, 2, 3, '=A1+B1');
 
       // 反向依赖已存在 → 不应触发重新解析
@@ -299,7 +299,7 @@ describe('IncrementalCalculationEngine', () => {
       const engine = workbook.calcEngine;
       engine._cacheResult(0, 5, 1, '=SUM(A1:A10)+A1');
       const cached = engine.calcCache.get(engine._getCacheKey(0, 5));
-      const fresh = workbook.getDependencies('=SUM(A1:A10)+A1');
+      const fresh = workbook.formulaEvaluator.getDependencies('=SUM(A1:A10)+A1');
 
       expect([...cached.dependencies.cells].sort()).toEqual([...fresh.cells].sort());
       expect(cached.dependencies.ranges.length).toBe(fresh.ranges.length);
@@ -323,9 +323,42 @@ describe('IncrementalCalculationEngine', () => {
       expect([...cached.dependencies.cells]).toContain(workbook._cellKey(0, 0));
     });
 
+    it('长依赖链增量重算应在 50ms 内完成（环检测记忆化避免 O(N²) 退化）', () => {
+      const N = 2000; // 2000 个顺序嵌套依赖公式的链
+
+      // 构建链: A1=1, A2=A1+1, A3=A2+1, ..., AN=A(N-1)+1
+      workbook.setCell(0, 0, { v: 1 }); // A1 是基准值
+      for (let i = 1; i < N; i++) {
+        workbook.setCell(i, 0, { v: `=A${i}+1` });
+      }
+
+      const engine = workbook.calcEngine;
+      engine.dirtyBitset.clear();
+
+      // 只修改链首 A1，整个链上的 N-1 个公式都需要重算
+      workbook.setCell(0, 0, { v: 100 });
+
+      const { queue } = engine._collectDirtyGraph();
+      expect(queue.length).toBeGreaterThanOrEqual(N - 1);
+
+      const start = performance.now();
+      engine._calculateBatch(queue);
+      const elapsed = performance.now() - start;
+
+      // 2000 个节点的链式重算应在 100ms 内完成
+      // 若 checkCycle 为每个节点独立发起 DFS（无记忆化），时间会退化至数百毫秒甚至秒级
+      expect(elapsed).toBeLessThan(100);
+
+      // 验证链尾计算结果正确（AN = 100 + N - 1）
+      const tailCell = workbook.getCell(N - 1, 0);
+      expect(tailCell.v).toBe(100 + N - 1);
+      expect(tailCell.dirty).toBe(false);
+    });
+
     it('反向依赖缺失时回退到完整解析', () => {
       const engine = workbook.calcEngine;
-      const spy = vi.spyOn(workbook, 'getDependencies');
+      // engine 现在通过 deps 回调访问外部方法，spy 应绑定在 deps 上
+      const spy = vi.spyOn(engine.d, 'getDependencies');
 
       // 未经 setCell 注册依赖，直接缓存 → reverseDependencyMap 无此项
       engine._cacheResult(5, 5, 99, '=A1+1');

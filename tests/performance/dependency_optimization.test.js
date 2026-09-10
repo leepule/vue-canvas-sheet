@@ -1,22 +1,16 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { Workbook } from '../../src/core/Workbook.js';
-import { wasmBridge } from '../../src/core/worker/WasmBridge.js';
 
 import {
     benchmark,
-    cleanupWorkbook,
-    disableWasmForBenchmarks
+    cleanupWorkbook
 } from './perfHarness.js';
 
 describe('Formula Dependency Optimization', () => {
     let workbook;
 
-    beforeAll(() => {
-        disableWasmForBenchmarks(wasmBridge);
-    });
-
     beforeEach(() => {
-        workbook = new Workbook();
+        workbook = new Workbook({ enableWasm: false });
         if (workbook.calcEngine) {
             workbook.calcEngine.batchDelay = 60_000;
         }
@@ -79,7 +73,7 @@ describe('Formula Dependency Optimization', () => {
         const legacyMetric = await benchmark(
             'range_dependency_register_legacy_expand_100k_cells',
             (legacyWorkbook) => {
-                const deps = legacyWorkbook.getDependencies(formula);
+                const deps = legacyWorkbook.formulaEvaluator.getDependencies(formula);
                 const expanded = new Set(deps.cells);
 
                 for (const range of deps.ranges) {
@@ -97,7 +91,7 @@ describe('Formula Dependency Optimization', () => {
                 iterations: 2,
                 warmup: 1,
                 budget: false,
-                setup: () => new Workbook(),
+                setup: () => new Workbook({ enableWasm: false }),
                 teardown: cleanupWorkbook
             }
         );
@@ -123,7 +117,7 @@ describe('Formula Dependency Optimization', () => {
             {
                 iterations: 5,
                 warmup: 1,
-                setup: () => new Workbook(),
+                setup: () => new Workbook({ enableWasm: false }),
                 teardown: cleanupWorkbook
             }
         );
