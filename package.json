@@ -38,6 +38,10 @@
       "types": "./types/render.d.ts",
       "import": "./dist/render.es.js"
     },
+    "./wasm": {
+      "types": "./src/wasm/pkg/table_wasm_engine.d.ts",
+      "import": "./src/wasm/pkg/table_wasm_engine.js"
+    },
     "./style.css": "./dist/vue-canvas-sheet.css"
   },
   "files": [

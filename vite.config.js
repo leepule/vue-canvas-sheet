@@ -6,13 +6,17 @@ const crossOriginIsolationHeaders = {
   'Cross-Origin-Embedder-Policy': 'credentialless'
 }
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
   plugins: [vue()],
   resolve: {
-    alias: {
-      '@': import.meta.dirname + '/src',
-      'vue-canvas-sheet': import.meta.dirname + '/src/index.js',
-    },
+    alias: [
+      ...(command === 'serve' ? [{
+        find: /^vue-canvas-sheet\/wasm$/,
+        replacement: import.meta.dirname + '/src/wasm/pkg/table_wasm_engine.js'
+      }] : []),
+      { find: '@', replacement: import.meta.dirname + '/src' },
+      { find: /^vue-canvas-sheet$/, replacement: import.meta.dirname + '/src/index.js' }
+    ],
   },
   server: {
     port: 8888,
@@ -36,7 +40,12 @@ export default defineConfig({
       fileName: (format, entryName) => `${entryName}.${format}.js`
     },
     rollupOptions: {
-      external: ['vue'],
+      external: [
+        'vue',
+        'es-toolkit',
+        'xlsx-js-style',
+        'vue-canvas-sheet/wasm'
+      ],
       output: {
         exports: 'named',
         globals: {
@@ -64,4 +73,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))

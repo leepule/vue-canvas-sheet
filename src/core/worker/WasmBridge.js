@@ -12,7 +12,7 @@
  * 2. 绑定 SharedArrayBuffer
  * 3. 调度求值请求
  */
-const defaultWasmLoader = () => import('../../wasm/pkg/table_wasm_engine.js');
+const defaultWasmLoader = () => import('vue-canvas-sheet/wasm');
 let defaultWasmRuntimePromise = null;
 
 function loadDefaultWasmRuntime() {
