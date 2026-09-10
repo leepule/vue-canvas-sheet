@@ -62,6 +62,11 @@ for (const [moduleSpecifier, expectedExports] of Object.entries(entrypointContra
   assert.deepEqual(actualExports, [...expectedExports].sort(), `${moduleSpecifier} export drift`);
 }
 
+const lucideIcons = await import('../src/icons/index.js');
+for (const expectedExport of ['FileSpreadsheet', 'Search', 'TableCellsMerge']) {
+  assert.equal(typeof lucideIcons[expectedExport], 'function', `icons entry is missing ${expectedExport}`);
+}
+
 const coreDeclarations = await readFile(
   new URL('../types/core.d.ts', import.meta.url),
   'utf8'

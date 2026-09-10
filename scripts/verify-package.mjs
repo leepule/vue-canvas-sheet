@@ -11,8 +11,10 @@ const FORBIDDEN_PREFIXES = ['src/wasm/target/'];
 const REQUIRED_FILES = [
   'dist/core.es.js',
   'dist/designer.es.js',
+  'dist/icons.es.js',
   'dist/render.es.js',
   'dist/vue-canvas-sheet.css',
+  'types/icons.d.ts',
   'types/core.d.ts',
   'types/index.d.ts',
   'types/render.d.ts'

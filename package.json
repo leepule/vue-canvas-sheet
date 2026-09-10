@@ -38,6 +38,10 @@
       "types": "./types/render.d.ts",
       "import": "./dist/render.es.js"
     },
+    "./icons": {
+      "types": "./types/icons.d.ts",
+      "import": "./dist/icons.es.js"
+    },
     "./wasm": {
       "types": "./src/wasm/pkg/table_wasm_engine.d.ts",
       "import": "./src/wasm/pkg/table_wasm_engine.js"
@@ -82,7 +86,7 @@
     "test:e2e:report": "playwright show-report e2e/playwright-report"
   },
   "dependencies": {
-    "@handsontable/spreadsheet-icons": "^2.0.0",
+    "@lucide/vue": "^1.43.0",
     "es-toolkit": "^1.44.0",
     "xlsx-js-style": "^1.2.0"
   },

@@ -33,7 +33,8 @@ export default defineConfig(({ command }) => ({
       entry: {
         'core': import.meta.dirname + '/src/core/index.js',
         'render': import.meta.dirname + '/src/core/render/index.js',
-        'designer': import.meta.dirname + '/src/index.js'
+        'designer': import.meta.dirname + '/src/index.js',
+        'icons': import.meta.dirname + '/src/icons/index.js'
       },
       name: 'VueCanvasSheet',
       formats: ['es'],
@@ -42,6 +43,7 @@ export default defineConfig(({ command }) => ({
     rollupOptions: {
       external: [
         'vue',
+        '@lucide/vue',
         'es-toolkit',
         'xlsx-js-style',
         'vue-canvas-sheet/wasm'

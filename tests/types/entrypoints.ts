@@ -23,6 +23,7 @@ import {
   createProgressiveRenderer,
   measureTextWidth
 } from 'vue-canvas-sheet/render';
+import { FileSpreadsheet, Search as SearchIcon } from 'vue-canvas-sheet/icons';
 import type { PersistenceStorage } from 'vue-canvas-sheet/core';
 
 const workbook = new CoreWorkbook();
@@ -54,6 +55,8 @@ void [
   createOffscreenRenderer,
   createProgressiveRenderer,
   measureTextWidth,
+  FileSpreadsheet,
+  SearchIcon,
   wasmDisabledWorkbook
 ];
 

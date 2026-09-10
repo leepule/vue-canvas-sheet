@@ -1,17 +1,79 @@
 <template>
-  <span class="vue-canvas-sheet-svg-icon" v-html="svgContent"></span>
+  <span class="vue-canvas-sheet-svg-icon">
+    <component v-if="iconComponent" :is="iconComponent" />
+  </span>
 </template>
 
 <script>
-const modules = import.meta.glob(
-  '../../../../node_modules/@handsontable/spreadsheet-icons/svgs/compressed/*.svg',
-  { eager: true, query: '?raw', import: 'default' }
-);
-const svgMap = {};
-for (const path in modules) {
-  const name = path.substring(path.lastIndexOf('/') + 1, path.lastIndexOf('.'));
-  svgMap[name] = modules[path];
-}
+import {
+  AlignCenter,
+  AlignCenterVertical,
+  AlignEndVertical,
+  AlignLeft,
+  AlignRight,
+  AlignStartVertical,
+  Bold,
+  Code,
+  DecimalsArrowLeft,
+  DecimalsArrowRight,
+  FileSpreadsheet,
+  FileText,
+  Italic,
+  ListOrdered,
+  Menu,
+  Palette,
+  PanelLeft,
+  PanelTop,
+  Percent,
+  Pin,
+  Redo2,
+  RemoveFormatting,
+  Search,
+  Square,
+  SquareDashed,
+  Strikethrough,
+  Table,
+  TableCellsMerge,
+  TextWrap,
+  Undo2,
+  Upload,
+  X
+} from '@lucide/vue';
+
+const iconMap = {
+  'align-bottom': AlignEndVertical,
+  'align-center': AlignCenter,
+  'align-left': AlignLeft,
+  'align-middle': AlignCenterVertical,
+  'align-right': AlignRight,
+  'align-top': AlignStartVertical,
+  'bold': Bold,
+  'border-all': Table,
+  'border-left': PanelLeft,
+  'border-none': SquareDashed,
+  'border-outline': Square,
+  'border-top': PanelTop,
+  'clear-formatting': RemoveFormatting,
+  'close': X,
+  'code': Code,
+  'color-palette': Palette,
+  'decimal-decrease': DecimalsArrowLeft,
+  'decimal-increase': DecimalsArrowRight,
+  'document-csv': FileText,
+  'document-xls': FileSpreadsheet,
+  'find': Search,
+  'italic': Italic,
+  'merge-cells': TableCellsMerge,
+  'menu': Menu,
+  'numbered-list': ListOrdered,
+  'percent': Percent,
+  'pin': Pin,
+  'redo': Redo2,
+  'strike-through': Strikethrough,
+  'text-wrap': TextWrap,
+  'undo': Undo2,
+  'upload': Upload
+};
 
 export default {
   name: 'SvgIcon',
@@ -19,8 +81,8 @@ export default {
     name: { type: String, required: true }
   },
   computed: {
-    svgContent() {
-      return svgMap[this.name] || '';
+    iconComponent() {
+      return iconMap[this.name] || null;
     }
   }
 };
@@ -41,6 +103,7 @@ export default {
   width: 1em;
   height: 1em;
   display: block;
-  fill: currentColor;
+  fill: none;
+  stroke: currentColor;
 }
 </style>

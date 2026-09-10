@@ -172,5 +172,5 @@ export interface TableDesignerProps {
 }
 
 export const TableDesigner: DefineComponent<TableDesignerProps>;
-export const SvgIcon: DefineComponent;
+export const SvgIcon: DefineComponent<{ name: string }>;
 export default TableDesigner;

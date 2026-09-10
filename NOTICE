@@ -21,7 +21,6 @@ the full license text.
 * Vue.js (https://github.com/vuejs/core) — MIT License
 * es-toolkit (https://github.com/toss/es-toolkit) — MIT License
 * xlsx-js-style (https://github.com/gitbrent/xlsx-js-style) — Apache-2.0
-* @handsontable/spreadsheet-icons
-    (https://github.com/handsontable/spreadsheet-icons) — MIT License
+* @lucide/vue (https://github.com/lucide-icons/lucide) — ISC License
 * Rust crates used by the WASM calculation engine
     (pest, pest_derive, wasm-bindgen, js-sys) — MIT OR Apache-2.0 (dual)
