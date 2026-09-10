@@ -61,11 +61,11 @@ describe('SharedValueStore 并发读写压力测试', () => {
       expect(mismatches).toBe(0);
     });
 
-    it('应在启用连续缓冲区后保持分块与连续视图一致', () => {
+    it('应在启用连续缓冲区后只保留连续视图', () => {
       const store = createPopulatedStore(500, 64);
       store.getBuffer(); // 分配连续缓冲区并同步分块
 
-      // 验证预填充数据在两种视图中一致
+      // 验证预填充数据只保留在连续视图中
       let inconsistencies = 0;
       for (let r = 0; r < 100; r++) {
         for (let c = 0; c < 50; c++) {
@@ -77,20 +77,14 @@ describe('SharedValueStore 并发读写压力测试', () => {
             ? store.continuousView[contIdx]
             : null;
 
-          // 从分块读取
-          const chunkIdx = Math.floor(r / 1024);
-          const chunk = store.chunks.get(chunkIdx);
-          const chunkVal = chunk
-            ? chunk[(r % 1024) * store.maxCols + c]
-            : null;
-
-          if (contVal !== chunkVal || contVal !== expected) {
+          if (contVal !== expected) {
             inconsistencies++;
           }
         }
       }
 
       expect(inconsistencies).toBe(0);
+      expect(store.chunks.size).toBe(0);
     });
 
     it('应在 set 后立即 get 返回正确值（读写一致性）', () => {
@@ -331,10 +325,8 @@ describe('SharedValueStore 并发读写压力测试', () => {
         }
       }
 
-      // 验证分块数量合理
-      const maxRow = 299; // 写入的最高行
-      const expectedChunks = Math.ceil((maxRow + 1) / 1024);
-      expect(store.chunks.size).toBeLessThanOrEqual(expectedChunks);
+      // continuous 模式下不应保留分块副本
+      expect(store.chunks.size).toBe(0);
     });
 
     it('跨多个分块的数据一致性', () => {
@@ -356,8 +348,8 @@ describe('SharedValueStore 并发读写压力测试', () => {
       expect(store.get(1024, 0)).toBe(3);
       expect(store.get(2047, 0)).toBe(4);
 
-      // 验证分块数量
-      expect(store.chunks.size).toBe(2); // chunk 0 和 chunk 1
+      // continuous 模式下分块已释放
+      expect(store.chunks.size).toBe(0);
     });
   });
 

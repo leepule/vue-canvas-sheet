@@ -27,19 +27,32 @@ const DataType = {
 // ========== 共享内存管理 (SharedArrayBuffer) ==========
 let sharedBufferView = null; // 兼容旧格式
 let sharedChunks = new Map(); // 新格式：chunkIdx -> Float64Array
+let sharedContinuousView = null;
+let sharedContinuousRows = 0;
+let sharedContinuousCols = 0;
 let sharedMaxRows = 100000;
 let sharedMaxCols = 256;
 let sharedChunkSize = 1024;
+let sharedChunkCols = 256;
 const EMPTY_VALUE = -Infinity;
 
 function getSharedValue(r, c) {
-  // 1. 优先检查连续视图 (旧格式或已转换格式)
+  // 1. 优先检查连续视图（compact continuous 格式）
+  if (sharedContinuousView) {
+    if (
+      r < 0 || r >= sharedContinuousRows ||
+      c < 0 || c >= sharedContinuousCols
+    ) return EMPTY_VALUE;
+    return sharedContinuousView[r * sharedContinuousCols + c];
+  }
+
+  // 2. 优先检查连续视图 (旧格式)
   if (sharedBufferView) {
     if (r < 0 || r >= sharedMaxRows || c < 0 || c >= sharedMaxCols) return EMPTY_VALUE;
     return sharedBufferView[r * sharedMaxCols + c];
   }
 
-  // 2. 检查分块视图 (新格式)
+  // 3. 检查分块视图 (新格式)
   if (sharedChunks.size > 0) {
     if (r < 0 || r >= sharedMaxRows || c < 0 || c >= sharedMaxCols) return EMPTY_VALUE;
     const chunkIdx = Math.floor(r / sharedChunkSize);
@@ -47,7 +60,7 @@ function getSharedValue(r, c) {
     if (!view) return EMPTY_VALUE;
     
     const rowInChunk = r % sharedChunkSize;
-    return view[rowInChunk * sharedMaxCols + c];
+    return view[rowInChunk * sharedChunkCols + c];
   }
 
   return EMPTY_VALUE;
@@ -58,17 +71,43 @@ function updateSharedChunks(data) {
 
   if (data instanceof SharedArrayBuffer) {
     // 兼容旧格式
+    sharedChunks.clear();
+    sharedContinuousView = null;
+    sharedContinuousRows = 0;
+    sharedContinuousCols = 0;
     sharedBufferView = new Float64Array(data);
-  } else if (data.chunks) {
+  } else {
     // 处理新格式
+    sharedBufferView = null;
+    sharedChunks.clear();
+    sharedContinuousView = null;
+    sharedContinuousRows = 0;
+    sharedContinuousCols = 0;
+
     sharedMaxRows = data.maxRows || sharedMaxRows;
     sharedMaxCols = data.maxCols || sharedMaxCols;
     sharedChunkSize = data.chunkSize || 1024;
+    sharedChunkCols = sharedMaxCols;
 
-    for (const idx in data.chunks) {
-      const buffer = data.chunks[idx];
-      if (buffer instanceof SharedArrayBuffer) {
-        sharedChunks.set(parseInt(idx, 10), new Float64Array(buffer));
+    if (data.continuousBuffer instanceof SharedArrayBuffer) {
+      sharedContinuousView = new Float64Array(data.continuousBuffer);
+      sharedContinuousRows = data.continuousRows || sharedMaxRows;
+      sharedContinuousCols = data.continuousCols || sharedMaxCols;
+    }
+
+    if (!sharedContinuousView) {
+      const firstBuffer = data.chunks ? Object.values(data.chunks)[0] : null;
+      if (firstBuffer instanceof SharedArrayBuffer) {
+        sharedChunkCols =
+          data.chunkCols ||
+          Math.floor(new Float64Array(firstBuffer).length / sharedChunkSize);
+      }
+
+      for (const idx in data.chunks || {}) {
+        const buffer = data.chunks[idx];
+        if (buffer instanceof SharedArrayBuffer) {
+          sharedChunks.set(parseInt(idx, 10), new Float64Array(buffer));
+        }
       }
     }
   }
@@ -153,8 +192,6 @@ function handleEvaluateBatch(task) {
   // 按拓扑顺序计算
   const sortedFormulas = topologicalSort(formulas, data, evaluator.parser);
 
-  const hasSharedMemory = sharedBufferView !== null || sharedChunks.size > 0;
-
   for (const { cellId, formula, hasCycle } of sortedFormulas) {
     let result;
     if (hasCycle) {
@@ -179,7 +216,7 @@ function handleEvaluateBatch(task) {
     // 关键修复：非数字结果（如 #CYCLE!）必须在 SharedArrayBuffer 中
     // 写入 EMPTY_VALUE（-Infinity），防止主线程 getCellValue 读取到
     // WASM 引擎残留的默认值 0.0，导致渲染层显示 0 而非错误字符串。
-    if (hasSharedMemory && (typeof result !== 'number' || isNaN(result))) {
+    if (typeof result !== 'number' || isNaN(result)) {
       const { r, c } = parseCellKey(cellId);
       setSharedValue(r, c, EMPTY_VALUE);
     }
@@ -531,19 +568,15 @@ function handleRecalcAll(task) {
     
     // 4. 写回结果
     const { r, c } = parseCellKey(cellId);
-    // 检测共享内存是否实际可用（Worker 中是否有有效视图/分块）
-    // 在缺少 COOP/COEP 头或浏览器不支持 SharedArrayBuffer 时，
-    // sharedBufferView 和 sharedChunks 均为空，必须走 results 回传路径
-    const hasSharedMemory = sharedBufferView !== null || sharedChunks.size > 0;
-    if (typeof result === 'number' && !isNaN(result) && hasSharedMemory) {
-        // 数字结果且共享内存可用时，写入共享内存减少传输体积
-        setSharedValue(r, c, result);
-    } else {
-        // 共享内存不可用时回退到 results 传输，或非数字结果
-        results[cellId] = result;
-        if (hasSharedMemory) {
-            setSharedValue(r, c, EMPTY_VALUE);
+    if (typeof result === 'number' && !isNaN(result)) {
+        // 数字结果优先写共享内存；目标越界时回退到 results 传输。
+        if (!setSharedValue(r, c, result)) {
+            results[cellId] = result;
         }
+    } else {
+        // 非数字结果不能写入 Float64 共享内存，走 results 传输。
+        results[cellId] = result;
+        setSharedValue(r, c, EMPTY_VALUE);
     }
     
     // 更新本地数据引用，供后续公式依赖使用
@@ -556,19 +589,32 @@ function handleRecalcAll(task) {
 }
 
 function setSharedValue(r, c, val) {
-  if (r < 0 || r >= sharedMaxRows || c < 0 || c >= sharedMaxCols) return;
+  if (r < 0 || r >= sharedMaxRows || c < 0 || c >= sharedMaxCols) return false;
 
-  // 优先连续视图
+  // 优先 compact continuous 视图
+  if (sharedContinuousView) {
+    if (
+      r >= sharedContinuousRows ||
+      c >= sharedContinuousCols
+    ) return false;
+    sharedContinuousView[r * sharedContinuousCols + c] = val;
+    return true;
+  }
+
+  // 兼容旧连续视图
   if (sharedBufferView) {
     sharedBufferView[r * sharedMaxCols + c] = val;
-    return;
+    return true;
   }
 
   // 分块视图
   if (sharedChunks.size > 0) {
     const chunkIdx = Math.floor(r / sharedChunkSize);
     const view = sharedChunks.get(chunkIdx);
-    if (!view) return;
-    view[(r % sharedChunkSize) * sharedMaxCols + c] = val;
+    if (!view) return false;
+    view[(r % sharedChunkSize) * sharedChunkCols + c] = val;
+    return true;
   }
+
+  return false;
 }

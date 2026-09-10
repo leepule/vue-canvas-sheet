@@ -43,10 +43,10 @@ describe('SharedValueStore TypedArray 批量拷贝', () => {
       store.set(0, 0, 1); store.set(0, 1, 2); store.set(0, 2, 3); store.set(0, 3, 4);
       store.getBuffer();
 
-      // 写入跨越新分块（行 > CHUNK_SIZE=1024）触发新分块分配 + _syncToContinuous
-      // 但连续缓冲区可能已被扩容；这里写一个仍在范围内的高行
+      // 连续缓冲区启用后不再分配新分块。
       store.set(2000, 0, 999);
       expect(store.get(2000, 0)).toBe(999);
+      expect(store.chunks.size).toBe(0);
     });
   });
 
@@ -193,8 +193,53 @@ describe('SharedValueStore TypedArray 批量拷贝', () => {
       expect(workerStore.get(10, 2)).toBe(30);
 
       // 连续缓冲区引用应传递到 Worker 端（同一 SharedArrayBuffer）
-      expect(workerStore.continuousBuffer).toBeNull();
-      // updateFromSerialized 不应覆盖 continuousBuffer（Worker 端用独立的 WASM 绑定路径）
+      expect(workerStore.continuousBuffer).toBe(serialized.continuousBuffer);
+      expect(workerStore._continuousCols).toBe(serialized.continuousCols);
+      expect(workerStore.chunks.size).toBe(0);
+    });
+  });
+
+  describe('内存单一表示', () => {
+    it('continuous 启用后写大表不会分配分块', () => {
+      const store = new SharedValueStore(100000, 256);
+      store.set(0, 0, 1);
+      store.getBuffer();
+      store.set(5000, 0, 2);
+      store.set(20000, 0, 3);
+
+      expect(store.chunks.size).toBe(0);
+      expect(store.get(5000, 0)).toBe(2);
+      expect(store.get(20000, 0)).toBe(3);
+      expect(store._continuousCols).toBe(2);
+    });
+
+    it('serialize 在 continuous 模式下不重复传输分块', () => {
+      const store = new SharedValueStore(10000, 256);
+      store.set(0, 0, 1);
+      store.set(2000, 0, 2);
+      store.getBuffer();
+
+      const serialized = store.serialize();
+      expect(serialized.continuousBuffer).toBeInstanceOf(SharedArrayBuffer);
+      expect(serialized.chunks).toEqual({});
+      expect(serialized.chunkCols).toBe(0);
+    });
+
+    it('chunk 模式按实际列数分配并在列扩展时保留数据', () => {
+      const store = new SharedValueStore(10000, 256);
+      store.set(0, 0, 11);
+      store.set(2000, 0, 22);
+
+      expect(store._chunkCols).toBe(1);
+      expect(store.chunks.get(0).byteLength).toBe(1024 * 8);
+      expect(store.chunks.get(1).byteLength).toBe(1024 * 8);
+
+      store.set(0, 10, 33);
+      expect(store._chunkCols).toBe(11);
+      expect(store.chunks.get(0).byteLength).toBe(1024 * 11 * 8);
+      expect(store.get(0, 0)).toBe(11);
+      expect(store.get(2000, 0)).toBe(22);
+      expect(store.get(0, 10)).toBe(33);
     });
   });
 });

@@ -31,6 +31,8 @@ export class SharedValueStore {
     this.continuousView = null;
     /** @type {number} 连续缓冲区实际分配的列数（用于索引计算） */
     this._continuousCols = 0;
+    /** @type {number} 分块实际分配的列数（用于紧凑布局） */
+    this._chunkCols = 0;
     /** @type {Function|null} 缓冲区扩容回调（通知 WASM 更新 grid_rows） */
     this.onGrow = null;
 
@@ -46,18 +48,26 @@ export class SharedValueStore {
     if (this.continuousView) {
       this.continuousView.fill(SharedValueStore.EMPTY_VALUE);
     }
-    for (const view of this.chunks.values()) {
-      view.fill(SharedValueStore.EMPTY_VALUE);
-    }
-    // 释放分块内存
+    // 释放分块内存；连续缓冲区保留给已绑定的 WASM/Worker 复用。
     this.chunks.clear();
+    this._actualMaxRow = -1;
+    this._actualMaxCol = -1;
+    this._chunkCols = 0;
   }
 
   /**
    * 获取或创建一个分块
    * @private
    */
-  _getChunk(r) {
+  _getChunk(r, c) {
+    const requiredCols = Math.min(
+      Math.max(c + 1, this._actualMaxCol + 1, 1),
+      this.maxCols
+    );
+    if (requiredCols > this._chunkCols) {
+      this._growChunkStride(requiredCols);
+    }
+
     const chunkIdx = Math.floor(r / CHUNK_SIZE);
     let view = this.chunks.get(chunkIdx);
     
@@ -65,20 +75,51 @@ export class SharedValueStore {
       if (!this.supported) return null;
       
       try {
-        // 分配一个新的分块
-        const buffer = new SharedArrayBuffer(CHUNK_SIZE * this.maxCols * BYTES_PER_CELL);
+        const buffer = new SharedArrayBuffer(
+          CHUNK_SIZE * this._chunkCols * BYTES_PER_CELL
+        );
         view = new Float64Array(buffer);
         view.fill(SharedValueStore.EMPTY_VALUE);
         this.chunks.set(chunkIdx, view);
-        
-        // 如果连续缓冲区已存在，同步该分块的数据到连续缓冲区
-        this._syncToContinuous(chunkIdx, view);
       } catch (err) {
         console.warn('[SharedValueStore] 无法分配分块内存:', err);
         return null;
       }
     }
     return view;
+  }
+
+  /**
+   * 扩充分块列宽，并保持已写入数据不丢失。
+   * @private
+   */
+  _growChunkStride(newCols) {
+    if (newCols <= this._chunkCols) return;
+
+    const nextChunks = new Map();
+    for (const [chunkIdx, oldView] of this.chunks.entries()) {
+      const buffer = new SharedArrayBuffer(
+        CHUNK_SIZE * newCols * BYTES_PER_CELL
+      );
+      const nextView = new Float64Array(buffer);
+      nextView.fill(SharedValueStore.EMPTY_VALUE);
+
+      const oldRows = Math.floor(oldView.length / this._chunkCols);
+      const copyRows = Math.min(oldRows, CHUNK_SIZE);
+      const copyCols = this._chunkCols;
+      for (let row = 0; row < copyRows; row++) {
+        const srcOffset = row * copyCols;
+        const dstOffset = row * newCols;
+        nextView.set(
+          oldView.subarray(srcOffset, srcOffset + copyCols),
+          dstOffset
+        );
+      }
+      nextChunks.set(chunkIdx, nextView);
+    }
+
+    this.chunks = nextChunks;
+    this._chunkCols = newCols;
   }
 
   /**
@@ -93,7 +134,7 @@ export class SharedValueStore {
     const copyLen = Math.min(chunkView.length, this.continuousView.length - offset);
     if (copyLen <= 0) return;
 
-    const srcCols = this.maxCols;
+    const srcCols = this._chunkCols;
     const dstCols = this._continuousCols;
 
     // 快路径：源/目标列数相同（列数稳定的常见情况），行布局完全一致，
@@ -141,20 +182,20 @@ export class SharedValueStore {
     if (r > this._actualMaxRow) this._actualMaxRow = r;
     if (c > this._actualMaxCol) this._actualMaxCol = c;
 
-    // 1. 更新分块（懒分配）
-    const chunkView = this._getChunk(r);
-    if (chunkView) {
-      const rowInChunk = r % CHUNK_SIZE;
-      chunkView[rowInChunk * this.maxCols + c] = numericVal;
-    }
-
-    // 2. 如果已存在连续缓冲区，同步更新（超出范围时扩容）
+    // continuous 模式是唯一内存表示；切换后不再保留分块副本。
     if (this.continuousView) {
       const continuousRows = Math.floor(this.continuousView.length / this._continuousCols);
       if (r >= continuousRows || c >= this._continuousCols) {
         this._growContinuousBuffer(r + 1, c + 1);
       }
       this.continuousView[r * this._continuousCols + c] = numericVal;
+      return;
+    }
+
+    const chunkView = this._getChunk(r, c);
+    if (chunkView) {
+      const rowInChunk = r % CHUNK_SIZE;
+      chunkView[rowInChunk * this._chunkCols + c] = numericVal;
     }
   }
 
@@ -181,7 +222,7 @@ export class SharedValueStore {
     if (!view) return SharedValueStore.EMPTY_VALUE;
 
     const rowInChunk = r % CHUNK_SIZE;
-    return view[rowInChunk * this.maxCols + c];
+    return view[rowInChunk * this._chunkCols + c];
   }
   
   getValue(r, c) {
@@ -213,6 +254,9 @@ export class SharedValueStore {
         for (const [chunkIdx, view] of this.chunks.entries()) {
           this._syncToContinuous(chunkIdx, view);
         }
+        // 同步完成后释放分块，避免同一份数据占用两份 SharedArrayBuffer。
+        this.chunks.clear();
+        this._chunkCols = 0;
       } catch (err) {
         console.error('[SharedValueStore] 无法分配连续的 SharedArrayBuffer:', err);
         return null;
@@ -286,6 +330,7 @@ export class SharedValueStore {
       maxRows: this.maxRows,
       maxCols: this.maxCols,
       chunkSize: CHUNK_SIZE,
+      chunkCols: this._chunkCols,
       // Worker 端 WASM 绑定所需：连续缓冲区引用及其维度
       continuousBuffer: this.continuousBuffer || undefined,
       continuousRows: this.continuousBuffer
@@ -303,8 +348,30 @@ export class SharedValueStore {
 
     if (data instanceof SharedArrayBuffer) {
       // 向后兼容旧格式
+      this.chunks.clear();
+      this._chunkCols = 0;
+      this._actualMaxRow = -1;
+      this._actualMaxCol = -1;
       this.continuousBuffer = data;
       this.continuousView = new Float64Array(data);
+      this._continuousCols = this.maxCols;
+      return;
+    }
+
+    this.chunks.clear();
+    this._chunkCols = 0;
+    this.continuousBuffer = null;
+    this.continuousView = null;
+    this._continuousCols = 0;
+    this._actualMaxRow = -1;
+    this._actualMaxCol = -1;
+
+    if (data.continuousBuffer instanceof SharedArrayBuffer) {
+      this.maxRows = data.maxRows || this.maxRows;
+      this.maxCols = data.maxCols || this.maxCols;
+      this.continuousBuffer = data.continuousBuffer;
+      this.continuousView = new Float64Array(data.continuousBuffer);
+      this._continuousCols = data.continuousCols || this.maxCols;
       return;
     }
 
@@ -312,6 +379,13 @@ export class SharedValueStore {
       this.maxRows = data.maxRows;
       this.maxCols = data.maxCols;
       const chunkSize = data.chunkSize || CHUNK_SIZE;
+      const firstBuffer = Object.values(data.chunks)[0];
+      const chunkCols =
+        data.chunkCols ||
+        (firstBuffer instanceof SharedArrayBuffer
+          ? Math.floor(new Float64Array(firstBuffer).length / chunkSize)
+          : this.maxCols);
+      this._chunkCols = chunkCols;
 
       for (const idx in data.chunks) {
         const buffer = data.chunks[idx];
