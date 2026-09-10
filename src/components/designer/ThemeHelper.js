@@ -9,13 +9,13 @@ export class ThemeHelper {
     workbook.history.startBatch();
     let headerEndRow = startRow;
     for (let c = startCol; c <= endCol; c++) {
-      const merge = workbook.getMerge(startRow, c);
+      const merge = workbook.mergeManager.getMerge(startRow, c);
       if (merge) {
         headerEndRow = Math.max(headerEndRow, merge.e.r);
       }
     }
     if (endCol >= startCol) {
-        workbook.setStyle({
+        workbook.styleManager.setStyle({
             s: { r: startRow, c: startCol },
             e: { r: headerEndRow, c: endCol }
         }, theme.header);
@@ -23,7 +23,7 @@ export class ThemeHelper {
     for (let r = headerEndRow + 1; r <= endRow; r++) {
       const isEven = (r - (headerEndRow + 1)) % 2 === 0;
       const rowStyle = isEven ? theme.bodyEven : theme.bodyOdd;
-      workbook.setStyle({
+      workbook.styleManager.setStyle({
           s: { r: r, c: startCol },
           e: { r: r, c: endCol }
       }, rowStyle);

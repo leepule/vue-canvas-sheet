@@ -189,15 +189,43 @@ export class OffscreenRenderer {
     
     this.useWorker = false;
     this.workerCanvasReady = false;
-    this.ctx = this.canvasTransferred ? null : (this.mainCtx || (this.canvas ? this.canvas.getContext('2d') : null));
-    this.mainCtx = this.ctx;
-    this.stats.recordFallback();
-    
-    console.warn('[OffscreenRenderer] Fallback to main thread rendering');
-    
-    if (this.onFallback) {
-      this.onFallback(new Error('Fallback to main thread'));
+
+    // canvas 控制权一旦通过 transferControlToOffscreen 转移给 worker，
+    // 主线程对同一元素调用 getContext('2d') 会抛 InvalidStateError，必须换用全新的
+    // canvas 元素才能重获 2D 绘制权。但创建/替换 DOM 节点是 Vue 的职责——核心渲染层
+    // 直接 replaceChild 会让 Vue 的 VNode 缓存指向游离节点，下次 patch 抛 NotFoundError。
+    // 因此这里只发出"需要重建 canvas"信号，由组件层通过 :key 变更让 Vue 重建后再 attachCanvas 回挂。
+    const needsRebuild = this.canvasTransferred;
+    if (needsRebuild) {
+      this.ctx = null;
+      this.mainCtx = null;
+    } else {
+      this.ctx = this.canvas ? this.canvas.getContext('2d') : null;
+      this.mainCtx = this.ctx;
     }
+    this.stats.recordFallback();
+
+    console.warn('[OffscreenRenderer] Fallback to main thread rendering');
+
+    if (this.onFallback) {
+      this.onFallback(new Error('Fallback to main thread'), { needsCanvasRebuild: needsRebuild });
+    }
+  }
+
+  /**
+   * 回挂主线程 canvas 元素（用于 worker 降级后 Vue 重建 canvas 的场景）
+   *
+   * 当 canvas 控制权已转移给 worker 时，_fallbackToMainThread 无法就地获取 2D context，
+   * 需由组件层通过 :key 变更让 Vue 重建出全新 canvas 元素后调用本方法回挂。
+   * @param {HTMLCanvasElement} canvasEl 新的 canvas 元素
+   * @returns {CanvasRenderingContext2D|null} 新元素的 2D 上下文
+   */
+  attachCanvas(canvasEl) {
+    this.canvas = canvasEl;
+    this.canvasTransferred = false;
+    this.ctx = canvasEl ? canvasEl.getContext('2d') : null;
+    this.mainCtx = this.ctx;
+    return this.ctx;
   }
 
   /**
@@ -393,7 +421,7 @@ export class OffscreenRenderer {
       ctx.clearRect(0, 0, this.width, this.height);
     }
 
-    // 这里只返回成功，实际绘制由 CanvasRenderMixin 完成
+    // 主线程路径只负责清屏，具体内容由调用方渲染
     const renderTime = performance.now() - startTime;
     this.stats.recordMainThreadRender(renderTime);
 

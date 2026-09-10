@@ -26,9 +26,6 @@ export default {
       readOnly: false,
     };
   },
-  mounted() {
-    // window.__wb 已在 TableDesigner created() 中自动挂载
-  },
 };
 </script>
 

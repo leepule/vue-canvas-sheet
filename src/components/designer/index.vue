@@ -63,23 +63,28 @@
 				</div>
 		</div>
 	</div>
+	<!-- WASM 降级 / 全局通知 -->
+	<ToastNotification ref="toast" :container-bottom="60" />
 </template>
 <script>
 	import { markRaw } from 'vue';
 	import Toolbar from "./Toolbar.vue";
 	import CanvasTable from "./CanvasTable.vue";
 	import FormulaBar from "./FormulaBar.vue";
+	import ToastNotification from "./ToastNotification.vue";
 	import { Workbook } from "../../core/Workbook";
 	import { ThemeHelper } from "./ThemeHelper";
 	import { cloneCell } from '@/core/utils/Clipboard';
 	import { DataController } from "./controller/DataController";
+	import { Events } from "../../core/events/EventEmitter.js";
 
 	export default {
 		name: "TableDesigner",
 		components: {
 			CanvasTable,
 			FormulaBar,
-			Toolbar
+			Toolbar,
+			ToastNotification
 		},
 		data() {
 			return {
@@ -111,10 +116,10 @@
 		},
 		computed: {
 			canMerge() {
-				return this.uiVersion >= 0 && this.workbook && this.workbook.selection && this.workbook.allowsMerge(this.workbook.selection);
+				return this.uiVersion >= 0 && this.workbook && this.workbook.selection && this.workbook.mergeManager.allowsMerge(this.workbook.selection);
 			},
 			canUnmerge() {
-				return this.uiVersion >= 0 && this.workbook && this.workbook.selection && this.workbook.allowsUnmerge(this.workbook.selection);
+				return this.uiVersion >= 0 && this.workbook && this.workbook.selection && this.workbook.mergeManager.allowsUnmerge(this.workbook.selection);
 			},
 			canClear() {
 				return this.uiVersion >= 0 && !!(this.workbook && this.workbook.selection);
@@ -195,7 +200,7 @@
 			},
 			handleApplyStyle(key, val) {
 				if (!this.workbook || !this.workbook.selection) return;
-				this.workbook.setStyle(this.workbook.selection, { [key]: val });
+				this.workbook.styleManager.setStyle(this.workbook.selection, { [key]: val });
 				this.triggerUpdate();
 				this.$refs.canvasTable.focus();
 			},
@@ -207,7 +212,7 @@
 
 				const val = currentStyle[key] === value ? undefined : value;
 
-				this.workbook.setStyle(this.workbook.selection, { [key]: val });
+				this.workbook.styleManager.setStyle(this.workbook.selection, { [key]: val });
 
 				this.activeStyle[key] = val;
 				this.triggerUpdate();
@@ -230,13 +235,13 @@
 				if (!this.workbook || !this.workbook.selection) return;
 				const sel = this.workbook.selection;
 				if (sel.s.r === sel.e.r && sel.s.c === sel.e.c) return;
-				this.workbook.mergeCells(sel);
+				this.workbook.mergeManager.mergeCells(sel);
 				this.triggerUpdate();
 				this.$refs.canvasTable.focus();
 			},
 			handleUnmerge() {
 				if (!this.workbook || !this.workbook.selection) return;
-				this.workbook.unmergeCells(this.workbook.selection);
+				this.workbook.mergeManager.unmergeCells(this.workbook.selection);
 				this.triggerUpdate();
 				this.$refs.canvasTable.focus();
 			},
@@ -254,19 +259,19 @@
 			},
 			handleApplyBorder({ type, color }) {
 				if (!this.workbook || !this.workbook.selection) return;
-				this.workbook.setBorder(this.workbook.selection, type, color, 'solid');
+				this.workbook.styleManager.setBorder(this.workbook.selection, type, color, 'solid');
 				this.triggerUpdate();
 				this.$refs.canvasTable.focus();
 			},
 			handleFormat(fmt) {
 				if (!this.workbook || !this.workbook.selection) return;
-				this.workbook.setFormat(this.workbook.selection, fmt);
+				this.workbook.styleManager.setFormat(this.workbook.selection, fmt);
 				this.triggerUpdate();
 				this.$refs.canvasTable.focus();
 			},
 			handleDecimals(delta) {
 				if (!this.workbook || !this.workbook.selection) return;
-				this.workbook.setDecimals(this.workbook.selection, delta);
+				this.workbook.styleManager.setDecimals(this.workbook.selection, delta);
 				this.triggerUpdate();
 				this.$refs.canvasTable.focus();
 			},
@@ -664,11 +669,6 @@
 			}));
 			this.workbook.readOnly = this.readOnly;
 			this.workbook.enableWorker();
-
-			// 开发调试：挂载到 window，控制台可直接使用 __wb
-			if (typeof window !== 'undefined') {
-				window.__wb = this.workbook;
-			}
 			
 			// 创建数据控制器，传入懒加载配置
 			this.dataController = markRaw(new DataController(this.workbook, () => {
@@ -682,12 +682,26 @@
 
 			if (this.plugins && this.plugins.length > 0) {
 				this.plugins.forEach(plugin => {
-					this.workbook.plugins.add(plugin);
+					this.workbook.plugins.register(plugin);
 				});
 			}
 
 			this._unsubLockChange = this.workbook.on('lock-change', () => {
 				this.triggerUpdate();
+			});
+
+			// 订阅 WASM 降级事件，通过 Toast 触达用户
+			this._unsubWasmDowngrade = this.workbook.on(Events.WASM_DOWNGRADE, (payload) => {
+				const toast = this.$refs.toast;
+				if (toast && typeof toast.show === 'function') {
+					toast.show({
+						title: payload.title || '计算引擎降级',
+						message: payload.message || '',
+						severity: payload.severity || 'warning',
+						status: payload.status || null,
+						duration: 0 // WASM 降级提示持续显示，用户手动关闭
+					});
+				}
 			});
 
 			if (this.columns && this.columns.length > 0) {
@@ -703,9 +717,19 @@
 			if (this._unsubLockChange) {
 				this._unsubLockChange();
 			}
+			if (this._unsubWasmDowngrade) {
+				this._unsubWasmDowngrade();
+			}
 			// 清理数据控制器
 			if (this.dataController) {
 				this.dataController.destroy();
+			}
+			// 关闭前先刷新持久化，避免卸载丢失待保存数据。
+			if (this.workbook) {
+				this._workbookClosePromise = this.workbook.close();
+				this._workbookClosePromise.catch(error => {
+					console.error('[TableDesigner] Workbook close failed:', error);
+				});
 			}
 		}
 	};
