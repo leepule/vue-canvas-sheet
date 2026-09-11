@@ -94,7 +94,7 @@ function createDeferred() {
   return { promise, resolve, reject };
 }
 
-function createFormulaEngineHarness() {
+function createFormulaEngineHarness({ calcEngine = null } = {}) {
   const cells = new Map([
     ['0,0', { f: '=OLD()', v: null, dirty: true }]
   ]);
@@ -123,7 +123,7 @@ function createFormulaEngineHarness() {
     getSharedValueStore: () => null,
     setSharedValueStore: vi.fn(),
     syncSharedValue,
-    getCalcEngine: () => null,
+    getCalcEngine: () => calcEngine,
     evaluateFormula: vi.fn(),
     getRowCount: () => 10,
     getColCount: () => 10,
@@ -141,7 +141,7 @@ function createFormulaEngineHarness() {
     })
   };
 
-  return { service, cells, workerCalls, syncSharedValue };
+  return { service, cells, workerCalls, syncSharedValue, calcEngine };
 }
 
 // ─── 测试套件 ───
@@ -544,6 +544,35 @@ describe('FormulaEngineService 并发队列', () => {
     expect(cells.get('0,0').v).toBe('new-result');
     expect(cells.get('0,0').dirty).toBe(false);
     expect(syncSharedValue).toHaveBeenLastCalledWith(0, 0, 'new-result');
+  });
+
+  it('recalcAllWithWorker 统计应复用轻量载荷估算而不重新序列化', async () => {
+    const calcEngine = {
+      stats: {
+        formulasEvaluated: 0,
+        lastResultCount: 0,
+        batches: 0,
+        lastDuration: 0
+      },
+      recordWorkerPayloadStats: vi.fn()
+    };
+    const { service, cells, workerCalls } = createFormulaEngineHarness({ calcEngine });
+    cells.set('0,1', { v: 'text value' });
+
+    const estimateSpy = vi.spyOn(service, '_estimateWorkerPayloadBytes').mockReturnValue(1234);
+    const run = service.recalcAllWithWorker();
+    workerCalls[0].deferred.resolve({ '0,0': 42 });
+    await run;
+
+    expect(estimateSpy).toHaveBeenCalledWith(
+      [{ cellId: '0,0', formula: '=OLD()' }],
+      { '0,1': { v: 'text value' } }
+    );
+    expect(calcEngine.recordWorkerPayloadStats).toHaveBeenCalledWith({
+      formulaCount: 1,
+      cellCount: 1,
+      estimatedBytes: 1234
+    });
   });
 
   it('_processWorkerQueue 应清空队列', async () => {

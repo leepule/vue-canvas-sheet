@@ -206,10 +206,7 @@ export class FormulaEngineService {
         calcEngine.recordWorkerPayloadStats({
           formulaCount: formulas.length,
           cellCount: Object.keys(nonNumericData).length,
-          estimatedBytes: JSON.stringify({
-            formulas,
-            data: nonNumericData
-          }).length
+          estimatedBytes: this._estimateWorkerPayloadBytes(formulas, nonNumericData)
         });
       }
 
