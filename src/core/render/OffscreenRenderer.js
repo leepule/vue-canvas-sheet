@@ -266,9 +266,10 @@ export class OffscreenRenderer {
    * 执行尺寸同步
    * @private
    */
-  async _applySize(width, height) {
+  async _applySize(width, height, dpr = this.dpr) {
     this.width = width;
     this.height = height;
+    this.dpr = normalizeDevicePixelRatio(dpr);
 
     if (this.canvas) {
       this.canvas.style.width = width + 'px';
@@ -328,17 +329,21 @@ export class OffscreenRenderer {
    * 调整 Canvas 尺寸
    * @param {number} width 新宽度
    * @param {number} height 新高度
+   * @param {number} [dpr] 当前设备像素比，未传入时从运行环境读取
    */
-  async resize(width, height) {
+  async resize(width, height, dpr = getDevicePixelRatio()) {
+    const nextDpr = normalizeDevicePixelRatio(dpr);
+
     if (this.sizePromise) {
       await this.sizePromise;
     }
 
-    if (this.width === width && this.height === height && (!this.useWorker || this.workerCanvasReady)) {
+    if (this.width === width && this.height === height && this.dpr === nextDpr &&
+        (!this.useWorker || this.workerCanvasReady)) {
       return true;
     }
 
-    const promise = this._applySize(width, height);
+    const promise = this._applySize(width, height, nextDpr);
     this.sizePromise = promise;
 
     try {

@@ -101,6 +101,22 @@ describe('OffscreenRenderer', () => {
     renderer.destroy();
   });
 
+  test('同尺寸 resize 时 DPR 变化也应该重新同步 canvas', async () => {
+    const canvas = document.createElement('canvas');
+    const renderer = new OffscreenRenderer({ canvas, theme: {}, enableWorker: false });
+
+    await renderer.resize(320, 200, 1);
+    expect(renderer.dpr).toBe(1);
+    expect(canvas.width).toBe(320);
+
+    await renderer.resize(320, 200, 2);
+    expect(renderer.dpr).toBe(2);
+    expect(canvas.width).toBe(640);
+    expect(canvas.height).toBe(400);
+
+    renderer.destroy();
+  });
+
   test('降级到主线程时如果控制权已转移，应该发出重建信号而不直接操作 DOM', async () => {
     class ReadyWorker {
       constructor() {

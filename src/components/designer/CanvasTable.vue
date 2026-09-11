@@ -519,7 +519,7 @@ function handleResize() {
   state.renderGridRequested = true;
 
   if (tableContext.methods.offscreenRenderer && tableContext.methods.offscreenRenderer.value) {
-    tableContext.methods.offscreenRenderer.value.resize(width, height).then((usingOffscreen) => {
+    tableContext.methods.offscreenRenderer.value.resize(width, height, dpr).then((usingOffscreen) => {
       if (!usingOffscreen && !state.ctx && canvasEl) {
         state.ctx = canvasEl.getContext('2d');
         if (state.ctx) {
@@ -621,6 +621,40 @@ function preloadTextMetrics() {
 let _handleResizeDebounced = null;
 let _preloadTextMetricsDebounced = null;
 let resizeObserver = null;
+let dprMediaQuery = null;
+let dprMediaQueryListener = null;
+
+function removeDprMediaQueryListener() {
+  if (!dprMediaQuery || !dprMediaQueryListener) return;
+
+  if (typeof dprMediaQuery.removeEventListener === 'function') {
+    dprMediaQuery.removeEventListener('change', dprMediaQueryListener);
+  } else if (typeof dprMediaQuery.removeListener === 'function') {
+    dprMediaQuery.removeListener(dprMediaQueryListener);
+  }
+
+  dprMediaQuery = null;
+  dprMediaQueryListener = null;
+}
+
+function setupDprMediaQuery() {
+  removeDprMediaQueryListener();
+
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+
+  const dpr = getDevicePixelRatio();
+  dprMediaQuery = window.matchMedia(`(resolution: ${dpr}dppx)`);
+  dprMediaQueryListener = () => {
+    handleResize();
+    setupDprMediaQuery();
+  };
+
+  if (typeof dprMediaQuery.addEventListener === 'function') {
+    dprMediaQuery.addEventListener('change', dprMediaQueryListener);
+  } else if (typeof dprMediaQuery.addListener === 'function') {
+    dprMediaQuery.addListener(dprMediaQueryListener);
+  }
+}
 
 onMounted(() => {
   initCanvas();
@@ -655,6 +689,7 @@ onMounted(() => {
   setupWorkbookSubscription();
   startAnimation();
   handleResize();
+  setupDprMediaQuery();
   updateScrollbarSize();
 });
 
@@ -662,6 +697,7 @@ onBeforeUnmount(() => {
   if (resizeObserver) {
     resizeObserver.disconnect();
   }
+  removeDprMediaQueryListener();
   if (state.workbookUnsub) {
     state.workbookUnsub();
     state.workbookUnsub = null;
