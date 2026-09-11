@@ -33,6 +33,8 @@ export interface Cell {
 export interface WorkbookOptions {
   enablePersistence?: boolean;
   enableWasm?: boolean | 'auto';
+  debug?: boolean;
+  verbose?: boolean;
   sheetId?: string;
 }
 

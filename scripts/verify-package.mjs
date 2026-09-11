@@ -12,11 +12,13 @@ const REQUIRED_FILES = [
   'dist/core.es.js',
   'dist/designer.es.js',
   'dist/icons.es.js',
+  'dist/plugins.es.js',
   'dist/render.es.js',
   'dist/vue-canvas-sheet.css',
   'types/icons.d.ts',
   'types/core.d.ts',
   'types/index.d.ts',
+  'types/plugins.d.ts',
   'types/render.d.ts'
 ];
 

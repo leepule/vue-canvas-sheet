@@ -621,6 +621,20 @@
 				}
 			},
 			/**
+			 * 是否输出引擎调试日志（默认只保留 warn/error）
+			 */
+			debug: {
+				type: Boolean,
+				default: false
+			},
+			/**
+			 * debug 的别名
+			 */
+			verbose: {
+				type: Boolean,
+				default: false
+			},
+			/**
 			 * 工作表 ID（用于持久化指纹识别）
 			 */
 			sheetId: {
@@ -677,7 +691,9 @@
 			this.workbook = markRaw(new Workbook({
 				enablePersistence: this.enablePersistence,
 				sheetId: this.sheetId,
-				enableWasm: this.enableWasm
+				enableWasm: this.enableWasm,
+				debug: this.debug,
+				verbose: this.verbose
 			}));
 			this.workbook.readOnly = this.readOnly;
 			this.workbook.enableWorker();

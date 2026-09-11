@@ -29,6 +29,7 @@ const MAX_INLINE_RANGE_SNAPSHOT_CELLS = 5000;
  * 从 Workbook.js 解耦，遵循与 MergeManager/StyleManager 等一致的 deps 注入模式。
  *
  * @typedef {Object} FormulaEngineDeps
+ * @property {boolean}                          debug                  — 是否输出调试日志
  * @property {() => SparseMatrix}             getDataMatrix          — 数据矩阵引用
  * @property {(r: number, c: number) => string} cellKey              — 行列 → 单元格键
  * @property {(k: string) => {r:number,c:number}} parseKey           — 键解析器
@@ -55,6 +56,7 @@ export class FormulaEngineService {
   constructor(deps) {
     /** @type {FormulaEngineDeps} */
     this.d = deps;
+    this.debug = deps.debug === true;
 
     // ========== Web Worker 支持 ==========
     /** @type {WorkerManager|null} */
@@ -73,7 +75,7 @@ export class FormulaEngineService {
     this._sharedCols = 256;
 
     // ========== WASM 桥接 ==========
-    this.wasmBridge = new WasmBridge();
+    this.wasmBridge = new WasmBridge({ debug: this.debug });
   }
 
   // ───────── Worker 生命周期 ─────────
@@ -437,7 +439,8 @@ export class FormulaEngineService {
       if (typeof SharedArrayBuffer === 'undefined') return null;
       this.sharedValueStore = new SharedValueStore(
         this._sharedRows,
-        this._sharedCols
+        this._sharedCols,
+        { debug: this.debug }
       );
       this.sharedValueStore.onGrow = (newRows, newBuffer, newCols) => {
         this.wasmBridge.rebindSharedMemory(newBuffer, newRows, newCols);

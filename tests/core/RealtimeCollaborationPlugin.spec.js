@@ -207,6 +207,37 @@ describe('RealtimeCollaborationPlugin - 远程消息边界安全校验', () => {
     logSpy.mockRestore();
   });
 
+  it('默认不输出聊天内容，debug 时才输出调试日志', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const plugin = new RealtimeCollaborationPlugin({
+      autoConnect: false,
+      roomId: 'room-1',
+      userId: 'me'
+    });
+    plugin._registry = { get: () => null };
+
+    plugin._handleRemoteMessage({
+      type: 'chat-message',
+      roomId: 'room-1',
+      userId: 'other',
+      userName: '韩梅梅',
+      text: '秘密内容'
+    });
+    expect(logSpy).not.toHaveBeenCalled();
+
+    plugin.debug = true;
+    plugin._handleRemoteMessage({
+      type: 'chat-message',
+      roomId: 'room-1',
+      userId: 'other',
+      userName: '韩梅梅',
+      text: '调试内容'
+    });
+    expect(logSpy).toHaveBeenCalledWith('[RealtimeCollaboration] Chat [韩梅梅]: 调试内容');
+
+    logSpy.mockRestore();
+  });
+
   it('cell-change 越界行号应被静默过滤，不调用 setCell', () => {
     const { plugin } = makePlugin();
     const setCell = vi.fn();

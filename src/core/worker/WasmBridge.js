@@ -29,6 +29,7 @@ export class WasmBridge {
   constructor(options = {}) {
     this.engine = null;
     this.isLoaded = false;
+    this.debug = options.debug === true || options.verbose === true;
     this.loadPromise = null;
     this.sharedMemoryEnabled = false;
     this.fallbackReason = null;
@@ -41,6 +42,10 @@ export class WasmBridge {
 
     this.wasmUrl = options.wasmUrl || null;
     this.wasmBinary = options.wasmBinary || null;
+  }
+
+  _logDebug(...args) {
+    if (this.debug) console.log(...args);
   }
 
   /**
@@ -63,7 +68,7 @@ export class WasmBridge {
         this.engine = new wasm.FormulaEngine();
         this.isLoaded = true;
         this.sharedMemoryEnabled = false;
-        console.log('WASM Formula Engine Loaded');
+        this._logDebug('[WasmBridge] WASM Formula Engine Loaded');
         return true;
       } catch (err) {
         if (lifecycleVersion !== this._lifecycleVersion) return false;

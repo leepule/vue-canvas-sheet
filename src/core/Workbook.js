@@ -78,6 +78,8 @@ export class Workbook {
    * @param {boolean} [options.enablePersistence=false] - 是否启用持久化存储
    * @param {boolean|'auto'} [options.enableWasm='auto'] - WASM 初始化模式：
    *        true 立即初始化；false 关闭自动初始化；auto 首次遇到公式时懒加载
+   * @param {boolean} [options.debug=false] - 是否输出调试日志
+   * @param {boolean} [options.verbose=false] - debug 的别名
    * @param {string} [options.sheetId='default'] - 工作表唯一标识（用于指纹识别与秒开）
    */
   constructor(options = {}) {

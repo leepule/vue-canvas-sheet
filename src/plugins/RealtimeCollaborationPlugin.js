@@ -16,6 +16,7 @@ export class RealtimeCollaborationPlugin {
 
   constructor(options = {}) {
     this.options = options;
+    this.debug = options.debug === true || options.verbose === true;
     this.serverUrl = options.serverUrl || null;
     this.roomId = options.roomId || 'default-room';
     this.userId = options.userId || 'user_' + Math.random().toString(36).substring(2, 7);
@@ -94,6 +95,10 @@ export class RealtimeCollaborationPlugin {
     registry.setSharedState('collaboration:getLocalFocusTime', () => this._localFocusTime);
   }
 
+  _logDebug(...args) {
+    if (this.debug) console.log(...args);
+  }
+
   onMounted(workbook, registry) {
     // 1. 订阅本地选区变化并广播
     this._unsubSelection = workbook.on('selection-change', (selection) => {
@@ -168,7 +173,7 @@ export class RealtimeCollaborationPlugin {
     }
 
     this.disconnect();
-    console.log(`[RealtimeCollaboration] Connecting to ${this.serverUrl} [Room: ${this.roomId}]`);
+    this._logDebug(`[RealtimeCollaboration] Connecting to ${this.serverUrl} [Room: ${this.roomId}]`);
 
     try {
       const connectionUrl = this._buildAuthenticatedUrl();
@@ -270,7 +275,7 @@ export class RealtimeCollaborationPlugin {
 
   _setupSocketListeners() {
     this._socket.onopen = () => {
-      console.log('[RealtimeCollaboration] WebSocket connection established successfully.');
+      this._logDebug('[RealtimeCollaboration] WebSocket connection established successfully.');
       this._reconnectAttempts = 0;
       
       // 广播加入房间消息，同步当前用户信息
@@ -288,7 +293,7 @@ export class RealtimeCollaborationPlugin {
         const dataStr = typeof event.data === 'string' ? event.data.trim() : '';
 
         if (!dataStr) {
-          console.log('[RealtimeCollaboration] Server feedback message:', event.data);
+          this._logDebug('[RealtimeCollaboration] Server feedback message:', event.data);
           return;
         }
         
@@ -296,12 +301,12 @@ export class RealtimeCollaborationPlugin {
         try {
           networkMessage = JSON.parse(dataStr);
         } catch (parseErr) {
-          console.log('[RealtimeCollaboration] Server raw feedback:', event.data);
+          this._logDebug('[RealtimeCollaboration] Server raw feedback:', event.data);
           return;
         }
 
         if (!networkMessage || typeof networkMessage !== 'object' || Array.isArray(networkMessage)) {
-          console.log('[RealtimeCollaboration] Ignored non-object message:', event.data);
+          this._logDebug('[RealtimeCollaboration] Ignored non-object message:', event.data);
           return;
         }
 
@@ -345,7 +350,7 @@ export class RealtimeCollaborationPlugin {
 
     this._reconnectAttempts++;
     const delay = Math.min(1000 * Math.pow(2, this._reconnectAttempts), 10000); // 指数退避重连算法
-    console.log(`[RealtimeCollaboration] Reconnecting in ${delay}ms (Attempt ${this._reconnectAttempts}/${this._maxReconnectAttempts})...`);
+    this._logDebug(`[RealtimeCollaboration] Reconnecting in ${delay}ms (Attempt ${this._reconnectAttempts}/${this._maxReconnectAttempts})...`);
     
     this._reconnectTimer = setTimeout(() => {
       this.connect();
@@ -622,11 +627,11 @@ export class RealtimeCollaborationPlugin {
 
     switch (msg.type) {
       case 'user-join':
-        console.log(`[RealtimeCollaboration] User ${msg.userName} joined.`);
+        this._logDebug(`[RealtimeCollaboration] User ${msg.userName} joined.`);
         break;
 
       case 'user-leave':
-        console.log(`[RealtimeCollaboration] User with ID ${msg.userId} left.`);
+        this._logDebug(`[RealtimeCollaboration] User with ID ${msg.userId} left.`);
         if (collabCursor) {
           collabCursor.removeRemoteCursor(msg.userId);
         }
@@ -755,7 +760,7 @@ export class RealtimeCollaborationPlugin {
         break;
 
       case 'chat-message':
-        console.log(`[RealtimeCollaboration] Chat [${msg.userName}]: ${msg.text}`);
+        this._logDebug(`[RealtimeCollaboration] Chat [${msg.userName}]: ${msg.text}`);
         break;
 
       default:

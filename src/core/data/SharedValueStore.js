@@ -18,9 +18,10 @@ export class SharedValueStore {
   static EMPTY_VALUE = -Infinity;
   static NON_NUMERIC_VALUE = NaN;
 
-  constructor(maxRows = 100000, maxCols = 256) {
+  constructor(maxRows = 100000, maxCols = 256, options = {}) {
     this.maxRows = maxRows;
     this.maxCols = maxCols;
+    this.debug = options.debug === true || options.verbose === true;
     this.supported = typeof SharedArrayBuffer !== 'undefined';
 
     /** @type {Map<number, Float64Array>} 分块存储：chunkIndex -> Float64Array */
@@ -39,6 +40,10 @@ export class SharedValueStore {
     // 实际使用量追踪（用于按需分配连续缓冲区）
     this._actualMaxRow = -1;
     this._actualMaxCol = -1;
+  }
+
+  _logDebug(...args) {
+    if (this.debug) console.log(...args);
   }
 
   /**
@@ -244,7 +249,7 @@ export class SharedValueStore {
         const cols = Math.min(Math.max((this._actualMaxCol + 1) * 2, 1), this.maxCols);
         const size = rows * cols * BYTES_PER_CELL;
 
-        console.log(`[SharedValueStore] 正在为 WASM 分配连续内存: ${(size / 1024 / 1024).toFixed(2)} MB (${rows} rows × ${cols} cols)`);
+        this._logDebug(`[SharedValueStore] 正在为 WASM 分配连续内存: ${(size / 1024 / 1024).toFixed(2)} MB (${rows} rows × ${cols} cols)`);
         this.continuousBuffer = new SharedArrayBuffer(size);
         this.continuousView = new Float64Array(this.continuousBuffer);
         this.continuousView.fill(SharedValueStore.EMPTY_VALUE);
@@ -278,7 +283,7 @@ export class SharedValueStore {
     const newRows = Math.min(Math.max(needRows, currentRows * 2), this.maxRows);
     const newSize = newRows * newCols * BYTES_PER_CELL;
 
-    console.log(`[SharedValueStore] 扩容连续缓冲区: ${(newSize / 1024 / 1024).toFixed(2)} MB (${newRows} rows × ${newCols} cols)`);
+    this._logDebug(`[SharedValueStore] 扩容连续缓冲区: ${(newSize / 1024 / 1024).toFixed(2)} MB (${newRows} rows × ${newCols} cols)`);
 
     const newBuffer = new SharedArrayBuffer(newSize);
     const newView = new Float64Array(newBuffer);

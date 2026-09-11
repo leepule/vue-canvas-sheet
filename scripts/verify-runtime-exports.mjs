@@ -31,6 +31,20 @@ const entrypointContracts = {
     'Workbook',
     'createPlugin'
   ],
+  'vue-canvas-sheet/plugins': [
+    'AutoSavePlugin',
+    'CollaborativeCursorPlugin',
+    'ExportPlugin',
+    'ImportPlugin',
+    'RealtimeCollaborationPlugin',
+    'SelectionHistoryPlugin',
+    'createAutoSavePlugin',
+    'createCollaborativeCursorPlugin',
+    'createExportPlugin',
+    'createImportPlugin',
+    'createRealtimeCollaborationPlugin',
+    'createSelectionHistoryPlugin'
+  ],
   'vue-canvas-sheet/render': [
     'LRUCache',
     'OffscreenRenderer',

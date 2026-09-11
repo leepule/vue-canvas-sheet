@@ -50,6 +50,22 @@ class CrashingFormulaEngine extends FakeFormulaEngine {
 }
 
 describe('WasmBridge', () => {
+  test('默认不输出加载成功日志，debug 时才输出', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const wasmLoader = async () => ({
+      default: async () => {},
+      FormulaEngine: FakeFormulaEngine
+    });
+
+    await new WasmBridge({ wasmLoader }).init();
+    expect(logSpy).not.toHaveBeenCalled();
+
+    await new WasmBridge({ wasmLoader, debug: true }).init();
+    expect(logSpy).toHaveBeenCalledWith('[WasmBridge] WASM Formula Engine Loaded');
+
+    logSpy.mockRestore();
+  });
+
   test('加载成功后应该暴露 wasmLoaded 状态', async () => {
     const bridge = new WasmBridge({
       wasmLoader: async () => ({

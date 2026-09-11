@@ -151,7 +151,7 @@ export class DataController {
 				// 1. 处理表头
 				for (let i = 0; i < bindingCount; i++) {
 					const binding = this.bindings[i];
-					if (this._deletedColumns.has(binding.col)) return;
+					if (this._deletedColumns.has(binding.col)) continue;
 					
 					updates.push({
 						r: binding.row,

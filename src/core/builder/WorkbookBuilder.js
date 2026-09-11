@@ -41,9 +41,15 @@ export class WorkbookBuilder {
    * @param {Object} [options={}]
    */
   static build(ctx, options = {}) {
-    const { enablePersistence = false, sheetId = 'default' } = options;
+    const {
+      enablePersistence = false,
+      sheetId = 'default',
+      debug = false,
+      verbose = false
+    } = options;
     ctx._enablePersistence = enablePersistence;
     ctx._sheetId = sheetId;
+    ctx._debug = debug === true || verbose === true;
 
     this._phase0_infrastructure(ctx);
     this._phase1_storeAccessors(ctx);
@@ -208,6 +214,7 @@ export class WorkbookBuilder {
 
     // FormulaEngineService
     ctx._formulaEngine = new FormulaEngineService({
+      debug: ctx._debug,
       getDataMatrix: () => ctx._dataMatrix,
       cellKey: (r, c) => ctx._cellKey(r, c),
       parseKey: (k) => ctx._parseKey(k),

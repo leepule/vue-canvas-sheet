@@ -25,6 +25,9 @@
   "main": "./dist/designer.es.js",
   "module": "./dist/designer.es.js",
   "types": "./types/index.d.ts",
+  "sideEffects": [
+    "**/*.css"
+  ],
   "exports": {
     ".": {
       "types": "./types/index.d.ts",
@@ -41,6 +44,10 @@
     "./icons": {
       "types": "./types/icons.d.ts",
       "import": "./dist/icons.es.js"
+    },
+    "./plugins": {
+      "types": "./types/plugins.d.ts",
+      "import": "./dist/plugins.es.js"
     },
     "./wasm": {
       "types": "./src/wasm/pkg/table_wasm_engine.d.ts",

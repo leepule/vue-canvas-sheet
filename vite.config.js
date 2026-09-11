@@ -10,10 +10,16 @@ export default defineConfig(({ command }) => ({
   plugins: [vue()],
   resolve: {
     alias: [
-      ...(command === 'serve' ? [{
-        find: /^vue-canvas-sheet\/wasm$/,
-        replacement: import.meta.dirname + '/src/wasm/pkg/table_wasm_engine.js'
-      }] : []),
+      ...(command === 'serve' ? [
+        {
+          find: /^vue-canvas-sheet\/wasm$/,
+          replacement: import.meta.dirname + '/src/wasm/pkg/table_wasm_engine.js'
+        },
+        {
+          find: /^vue-canvas-sheet\/plugins$/,
+          replacement: import.meta.dirname + '/src/plugins/index.js'
+        }
+      ] : []),
       { find: '@', replacement: import.meta.dirname + '/src' },
       { find: /^vue-canvas-sheet$/, replacement: import.meta.dirname + '/src/index.js' }
     ],
@@ -34,7 +40,8 @@ export default defineConfig(({ command }) => ({
         'core': import.meta.dirname + '/src/core/index.js',
         'render': import.meta.dirname + '/src/core/render/index.js',
         'designer': import.meta.dirname + '/src/index.js',
-        'icons': import.meta.dirname + '/src/icons/index.js'
+        'icons': import.meta.dirname + '/src/icons/index.js',
+        'plugins': import.meta.dirname + '/src/plugins/index.js'
       },
       name: 'VueCanvasSheet',
       formats: ['es'],

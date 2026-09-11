@@ -128,6 +128,8 @@ export interface RealtimeCollaborationOptions {
   userName?: string;
   userColor?: string;
   autoConnect?: boolean;
+  debug?: boolean;
+  verbose?: boolean;
 }
 
 export class RealtimeCollaborationPlugin implements PluginInterface {
@@ -168,6 +170,8 @@ export interface TableDesignerProps {
   lazyLoad?: LazyLoadConfig;
   enablePersistence?: boolean;
   enableWasm?: boolean | 'auto';
+  debug?: boolean;
+  verbose?: boolean;
   sheetId?: string;
 }
 

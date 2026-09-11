@@ -24,6 +24,12 @@ import {
   measureTextWidth
 } from 'vue-canvas-sheet/render';
 import { FileSpreadsheet, Search as SearchIcon } from 'vue-canvas-sheet/icons';
+import {
+  AutoSavePlugin,
+  ExportPlugin,
+  createAutoSavePlugin,
+  createRealtimeCollaborationPlugin
+} from 'vue-canvas-sheet/plugins';
 import type { PersistenceStorage } from 'vue-canvas-sheet/core';
 
 const workbook = new CoreWorkbook();
@@ -57,6 +63,10 @@ void [
   measureTextWidth,
   FileSpreadsheet,
   SearchIcon,
+  AutoSavePlugin,
+  ExportPlugin,
+  createAutoSavePlugin,
+  createRealtimeCollaborationPlugin,
   wasmDisabledWorkbook
 ];
 
@@ -68,6 +78,8 @@ import { TableDesigner as CoreTableDesigner } from 'vue-canvas-sheet/core';
 import { Workbook as RenderWorkbook } from 'vue-canvas-sheet/render';
 // @ts-expect-error OffscreenRenderer is only exported by the render entrypoint.
 import { OffscreenRenderer as RootRenderer } from 'vue-canvas-sheet';
+// @ts-expect-error TableDesigner is not part of the plugins entrypoint.
+import { TableDesigner as PluginsTableDesigner } from 'vue-canvas-sheet/plugins';
 
 // @ts-expect-error recalcDirty is not a Workbook runtime method.
 workbook.recalcDirty();
@@ -80,4 +92,4 @@ workbook.getDependencies('=A1');
 // @ts-expect-error subscribe is not a Workbook runtime method.
 workbook.subscribe(() => {});
 
-void [RootStore, CoreTableDesigner, RenderWorkbook, RootRenderer];
+void [RootStore, CoreTableDesigner, RenderWorkbook, RootRenderer, PluginsTableDesigner];

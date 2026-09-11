@@ -4,6 +4,24 @@ import { SharedValueStore } from '../../src/core/data/SharedValueStore.js';
 const EMPTY = SharedValueStore.EMPTY_VALUE;
 
 describe('SharedValueStore TypedArray 批量拷贝', () => {
+  it('默认不输出内存分配日志，debug 时才输出', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const quietStore = new SharedValueStore(10, 2);
+    quietStore.set(0, 0, 1);
+    quietStore.getBuffer();
+    expect(logSpy).not.toHaveBeenCalled();
+
+    const debugStore = new SharedValueStore(10, 2, { debug: true });
+    debugStore.set(0, 0, 1);
+    debugStore.getBuffer();
+    expect(logSpy).toHaveBeenCalledWith(
+      '[SharedValueStore] 正在为 WASM 分配连续内存: 0.00 MB (10 rows × 2 cols)'
+    );
+
+    logSpy.mockRestore();
+  });
+
   describe('_syncToContinuous', () => {
     it('快路径：列数相同时整块同步分块到连续缓冲区', () => {
       // maxCols=4，getBuffer 按 (_actualMaxCol+1)*2 分配列，写满 4 列使 cols===maxCols
