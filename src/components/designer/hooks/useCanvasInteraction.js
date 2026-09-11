@@ -559,40 +559,55 @@ export default function useCanvasInteraction(tableContext) {
     const RW = tableContext.computed.rowHeaderWidth.value;
     const CH = tableContext.computed.colHeaderHeight.value;
 
-    const cellX = wb.getColPos(c);
-    const cellY = wb.getRowPos(r);
-    const cellW = wb.getColWidth(c);
-    const cellH = wb.getRowHeight(r);
+    const merge = wb.getMerge(r, c);
+    const targetC = merge ? merge.s.c : c;
+    const targetR = merge ? merge.s.r : r;
+    const cellX = wb.getColPos(targetC);
+    const cellY = wb.getRowPos(targetR);
+    let cellW = wb.getColWidth(targetC);
+    let cellH = wb.getRowHeight(targetR);
+    if (merge) {
+      cellW = 0;
+      for (let mc = merge.s.c; mc <= merge.e.c; mc++) cellW += wb.getColWidth(mc);
+      cellH = 0;
+      for (let mr = merge.s.r; mr <= merge.e.r; mr++) cellH += wb.getRowHeight(mr);
+    }
 
     const fR = wb.freeze.r || 0;
     const fC = wb.freeze.c || 0;
     let fW = 0; for (let i = 0; i < fC; i++) fW += wb.getColWidth(i);
     let fH = 0; for (let i = 0; i < fR; i++) fH += wb.getRowHeight(i);
 
-    if (r < fR && c < fC) return;
+    if (targetR < fR && targetC < fC) return;
 
     let newSX = tableContext.state.scrollX;
     let newSY = tableContext.state.scrollY;
 
-    if (c >= fC) {
+    if (targetC >= fC) {
+      const viewportW = tableContext.state.width - RW - fW;
       const visualXEnd = cellX + cellW - tableContext.state.scrollX + RW;
-      if (visualXEnd > tableContext.state.width) {
+      const visualXStart = cellX - tableContext.state.scrollX + RW;
+
+      if (cellW > viewportW) {
+        newSX = cellX - fW;
+      } else if (visualXEnd > tableContext.state.width) {
         newSX = cellX + cellW - (tableContext.state.width - RW);
       }
-
-      const visualXStart = cellX - tableContext.state.scrollX + RW;
       if (visualXStart < RW + fW) {
         newSX = cellX - fW;
       }
     }
 
-    if (r >= fR) {
+    if (targetR >= fR) {
+      const viewportH = tableContext.state.height - CH - fH;
       const visualYEnd = cellY + cellH - tableContext.state.scrollY + CH;
-      if (visualYEnd > tableContext.state.height) {
+      const visualYStart = cellY - tableContext.state.scrollY + CH;
+
+      if (cellH > viewportH) {
+        newSY = cellY - fH;
+      } else if (visualYEnd > tableContext.state.height) {
         newSY = cellY + cellH - (tableContext.state.height - CH);
       }
-
-      const visualYStart = cellY - tableContext.state.scrollY + CH;
       if (visualYStart < CH + fH) {
         newSY = cellY - fH;
       }
@@ -758,6 +773,7 @@ export default function useCanvasInteraction(tableContext) {
     }
 
     const cell = wb.getCell(targetR, targetC);
+    _scrollIntoViewImpl(targetR, targetC);
     tableContext.state.editValue = initialValue !== null ? initialValue : (cell ? (cell.f || cell.v) : '');
     tableContext.state.isEditing = true;
     tableContext.state.editorVisible = true;
@@ -818,22 +834,28 @@ export default function useCanvasInteraction(tableContext) {
     const right = tableContext.state.width - 14;
     const bottom = tableContext.state.height - 14;
 
-    return rect.x >= left &&
-      rect.y >= top &&
-      rect.x + rect.w <= right &&
-      rect.y + rect.h <= bottom;
+    return rect.x < right &&
+      rect.y < bottom &&
+      rect.x + rect.w > left &&
+      rect.y + rect.h > top;
   }
 
   function updateEditorPosition() {
     if (!tableContext.state.isEditing || !tableContext.state.editingCell || !tableContext.props.workbook) return;
     const rect = getCellScreenRect(tableContext.state.editingCell.r, tableContext.state.editingCell.c);
+    const contentLeft = tableContext.computed.rowHeaderWidth.value;
+    const contentTop = tableContext.computed.colHeaderHeight.value;
+    const x = Math.max(rect.x, contentLeft);
+    const y = Math.max(rect.y, contentTop);
+    const w = Math.max(0, Math.min(rect.w - (x - rect.x), tableContext.state.width - x));
+    const h = Math.max(0, Math.min(rect.h - (y - rect.y), tableContext.state.height - y));
     tableContext.state.editorPos = {
-      x: rect.x,
-      y: rect.y,
-      w: rect.w,
-      h: rect.h
+      x,
+      y,
+      w,
+      h
     };
-    tableContext.state.editorVisible = isEditorRectVisible(rect);
+    tableContext.state.editorVisible = w > 0 && h > 0 && isEditorRectVisible(rect);
   }
 
   function finishEdit() {

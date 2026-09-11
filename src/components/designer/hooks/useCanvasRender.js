@@ -865,6 +865,14 @@ export default function useCanvasRender(tableContext) {
 
     if (wb.freeze) { mix(wb.freeze.r); mix(wb.freeze.c); }
 
+    const merges = wb.merges || [];
+    mix(merges.length);
+    for (let i = 0; i < merges.length; i++) {
+      const merge = merges[i];
+      mix(merge.s.r); mix(merge.s.c);
+      mix(merge.e.r); mix(merge.e.c);
+    }
+
     return h;
   }
 
@@ -1322,8 +1330,12 @@ export default function useCanvasRender(tableContext) {
       tableContext.state.pendingRender = false;
 
       if (tableContext.state.progressiveState && tableContext.state.progressiveState.isRendering) {
-        _flushOverlayRender();
-        return;
+        const needsContentRestart = tableContext.state.renderContentRequested && tableContext.state.fullRedraw;
+        if (!needsContentRestart) {
+          _flushOverlayRender();
+          return;
+        }
+        tableContext.methods.stopProgressiveRender();
       }
 
       if (tableContext.state.renderGridRequested) {

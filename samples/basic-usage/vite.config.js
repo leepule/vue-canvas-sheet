@@ -8,6 +8,10 @@ export default defineConfig({
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '../../src'),
+      'vue-canvas-sheet/wasm': path.resolve(
+        __dirname,
+        '../../src/wasm/pkg/table_wasm_engine.js'
+      ),
       'vue-canvas-sheet': path.resolve(__dirname, '../../src/index.js')
     }
   },

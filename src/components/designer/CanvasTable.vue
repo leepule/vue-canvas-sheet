@@ -595,7 +595,7 @@ function handleWheel(e) {
 
   syncScrollbars();
   tableContext.methods.updateEditorPosition();
-  tableContext.methods.render();
+  tableContext.methods.invalidate();
   _preloadTextMetricsDebounced();
 
   if (props.dataController && props.dataController._scrollLoader) {
