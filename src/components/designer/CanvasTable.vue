@@ -77,6 +77,10 @@ import useCanvasInteraction from './hooks/useCanvasInteraction';
 // 默认行高（用于懒加载计算）
 const DEFAULT_ROW_HEIGHT = 25;
 
+function getDevicePixelRatio() {
+  return typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+}
+
 const props = defineProps({
   workbook: Object,
   readOnly: {
@@ -181,7 +185,7 @@ const state = reactive({
   ctxSelection: null,
   ctxAnimation: null,
   ctxGrid: null,
-  dpr: window.devicePixelRatio || 1,
+  dpr: getDevicePixelRatio(),
 
   // 动画 & 订阅相关
   animationId: null,
@@ -455,7 +459,7 @@ function initCanvas() {
   state.ctxAnimation = animationCanvas.value.getContext('2d');
   state.ctxGrid = gridCanvas.value.getContext('2d');
 
-  const dpr = window.devicePixelRatio || 1;
+  const dpr = getDevicePixelRatio();
   state.dpr = dpr;
 
   if (!canUseOffscreen) {
@@ -472,7 +476,8 @@ function handleResize() {
   state.height = height;
 
   const canvasEl = canvas.value;
-  const dpr = state.dpr;
+  const dpr = getDevicePixelRatio();
+  state.dpr = dpr;
 
   if (!isOffscreenActive.value) {
     if (!state.ctx) {

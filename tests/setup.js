@@ -149,43 +149,46 @@ Object.defineProperty(global, 'localStorage', {
 });
 
 // 模拟 Canvas 和 WebGL 上下文
-HTMLCanvasElement.prototype.getContext = vi.fn(function(contextId) {
-  if (contextId === '2d') {
-    return {
-      fillRect: vi.fn(),
-      clearRect: vi.fn(),
-      strokeRect: vi.fn(),
-      fillText: vi.fn(),
-      measureText: vi.fn(() => ({ width: 100 })),
-      createLinearGradient: vi.fn(() => ({
-        addColorStop: vi.fn()
-      })),
-      save: vi.fn(),
-      restore: vi.fn(),
-      translate: vi.fn(),
-      scale: vi.fn(),
-      beginPath: vi.fn(),
-      closePath: vi.fn(),
-      moveTo: vi.fn(),
-      lineTo: vi.fn(),
-      rect: vi.fn(),
-      stroke: vi.fn(),
-      fill: vi.fn(),
-      setLineDash: vi.fn(),
-      clip: vi.fn(),
-      font: '14px Arial',
-      fillStyle: '#000000',
-      strokeStyle: '#000000',
-      lineWidth: 1,
-      textAlign: 'left',
-      textBaseline: 'middle'
-    };
-  }
-  if (contextId === 'webgl' || contextId === 'experimental-webgl') {
+if (typeof HTMLCanvasElement !== 'undefined') {
+  HTMLCanvasElement.prototype.getContext = vi.fn(function(contextId) {
+    if (contextId === '2d') {
+      return {
+        fillRect: vi.fn(),
+        clearRect: vi.fn(),
+        strokeRect: vi.fn(),
+        fillText: vi.fn(),
+        measureText: vi.fn(() => ({ width: 100 })),
+        createLinearGradient: vi.fn(() => ({
+          addColorStop: vi.fn()
+        })),
+        save: vi.fn(),
+        restore: vi.fn(),
+        translate: vi.fn(),
+        scale: vi.fn(),
+        setTransform: vi.fn(),
+        beginPath: vi.fn(),
+        closePath: vi.fn(),
+        moveTo: vi.fn(),
+        lineTo: vi.fn(),
+        rect: vi.fn(),
+        stroke: vi.fn(),
+        fill: vi.fn(),
+        setLineDash: vi.fn(),
+        clip: vi.fn(),
+        font: '14px Arial',
+        fillStyle: '#000000',
+        strokeStyle: '#000000',
+        lineWidth: 1,
+        textAlign: 'left',
+        textBaseline: 'middle'
+      };
+    }
+    if (contextId === 'webgl' || contextId === 'experimental-webgl') {
+      return null;
+    }
     return null;
-  }
-  return null;
-});
+  });
+}
 
 // 模拟 OffscreenCanvas
 global.OffscreenCanvas = vi.fn().mockImplementation((width, height) => ({

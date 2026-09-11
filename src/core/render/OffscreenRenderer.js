@@ -16,6 +16,14 @@
 import { serializeRenderData } from '../worker/TransferableSerializer.js';
 import { WorkerClient } from '../worker/WorkerClient.js';
 
+function getDevicePixelRatio() {
+  return typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+}
+
+function normalizeDevicePixelRatio(dpr) {
+  return Number.isFinite(dpr) && dpr > 0 ? dpr : 1;
+}
+
 /**
  * 检测浏览器是否支持 OffscreenCanvas
  * @returns {boolean}
@@ -123,7 +131,7 @@ export class OffscreenRenderer {
    * @private
    */
   _init() {
-    this.dpr = window.devicePixelRatio || 1;
+    this.dpr = getDevicePixelRatio();
 
     if (!this.enableWorker || !isOffscreenCanvasSupported()) {
       this._initMainThread();
