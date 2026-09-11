@@ -297,10 +297,16 @@ function focus() {
 }
 
 function syncScrollbars() {
+  pendingScrollSync.h = scrollH.value ? state.scrollX : null;
+  pendingScrollSync.v = scrollV.value ? state.scrollY : null;
   state.isSyncingScroll = true;
   if (scrollH.value) scrollH.value.scrollLeft = state.scrollX;
   if (scrollV.value) scrollV.value.scrollTop = state.scrollY;
-  state.isSyncingScroll = false;
+
+  if (scrollSyncTimer) clearTimeout(scrollSyncTimer);
+  scrollSyncTimer = setTimeout(() => {
+    clearPendingScrollSync();
+  }, 100);
 }
 
 function updateScrollbarSize() {
@@ -468,6 +474,7 @@ function initCanvas() {
 }
 
 function handleResize() {
+  if (isUnmounted) return;
   const containerEl = container.value;
   if (!containerEl) return;
 
@@ -520,6 +527,7 @@ function handleResize() {
 
   if (tableContext.methods.offscreenRenderer && tableContext.methods.offscreenRenderer.value) {
     tableContext.methods.offscreenRenderer.value.resize(width, height, dpr).then((usingOffscreen) => {
+      if (isUnmounted) return;
       if (!usingOffscreen && !state.ctx && canvasEl) {
         state.ctx = canvasEl.getContext('2d');
         if (state.ctx) {
@@ -541,9 +549,11 @@ function handleResize() {
  * 恢复尺寸/DPR 变换。全程不直接操作 DOM，避免破坏 Vue 的 VNode 树。
  */
 async function rebuildContentCanvas() {
+  if (isUnmounted) return;
   canvasKey.value++;
   await nextTick();
 
+  if (isUnmounted) return;
   const canvasEl = canvas.value;
   if (!canvasEl) return;
 
@@ -621,8 +631,40 @@ function preloadTextMetrics() {
 let _handleResizeDebounced = null;
 let _preloadTextMetricsDebounced = null;
 let resizeObserver = null;
+let scrollSyncTimer = null;
+const pendingScrollSync = { h: null, v: null };
 let dprMediaQuery = null;
 let dprMediaQueryListener = null;
+let isUnmounted = false;
+
+function clearPendingScrollSync() {
+  if (scrollSyncTimer) {
+    clearTimeout(scrollSyncTimer);
+    scrollSyncTimer = null;
+  }
+  pendingScrollSync.h = null;
+  pendingScrollSync.v = null;
+  state.isSyncingScroll = false;
+}
+
+function consumePendingScrollSync(axis, position) {
+  const expectedPosition = pendingScrollSync[axis];
+  if (expectedPosition === null) return false;
+
+  if (position !== expectedPosition) {
+    pendingScrollSync[axis] = null;
+    if (pendingScrollSync.h === null && pendingScrollSync.v === null) {
+      clearPendingScrollSync();
+    }
+    return false;
+  }
+
+  pendingScrollSync[axis] = null;
+  if (pendingScrollSync.h === null && pendingScrollSync.v === null) {
+    clearPendingScrollSync();
+  }
+  return true;
+}
 
 function removeDprMediaQueryListener() {
   if (!dprMediaQuery || !dprMediaQueryListener) return;
@@ -657,6 +699,7 @@ function setupDprMediaQuery() {
 }
 
 onMounted(() => {
+  isUnmounted = false;
   initCanvas();
 
   const usingOffscreen = tableContext.methods.initOffscreenRenderer({
@@ -694,9 +737,17 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  isUnmounted = true;
   if (resizeObserver) {
     resizeObserver.disconnect();
   }
+  if (_handleResizeDebounced && typeof _handleResizeDebounced.cancel === 'function') {
+    _handleResizeDebounced.cancel();
+  }
+  if (_preloadTextMetricsDebounced && typeof _preloadTextMetricsDebounced.cancel === 'function') {
+    _preloadTextMetricsDebounced.cancel();
+  }
+  clearPendingScrollSync();
   removeDprMediaQueryListener();
   if (state.workbookUnsub) {
     state.workbookUnsub();
@@ -774,7 +825,7 @@ const onScrollV = (e) => onScrollVImpl(e);
 
 // Scrollers mapping
 function onScrollHImpl(e) {
-  if (state.isSyncingScroll) return;
+  if (consumePendingScrollSync('h', e.target.scrollLeft)) return;
   const maxScrollX = Math.max(0, state.totalWidth - state.width);
   state.scrollX = Math.min(e.target.scrollLeft, maxScrollX);
   tableContext.methods.updateEditorPosition();
@@ -783,7 +834,7 @@ function onScrollHImpl(e) {
 }
 
 function onScrollVImpl(e) {
-  if (state.isSyncingScroll) return;
+  if (consumePendingScrollSync('v', e.target.scrollTop)) return;
   const maxScrollY = Math.max(0, state.totalHeight - state.height);
   state.scrollY = Math.min(e.target.scrollTop, maxScrollY);
 

@@ -68,6 +68,8 @@ export default function useCanvasRender(tableContext) {
   let _virtualScrollManager = null;
   let _gridLayerCache = null;
   let gridVersion = 0;
+  let renderRafId = null;
+  let isDisposed = false;
 
   /**
    * 计算可见区域范围
@@ -1234,6 +1236,14 @@ export default function useCanvasRender(tableContext) {
   }
 
   function cleanupCanvasRender() {
+    isDisposed = true;
+
+    if (renderRafId !== null) {
+      cancelAnimationFrame(renderRafId);
+      renderRafId = null;
+    }
+    tableContext.state.pendingRender = false;
+
     if (_debouncedUpdate && typeof _debouncedUpdate.cancel === 'function') {
       _debouncedUpdate.cancel();
     }
@@ -1301,11 +1311,14 @@ export default function useCanvasRender(tableContext) {
   }
 
   function render() {
+    if (isDisposed) return;
     if ((!tableContext.state.ctx && !tableContext.computed.isOffscreenActive.value) || !tableContext.props.workbook) return;
 
     if (tableContext.state.pendingRender) return;
     tableContext.state.pendingRender = true;
-    requestAnimationFrame(() => {
+    renderRafId = requestAnimationFrame(() => {
+      renderRafId = null;
+      if (isDisposed) return;
       tableContext.state.pendingRender = false;
 
       if (tableContext.state.progressiveState && tableContext.state.progressiveState.isRendering) {
@@ -1322,10 +1335,12 @@ export default function useCanvasRender(tableContext) {
         const useWorker = tableContext.methods.shouldUseWorkerRender && tableContext.methods.shouldUseWorkerRender();
         if (useWorker && tableContext.methods._renderContentWithWorker) {
           tableContext.methods._renderContentWithWorker().then((success) => {
+            if (isDisposed) return;
             if (!success) _runRenderMainThread();
             _finishContentRender();
             _flushOverlayRender();
           }).catch((error) => {
+            if (isDisposed) return;
             console.error('[CanvasRenderHook] Worker render failed:', error);
             _runRenderMainThread();
             _finishContentRender();
