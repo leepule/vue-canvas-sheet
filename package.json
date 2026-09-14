@@ -1,6 +1,6 @@
 {
   "name": "vue-canvas-sheet",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "A high-performance, modular Canvas-based spreadsheet engine with WASM-powered calculation.",
   "keywords": [
     "spreadsheet",
@@ -67,6 +67,7 @@
     "dev": "vite",
     "demo": "vite samples/basic-usage",
     "build": "npm run build:wasm && vite build",
+    "prepublishOnly": "npm run build",
     "build:js": "vite build",
     "build:all": "npm run build",
     "preview": "vite preview",
