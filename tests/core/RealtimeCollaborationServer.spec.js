@@ -99,6 +99,8 @@ describe('collab-server 初始状态同步', () => {
         userName: 'Alice',
         userColor: '#e74c3c'
       }));
+      await waitFor(alice.messages, item => item.type === 'room-members' && item.members.length === 1);
+
       alice.socket.send(JSON.stringify({
         type: 'selection-change',
         roomId: 'room-sync',
@@ -448,6 +450,9 @@ describe('collab-server 批量消息序列', () => {
         userId: 'bob',
         userName: 'Bob'
       }));
+      await waitFor(alice.messages, item => item.type === 'room-members' && item.members.length === 2);
+      await waitFor(bob.messages, item => item.type === 'room-members' && item.members.length === 2);
+
       bob.socket.send(JSON.stringify({
         type: 'cell-change-batch',
         roomId: 'room-sync',
