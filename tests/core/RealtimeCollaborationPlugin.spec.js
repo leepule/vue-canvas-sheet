@@ -1,5 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { RealtimeCollaborationPlugin } from '../../src/plugins/RealtimeCollaborationPlugin';
+import { CollaborativeCursorPlugin } from '../../src/plugins/CollaborativeCursorPlugin';
+import { Workbook } from '../../src/core/Workbook';
 
 // _sendRaw 依赖全局 WebSocket.OPEN 常量
 beforeEach(() => {
@@ -400,10 +402,15 @@ describe('RealtimeCollaborationPlugin - 远程消息边界安全校验', () => {
       val: 'draft'
     });
 
-    expect(plugin._lockedCells.get('10,20')).toEqual({ userId: 'other', userName: 'Other' });
-    expect(plugin._editingDrafts.get('10,20')).toEqual({
+    expect(plugin._lockedCells.get(plugin._cellStateKey(null, 10, 20))).toEqual({
       userId: 'other',
       userName: 'Other',
+      sheetId: null
+    });
+    expect(plugin._editingDrafts.get(plugin._cellStateKey(null, 10, 20))).toEqual({
+      userId: 'other',
+      userName: 'Other',
+      sheetId: null,
       value: 'draft'
     });
   });
@@ -423,6 +430,11 @@ describe('RealtimeCollaborationPlugin - 选区广播节流 (sub-1)', () => {
 
     expect(sent).toHaveLength(1);
     expect(sent[0].type).toBe('selection-change');
+    expect(sent[0]).toMatchObject({
+      userId: 'me',
+      userName: plugin.userName,
+      userColor: plugin.userColor
+    });
     expect(sent[0].selection).toEqual({ startRow: 2 });
   });
 
@@ -435,5 +447,685 @@ describe('RealtimeCollaborationPlugin - 选区广播节流 (sub-1)', () => {
     vi.advanceTimersByTime(1000);
 
     expect(sent.some(m => m.type === 'selection-change')).toBe(false);
+  });
+});
+
+describe('RealtimeCollaborationPlugin - 批注同步', () => {
+  it('未注册 CellCommentPlugin 时也会广播本地批注变更', () => {
+    const { plugin, sent } = makePlugin();
+    const events = new Map();
+    const workbook = {
+      on: vi.fn((event, handler) => {
+        events.set(event, handler);
+        return vi.fn();
+      })
+    };
+    const registry = {
+      on: vi.fn(() => vi.fn()),
+      get: vi.fn(() => null),
+      setSharedState: vi.fn(),
+      deleteSharedState: vi.fn()
+    };
+
+    plugin.onInit(workbook, registry);
+    plugin.onMounted(workbook, registry);
+    events.get('comment-change')({
+      action: 'add',
+      comment: { id: 'comment-1', r: 0, c: 1, messages: [{ text: '请复核' }] }
+    });
+
+    expect(sent).toContainEqual(expect.objectContaining({
+      type: 'comment-change',
+      action: 'add',
+      comment: expect.objectContaining({ id: 'comment-1', r: 0, c: 1 })
+    }));
+    plugin.onUnmount();
+  });
+
+  it('收到远程批注后会写入本地 Workbook', () => {
+    const { plugin } = makePlugin();
+    const upsertComment = vi.fn();
+    plugin._workbook = { upsertComment };
+    plugin._registry = { get: () => null };
+
+    plugin._handleRemoteMessage({
+      type: 'comment-change',
+      roomId: 'room-1',
+      userId: 'other',
+      action: 'add',
+      comment: { id: 'comment-2', r: 2, c: 3, messages: [{ text: '远程批注' }] }
+    });
+
+    expect(upsertComment).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'comment-2',
+      r: 2,
+      c: 3
+    }));
+  });
+});
+
+describe('RealtimeCollaborationPlugin - 多 Sheet 协同隔离', () => {
+  function createCollabWorkbook() {
+    const workbook = new Workbook({ enableWasm: false, sheetName: '总表' });
+    workbook.plugins.register(new CollaborativeCursorPlugin());
+    workbook.plugins.register(new RealtimeCollaborationPlugin({
+      autoConnect: false,
+      roomId: 'room-1',
+      userId: 'me'
+    }));
+    const detailId = workbook.addSheet('明细', { activate: false });
+    const plugin = workbook.plugins.get('RealtimeCollaboration');
+    return { workbook, plugin, detailId };
+  }
+
+  it('其他 Sheet 的远程单元格修改不会写入当前 Sheet，切回后自动应用', () => {
+    const { workbook, plugin, detailId } = createCollabWorkbook();
+
+    plugin._handleRemoteMessage({
+      type: 'cell-change',
+      roomId: 'room-1',
+      userId: 'other',
+      sheetId: detailId,
+      row: 1,
+      col: 2,
+      cell: { v: '明细远程数据' }
+    });
+
+    expect(workbook.getCell(1, 2)?.v).toBeUndefined();
+    workbook.switchSheet(detailId);
+    expect(workbook.getCell(1, 2).v).toBe('明细远程数据');
+
+    plugin.disconnect();
+    workbook.destroy();
+  });
+
+  it('其他 Sheet 的批注和光标不会显示在当前 Sheet', () => {
+    const { workbook, plugin, detailId } = createCollabWorkbook();
+    const cursorPlugin = workbook.plugins.get('CollaborativeCursor');
+
+    plugin._handleRemoteMessage({
+      type: 'comment-change',
+      roomId: 'room-1',
+      userId: 'other',
+      sheetId: detailId,
+      action: 'add',
+      comment: {
+        id: 'comment-detail',
+        r: 0,
+        c: 0,
+        messages: [{ id: 'message-detail', text: '明细批注' }]
+      }
+    });
+    plugin._handleRemoteMessage({
+      type: 'selection-change',
+      roomId: 'room-1',
+      userId: 'other',
+      sheetId: detailId,
+      selection: { startRow: 0, startCol: 0, endRow: 0, endCol: 0 }
+    });
+
+    expect(workbook.getComments()).toHaveLength(0);
+    expect(cursorPlugin.getActiveCursors('sheet-1')).toHaveLength(0);
+
+    workbook.switchSheet(detailId);
+    expect(workbook.getComments()).toHaveLength(1);
+    expect(workbook.getComments()[0].messages[0].text).toBe('明细批注');
+    expect(cursorPlugin.getActiveCursors(detailId)).toHaveLength(1);
+
+    plugin.disconnect();
+    workbook.destroy();
+  });
+
+  it('编辑锁按 Sheet 隔离，同坐标不会互相覆盖', () => {
+    const { workbook, plugin, detailId } = createCollabWorkbook();
+
+    plugin._handleRemoteMessage({
+      type: 'cell-lock',
+      roomId: 'room-1',
+      userId: 'other',
+      sheetId: detailId,
+      r: 5,
+      c: 6
+    });
+
+    expect(plugin.isCellEditLocked(5, 6)).toBe(false);
+    workbook.switchSheet(detailId);
+    expect(plugin.isCellEditLocked(5, 6)).toBe(true);
+
+    plugin.disconnect();
+    workbook.destroy();
+  });
+});
+
+describe('RealtimeCollaborationPlugin - 初始状态同步', () => {
+  function createSyncWorkbook(userId, value) {
+    const workbook = new Workbook({ enableWasm: false, sheetName: '协同表' });
+    workbook.plugins.register(new CollaborativeCursorPlugin());
+    workbook.plugins.register(new RealtimeCollaborationPlugin({
+      autoConnect: false,
+      roomId: 'room-1',
+      userId,
+      userName: userId
+    }));
+    workbook.setCell(0, 0, { v: value });
+
+    const plugin = workbook.plugins.get('RealtimeCollaboration');
+    const sent = [];
+    plugin._socket = {
+      readyState: 1,
+      close: vi.fn(),
+      send: raw => sent.push(JSON.parse(raw))
+    };
+
+    return { workbook, plugin, sent };
+  }
+
+  it('收到状态请求后会向目标用户发送工作簿快照', () => {
+    const { workbook, plugin, sent } = createSyncWorkbook('alice', '已有数据');
+
+    plugin._handleRemoteMessage({
+      type: 'state-request',
+      roomId: 'room-1',
+      userId: 'server',
+      targetUserId: 'bob'
+    });
+
+    const snapshotMessage = sent.find(item => item.type === 'state-snapshot');
+    expect(snapshotMessage).toMatchObject({
+      roomId: 'room-1',
+      userId: 'alice',
+      targetUserId: 'bob'
+    });
+    expect(snapshotMessage.snapshot.data['0-0']).toMatchObject({ v: '已有数据' });
+
+    plugin.disconnect();
+    workbook.destroy();
+  });
+
+  it('收到快照后应用完整工作簿状态并广播当前位置', () => {
+    vi.useFakeTimers();
+    const source = createSyncWorkbook('alice', '远端已有数据');
+    const target = createSyncWorkbook('bob', '本地旧数据');
+    const snapshot = source.workbook.toJSON();
+    target.plugin.readOnly = true;
+    target.workbook.readOnly = true;
+
+    target.plugin._handleRemoteMessage({
+      type: 'state-snapshot',
+      roomId: 'room-1',
+      userId: 'alice',
+      targetUserId: 'bob',
+      snapshot
+    });
+    vi.advanceTimersByTime(target.plugin._selectionThrottleMs);
+
+    expect(target.workbook.getCell(0, 0).v).toBe('远端已有数据');
+    expect(target.workbook.rowCount).toBe(snapshot.rowCount);
+    expect(target.workbook.colCount).toBe(snapshot.colCount);
+    expect(target.sent.some(item => item.type === 'selection-change')).toBe(true);
+
+    source.plugin.disconnect();
+    source.workbook.destroy();
+    target.plugin.disconnect();
+    target.workbook.destroy();
+  });
+});
+
+describe('RealtimeCollaborationPlugin - 断线重连补偿', () => {
+  it('断线期间的本地修改会在重连同步完成后补发', () => {
+    vi.useFakeTimers();
+    const plugin = new RealtimeCollaborationPlugin({
+      autoConnect: false,
+      roomId: 'room-1',
+      userId: 'me'
+    });
+    const sent = [];
+    plugin._registry = { get: () => null };
+    plugin._hasSyncedConnection = true;
+    plugin._lastSyncSequence = 3;
+
+    plugin._handleLocalCellChange({
+      row: 2,
+      col: 3,
+      cell: { v: '离线修改' }
+    });
+    expect(plugin._offlineCellChangeQueue).toHaveLength(1);
+
+    plugin._socket = {
+      readyState: 1,
+      send: raw => sent.push(JSON.parse(raw)),
+      close: vi.fn()
+    };
+    plugin._setupSocketListeners();
+    plugin._socket.onopen();
+
+    const joinMessage = sent.find(item => item.type === 'user-join');
+    expect(joinMessage).toMatchObject({
+      roomId: 'room-1',
+      userId: 'me',
+      resume: true,
+      lastSeq: 3
+    });
+    expect(sent.some(item => item.type === 'cell-change')).toBe(false);
+
+    plugin._handleRemoteMessage({
+      type: 'sync-ready',
+      roomId: 'room-1',
+      userId: 'collab-server',
+      seq: 4
+    });
+
+    expect(sent.some(item =>
+      item.type === 'cell-change' &&
+      item.cell?.v === '离线修改'
+    )).toBe(true);
+    expect(plugin._offlineCellChangeQueue).toHaveLength(0);
+    expect(plugin._lastSyncSequence).toBe(4);
+
+    plugin.disconnect();
+  });
+});
+
+describe('RealtimeCollaborationPlugin - 消息序列与冲突收敛', () => {
+  function createSequencePlugin() {
+    const plugin = new RealtimeCollaborationPlugin({
+      autoConnect: false,
+      roomId: 'room-1',
+      userId: 'me'
+    });
+    const workbook = {
+      rowCount: 100,
+      colCount: 100,
+      activeSheetId: 'sheet-1',
+      getSheets: () => [{ id: 'sheet-1' }],
+      setCell: vi.fn(),
+      requestRender: vi.fn(),
+      emitEvent: vi.fn()
+    };
+    plugin._workbook = workbook;
+    plugin._registry = { get: () => null };
+    return { plugin, workbook };
+  }
+
+  it('同格旧版本和重复消息会被丢弃，只应用最新版本', () => {
+    const { plugin, workbook } = createSequencePlugin();
+
+    plugin._handleRemoteMessage({
+      type: 'cell-change',
+      roomId: 'room-1',
+      userId: 'other',
+      sheetId: 'sheet-1',
+      row: 2,
+      col: 3,
+      seq: 5,
+      cell: { v: 'latest' }
+    });
+    plugin._handleRemoteMessage({
+      type: 'cell-change',
+      roomId: 'room-1',
+      userId: 'other',
+      sheetId: 'sheet-1',
+      row: 2,
+      col: 3,
+      seq: 4,
+      cell: { v: 'stale' }
+    });
+    plugin._handleRemoteMessage({
+      type: 'cell-change',
+      roomId: 'room-1',
+      userId: 'other',
+      sheetId: 'sheet-1',
+      row: 2,
+      col: 3,
+      seq: 5,
+      cell: { v: 'duplicate' }
+    });
+
+    expect(workbook.setCell).toHaveBeenCalledTimes(1);
+    expect(workbook.setCell).toHaveBeenCalledWith(2, 3, { v: 'latest' }, null, {
+      skipEvent: true,
+      skipHistory: true
+    });
+    expect(plugin._cellVersions.get(plugin._cellStateKey('sheet-1', 2, 3))).toBe(5);
+    expect(plugin._lastSyncSequence).toBe(5);
+    expect(workbook.emitEvent).toHaveBeenCalledWith('collaboration-conflict', expect.objectContaining({
+      reason: 'stale-or-duplicate'
+    }));
+  });
+
+  it('批量粘贴按每个单元格的独立 seq 收敛，延迟旧批量不会覆盖新数据', () => {
+    const { plugin, workbook } = createSequencePlugin();
+
+    plugin._handleRemoteMessage({
+      type: 'cell-change-batch',
+      roomId: 'room-1',
+      userId: 'other',
+      seq: 12,
+      cells: [
+        { sheetId: 'sheet-1', row: 0, col: 0, seq: 11, cell: { v: 'new-a' } },
+        { sheetId: 'sheet-1', row: 1, col: 1, seq: 12, cell: { v: 'new-b' } }
+      ]
+    });
+    plugin._handleRemoteMessage({
+      type: 'cell-change-batch',
+      roomId: 'room-1',
+      userId: 'other',
+      seq: 10,
+      cells: [
+        { sheetId: 'sheet-1', row: 0, col: 0, seq: 9, cell: { v: 'old-a' } },
+        { sheetId: 'sheet-1', row: 1, col: 1, seq: 10, cell: { v: 'old-b' } }
+      ]
+    });
+
+    expect(workbook.setCell).toHaveBeenCalledTimes(2);
+    expect(workbook.setCell).toHaveBeenNthCalledWith(1, 0, 0, { v: 'new-a' }, null, {
+      skipEvent: true,
+      skipHistory: true
+    });
+    expect(workbook.setCell).toHaveBeenNthCalledWith(2, 1, 1, { v: 'new-b' }, null, {
+      skipEvent: true,
+      skipHistory: true
+    });
+    expect(plugin._cellVersions.get(plugin._cellStateKey('sheet-1', 0, 0))).toBe(11);
+    expect(plugin._cellVersions.get(plugin._cellStateKey('sheet-1', 1, 1))).toBe(12);
+  });
+
+  it('本地变更确认后会记录逐格版本，后续旧远端消息不能覆盖本地结果', () => {
+    const { plugin, workbook } = createSequencePlugin();
+
+    plugin._handleRemoteMessage({
+      type: 'sync-ack',
+      roomId: 'room-1',
+      userId: 'collab-server',
+      seq: 8,
+      cellVersions: [{ sheetId: 'sheet-1', row: 4, col: 5, seq: 8 }]
+    });
+    plugin._handleRemoteMessage({
+      type: 'cell-change',
+      roomId: 'room-1',
+      userId: 'other',
+      sheetId: 'sheet-1',
+      row: 4,
+      col: 5,
+      seq: 7,
+      cell: { v: 'old' }
+    });
+
+    expect(workbook.setCell).not.toHaveBeenCalled();
+    expect(plugin._lastSyncSequence).toBe(8);
+    expect(plugin._cellVersions.get(plugin._cellStateKey('sheet-1', 4, 5))).toBe(8);
+  });
+});
+
+describe('RealtimeCollaborationPlugin - 连接状态 UI', () => {
+  function createStatusPlugin() {
+    const plugin = new RealtimeCollaborationPlugin({
+      autoConnect: false,
+      roomId: 'room-1',
+      userId: 'me',
+      userName: '我'
+    });
+    plugin._workbook = { emitEvent: vi.fn() };
+    plugin._registry = { get: () => null };
+    return plugin;
+  }
+
+  it('未连接时返回离线状态和空成员列表', () => {
+    const plugin = createStatusPlugin();
+
+    expect(plugin.getConnectionInfo()).toMatchObject({
+      status: 'OFFLINE',
+      roomId: 'room-1',
+      userId: 'me',
+      memberCount: 0,
+      members: []
+    });
+  });
+
+  it('服务端成员广播会更新人数并触发状态事件', () => {
+    const plugin = createStatusPlugin();
+
+    plugin._handleRemoteMessage({
+      type: 'room-members',
+      roomId: 'room-1',
+      userId: 'collab-server',
+      members: [
+        { userId: 'me', userName: '我', userColor: '#3498db' },
+        { userId: 'alice', userName: 'Alice', userColor: '#e74c3c' }
+      ]
+    });
+
+    expect(plugin.getConnectionInfo()).toMatchObject({
+      status: 'OFFLINE',
+      memberCount: 2
+    });
+    expect(plugin._roomMembers.get('alice')).toEqual({
+      userId: 'alice',
+      userName: 'Alice',
+      userColor: '#e74c3c',
+      readOnly: false
+    });
+    expect(plugin._workbook.emitEvent).toHaveBeenCalledWith('collaboration-status', expect.objectContaining({
+      status: 'OFFLINE',
+      memberCount: 2
+    }));
+  });
+
+  it('重连定时器存在时状态为重连中，达到上限后为离线', () => {
+    const plugin = createStatusPlugin();
+
+    plugin._reconnectTimer = setTimeout(() => {}, 1000);
+    expect(plugin.getConnectionStatus()).toBe('RECONNECTING');
+    clearTimeout(plugin._reconnectTimer);
+    plugin._reconnectTimer = null;
+
+    plugin._reconnectAttempts = plugin._maxReconnectAttempts;
+    expect(plugin.getConnectionStatus()).toBe('OFFLINE');
+  });
+
+  it('用户加入和离开会维护房间成员', () => {
+    const plugin = createStatusPlugin();
+
+    plugin._handleRemoteMessage({
+      type: 'user-join',
+      roomId: 'room-1',
+      userId: 'alice',
+      userName: 'Alice',
+      userColor: '#e74c3c'
+    });
+    expect(plugin.getConnectionInfo()).toMatchObject({
+      memberCount: 1,
+      members: [expect.objectContaining({ userId: 'alice' })]
+    });
+
+    plugin._handleRemoteMessage({
+      type: 'user-leave',
+      roomId: 'room-1',
+      userId: 'alice'
+    });
+    expect(plugin.getConnectionInfo()).toMatchObject({
+      memberCount: 0,
+      members: []
+    });
+  });
+});
+
+describe('RealtimeCollaborationPlugin - 心跳与异常清理', () => {
+  function createHeartbeatPlugin(overrides = {}) {
+    const plugin = new RealtimeCollaborationPlugin({
+      autoConnect: false,
+      roomId: 'room-1',
+      userId: 'me',
+      ...overrides
+    });
+    plugin._workbook = { emitEvent: vi.fn(), requestRender: vi.fn() };
+    plugin._registry = { get: () => null };
+    return plugin;
+  }
+
+  it('收到服务端心跳后返回 pong 并启动失联检测', () => {
+    const plugin = createHeartbeatPlugin({ heartbeatTimeoutMs: 100 });
+    const sent = [];
+    plugin._socket = {
+      readyState: 1,
+      send: str => sent.push(JSON.parse(str)),
+      close: vi.fn()
+    };
+
+    plugin._handleRemoteMessage({
+      type: 'heartbeat-ping',
+      roomId: 'room-1',
+      userId: 'collab-server',
+      timestamp: 123
+    });
+
+    expect(sent).toEqual([
+      { type: 'heartbeat-pong', roomId: 'room-1', userId: 'me' }
+    ]);
+    expect(plugin._heartbeatWatchdogStarted).toBe(true);
+    plugin._stopHeartbeat();
+  });
+
+  it('服务端心跳超时会主动触发关闭回调', () => {
+    vi.useFakeTimers();
+    const plugin = createHeartbeatPlugin({ heartbeatTimeoutMs: 100 });
+    const socket = {
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn(),
+      onclose: vi.fn()
+    };
+    plugin._socket = socket;
+
+    plugin._handleRemoteMessage({
+      type: 'heartbeat-ping',
+      roomId: 'room-1',
+      userId: 'collab-server'
+    });
+
+    vi.advanceTimersByTime(99);
+    expect(socket.close).not.toHaveBeenCalled();
+    expect(socket.onclose).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1);
+    expect(socket.close).toHaveBeenCalledTimes(1);
+    expect(socket.onclose).toHaveBeenCalledWith(expect.objectContaining({
+      code: 1006,
+      reason: 'heartbeat timeout'
+    }));
+    expect(plugin._heartbeatTimeoutTimer).toBeNull();
+  });
+
+  it('断开连接时清空协作光标并停止心跳定时器', () => {
+    const plugin = createHeartbeatPlugin();
+    const cursors = new Map([['alice', { userId: 'alice' }]]);
+    const cursorPlugin = {
+      _cursors: cursors,
+      _updateSharedState: vi.fn()
+    };
+    plugin._registry = { get: () => cursorPlugin };
+    plugin._socket = {
+      readyState: 1,
+      send: vi.fn(),
+      close: vi.fn()
+    };
+    plugin._resetHeartbeatWatchdog();
+
+    plugin.disconnect();
+
+    expect(cursors.size).toBe(0);
+    expect(cursorPlugin._updateSharedState).toHaveBeenCalledTimes(1);
+    expect(plugin._heartbeatTimeoutTimer).toBeNull();
+    expect(plugin._heartbeatWatchdogStarted).toBe(false);
+  });
+});
+
+describe('RealtimeCollaborationPlugin - 只读权限协同', () => {
+  function createPermissionPlugin(options = {}) {
+    const plugin = new RealtimeCollaborationPlugin({
+      autoConnect: false,
+      roomId: 'room-1',
+      userId: 'me',
+      ...options
+    });
+    plugin._workbook = {
+      readOnly: false,
+      emitEvent: vi.fn(),
+      requestRender: vi.fn()
+    };
+    plugin._registry = { get: () => null };
+    return plugin;
+  }
+
+  it('只读协作者的握手 URL 会携带 readOnly 标记', () => {
+    const urls = [];
+    const WebSocketMock = vi.fn(function(url) {
+      urls.push(url);
+      this.readyState = WebSocketMock.OPEN;
+      this.send = vi.fn();
+      this.close = vi.fn();
+    });
+    WebSocketMock.OPEN = 1;
+    WebSocketMock.CONNECTING = 0;
+    vi.stubGlobal('WebSocket', WebSocketMock);
+
+    const plugin = createPermissionPlugin({
+      readOnly: true,
+      authRequired: false,
+      serverUrl: 'ws://127.0.0.1:8800'
+    });
+
+    expect(plugin.connect()).toBe(true);
+    expect(new URL(urls[0]).searchParams.get('readOnly')).toBe('true');
+    expect(plugin.getConnectionInfo()).toMatchObject({
+      readOnly: true
+    });
+  });
+
+  it('只读协作者不会发送本地单元格修改，也不会积压离线补偿', async () => {
+    const plugin = createPermissionPlugin({ readOnly: true });
+    const sent = [];
+    plugin._socket = {
+      readyState: 1,
+      send: str => sent.push(JSON.parse(str)),
+      close: vi.fn()
+    };
+
+    plugin._handleLocalCellChange({ row: 1, col: 1, cell: { v: 'local' } });
+    await Promise.resolve();
+
+    expect(sent).toHaveLength(0);
+    expect(plugin._cellChangeQueue).toHaveLength(0);
+    expect(plugin._offlineCellChangeQueue).toHaveLength(0);
+  });
+
+  it('只读协作者会将工作簿置为只读，断开后恢复原状态', () => {
+    const plugin = createPermissionPlugin();
+
+    plugin.setReadOnly(true);
+    expect(plugin._workbook.readOnly).toBe(true);
+
+    plugin.disconnect();
+    expect(plugin._workbook.readOnly).toBe(false);
+  });
+
+  it('服务端权限拒绝会收敛为只读并派发事件', () => {
+    const plugin = createPermissionPlugin();
+
+    plugin._handleRemoteMessage({
+      type: 'permission-denied',
+      roomId: 'room-1',
+      userId: 'collab-server',
+      readOnly: true,
+      messageType: 'cell-change'
+    });
+
+    expect(plugin.readOnly).toBe(true);
+    expect(plugin._workbook.readOnly).toBe(true);
+    expect(plugin._workbook.emitEvent).toHaveBeenCalledWith('collaboration-permission-denied', {
+      messageType: 'cell-change',
+      readOnly: true
+    });
+    plugin._restoreWorkbookReadOnly();
   });
 });

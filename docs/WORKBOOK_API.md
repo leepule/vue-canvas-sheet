@@ -53,6 +53,7 @@ new Workbook(options?)
 |------|------|:---:|------|
 | `enablePersistence` | `boolean` | `false` | 是否启用持久化 |
 | `sheetId` | `string` | `'default'` | 工作表 ID（持久化键） |
+| `sheetName` | `string` | `'Sheet1'` | 初始工作表名称 |
 
 构造时会自动创建：插件注册中心（`plugins`）、历史管理器（`history`）、搜索引擎（`searchEngine` / `search`）、剪贴板（`clipboard`）、事件发射器、错误处理器（`errorHandler`）、性能监控器与对象池。
 
@@ -86,6 +87,8 @@ new Workbook(options?)
 | `totalWidth` | `number` | r | 表格总宽度（像素，兼容代理；推荐使用 `layoutEngine.totalWidth`） |
 | `totalHeight` | `number` | r | 表格总高度（像素，兼容代理；推荐使用 `layoutEngine.totalHeight`） |
 | `search` | `SearchEngine` | r | 搜索引擎实例（`searchEngine` 别名） |
+| `sheetName` | `string` | r/w | 当前工作表名称；写入等价于重命名当前表 |
+| `activeSheetId` | `string` | r | 当前工作表 ID |
 | `plugins` | `PluginRegistry` | r | 插件注册中心 |
 | `history` | `HistoryManager` | r | 历史管理器 |
 | `clipboard` | `ClipboardManager` | r | 剪贴板管理器 |
@@ -94,6 +97,19 @@ new Workbook(options?)
 | `mergeManager` | `MergeManager` | r | 合并单元格管理器 |
 | `styleManager` | `StyleManager` | r | 样式管理器 |
 | `sheetStructure` | `SheetStructure` | r | 行列结构管理器 |
+
+### 多工作表
+
+```js
+const sheetId = wb.addSheet('明细');       // 默认创建后立即切换
+wb.switchSheet('总表');                    // 支持按 ID 或名称切换
+wb.sheetName = '汇总';                     // 重命名当前工作表
+wb.renameSheet('明细', '数据');            // 按 ID 或名称重命名
+wb.deleteSheet('数据');                    // 按 ID 或名称删除，至少保留一张表
+wb.getSheets();                            // [{ id, name, isActive }]
+```
+
+每个工作表独立保存单元格、样式、行列尺寸、合并、冻结与选区状态。切换或删除当前表时会重建公式依赖图并清空当前历史栈；跨工作表公式引用（如 `=Sheet2!A1`）暂不支持。多 Sheet 场景下 IndexedDB 自动保存会写入完整 Workbook 快照，恢复时优先使用该快照。
 
 ---
 
@@ -223,8 +239,27 @@ wb.paste({ s: { r: 10, c: 0 }, e: { r: 10, c: 0 } });
 | `rebuildDependencyMap()` | — | 重建全表公式依赖图 |
 | `getCalculationStats() → Object\|null` | 计算引擎缓存统计 |
 | `resetCalculationStats()` | — | 重置计算统计 |
+| `registerFunction(name, fn)` | `Workbook` | 注册自定义公式函数，并重算正在使用它的公式 |
+| `unregisterFunction(name)` | `boolean` | 注销自定义函数 |
+| `hasRegisteredFunction(name)` | `boolean` | 判断函数是否已注册 |
+| `getRegisteredFunctions()` | `string[]` | 获取全部自定义函数名 |
 
 > 公式语法见 [FORMULAS.md](./FORMULAS.md)。`recalcAll` 在启用 Worker 时返回 `Promise`。
+
+```js
+wb.registerFunction('DOUBLE', value => value * 2);
+wb.registerFunction('SUM_MATRIX', matrix =>
+  matrix.flat().reduce((sum, value) => sum + value, 0)
+);
+
+wb.setCell(0, 0, { v: 21 });
+wb.setCell(0, 1, { v: '=DOUBLE(A1)' });       // 42
+wb.setCell(0, 2, { v: '=SUM_MATRIX(A1:A2)' }); // 范围以二维数组传入
+```
+
+函数名大小写不敏感，可使用字母、数字和下划线；不能覆盖内置函数。函数返回
+`number`、`string`、`boolean` 或 `null`，异常会转换为 `#ERROR!`。自定义函数只在
+主线程执行；包含自定义函数的公式批次会自动绕过 Worker/WASM。
 
 细粒度公式操作位于 `workbook.formulaEvaluator`：
 
@@ -234,6 +269,7 @@ wb.paste({ s: { r: 10, c: 0 }, e: { r: 10, c: 0 } });
 | `triggerRecalc(r, c)` | 触发某单元格及其依赖重算 |
 | `evaluateFormula(formula, r, c, stack?)` | 求值单个公式 |
 | `getDependencies(formula)` | 解析公式引用的单元格与范围依赖 |
+| `registerFunction(name, fn)` / `unregisterFunction(name)` | 管理当前求值器的自定义函数 |
 
 ---
 
@@ -252,7 +288,7 @@ wb.paste({ s: { r: 10, c: 0 }, e: { r: 10, c: 0 } });
 ## 11. 序列化
 
 ### `toJSON() → Object`
-导出工作簿为纯对象：`{ rowCount, colCount, rowHeights, colWidths, data, merges, freeze }`。
+导出当前工作簿为纯对象：`{ rowCount, colCount, rowHeights, colWidths, data, merges, freeze, sheetName, activeSheetId, sheets }`。`sheets` 中包含所有工作表的状态快照。
 
 ### `fromJSON(json)`
 从 `toJSON` 的结构恢复工作簿（会清空历史、重建依赖图与合并索引）。

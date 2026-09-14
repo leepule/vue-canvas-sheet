@@ -124,6 +124,31 @@ describe('AutoSavePlugin', () => {
     expect(workbook.savePendingChanges).toHaveBeenCalledTimes(1);
   });
 
+  it('listens to sheet changes and saves workbook state', async () => {
+    const workbook = createWorkbook();
+    const plugin = new AutoSavePlugin({ interval: 0, debounce: 20, sheetId: 'sheet-1' });
+
+    plugin.onMounted(workbook, createRegistry());
+    expect(plugin.events).toContain('sheet-change');
+
+    workbook.trigger('sheet-change', { name: '重命名后的表' });
+    vi.advanceTimersByTime(20);
+    await Promise.resolve();
+
+    expect(workbook.savePendingChanges).toHaveBeenCalledWith('sheet-1');
+  });
+
+  it('页面离开前应立即触发保存，避免刷新丢失防抖窗口内的修改', async () => {
+    const workbook = createWorkbook();
+    const plugin = new AutoSavePlugin({ interval: 0, debounce: 1000, sheetId: 'sheet-1' });
+
+    plugin.onMounted(workbook, createRegistry());
+    window.dispatchEvent(new Event('pagehide'));
+
+    expect(workbook.savePendingChanges).toHaveBeenCalledWith('sheet-1');
+    plugin.onUnmount();
+  });
+
   describe('localStorage 大表安全拦截 (缺陷修复)', () => {
     it('行数超限 (>2000) 时应拒绝 localStorage 直接写入并抛出', () => {
       const BIG_ROWS = 5000;

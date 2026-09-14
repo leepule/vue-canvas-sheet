@@ -296,6 +296,48 @@ describe('FormulaRPNEvaluator 公式求值', () => {
     expect(result).toBe('#NAME?');
   });
 
+  test('注册自定义函数后应支持普通参数与范围参数', () => {
+    const ev = createEvaluator({
+      '0,0': 10,
+      '0,1': '20',
+      '1,0': 'A',
+      '1,1': true
+    });
+
+    expect(ev.evaluate('=MY_FN2(3, 4)')).toBe('#NAME?');
+    ev.registerFunction('my_fn2', (a, b) => a * b);
+    ev.registerFunction('SUM_MATRIX', (matrix) => {
+      expect(matrix).toEqual([[10, 20], ['A', true]]);
+      return matrix[0][0] + matrix[0][1];
+    });
+
+    expect(ev.evaluate('=my_fn2(3, 4)')).toBe(12);
+    expect(ev.evaluate('=SUM_MATRIX(A1:B2)')).toBe(30);
+    expect(ev.hasCustomFunction('MY_FN2')).toBe(true);
+    expect(ev.getCustomFunctionNames()).toEqual(['MY_FN2', 'SUM_MATRIX']);
+    expect(ev.usesCustomFunction('=SUM_MATRIX(A1:B2)')).toBe(true);
+  });
+
+  test('自定义函数应校验名称、保护内置函数并隔离回调异常', () => {
+    const ev = createEvaluator();
+
+    expect(() => ev.registerFunction('1INVALID', () => 1)).toThrow(TypeError);
+    expect(() => ev.registerFunction('MYFN', null)).toThrow(TypeError);
+    expect(() => ev.registerFunction('SUM', () => 1)).toThrow('不能覆盖内置函数');
+
+    ev.registerFunction('THROW_FN', () => {
+      throw new Error('business failure');
+    });
+    ev.registerFunction('VALUE_ERROR_FN', () => {
+      throw new Error('#VALUE!');
+    });
+
+    expect(ev.evaluate('=THROW_FN()')).toBe('#ERROR!');
+    expect(ev.evaluate('=VALUE_ERROR_FN()')).toBe('#VALUE!');
+    expect(ev.unregisterFunction('THROW_FN')).toBe(true);
+    expect(ev.evaluate('=THROW_FN()')).toBe('#NAME?');
+  });
+
   test('RPN 缓存复用：相同公式返回一致结果', () => {
     expect(evaluator.evaluate('=SUM(1,2,3)')).toBe(6);
     // 第二次调用应命中解析缓存

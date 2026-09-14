@@ -53,6 +53,7 @@ import { createProgressiveRenderer, measureTextWidth } from 'vue-canvas-sheet/re
 | `reloadKey` | `string \| number \| boolean \| null` | `null` | 显式重载标记（原地改数据时使用） |
 | `columns` | `any[]` | `[]` | 列定义（支持多级表头） |
 | `readOnly` | `boolean` | `false` | 只读模式 |
+| `showEditingUiInReadOnly` | `boolean` | `false` | 只读模式下保留工具栏和 Sheet 操作按钮，但禁用交互 |
 | `plugins` | `PluginInterface[]` | `[]` | 注入的插件实例 |
 | `toolbar` | `string[]` | `['history','cells','font','alignment','numbers','table','freeze','data']` | 工具栏分组 |
 | `lazyLoad` | `LazyLoadConfig` | `{ enabled: false }` | 懒加载配置（`pageSize`/`maxCachedPages`/`preloadPages`） |
@@ -134,7 +135,7 @@ import { createProgressiveRenderer, Priority, measureTextWidth } from 'vue-canva
 
 | 插件类 | 工厂函数 | `name` | 说明 | 关键选项 |
 |--------|---------|--------|------|---------|
-| `AutoSavePlugin` | `createAutoSavePlugin` | `AutoSave` | 自动保存到 IndexedDB diff（localStorage 降级） | `backend` / `interval` / `debounce` / `events` / `sheetId` |
+| `AutoSavePlugin` | `createAutoSavePlugin` | `AutoSave` | 自动保存到 IndexedDB（多 Sheet 保存完整快照；localStorage 降级） | `backend` / `interval` / `debounce` / `events` / `sheetId` |
 | `SelectionHistoryPlugin` | `createSelectionHistoryPlugin` | `SelectionHistory` | 选区历史前进/后退 | `maxSize` |
 | `ExportPlugin` | `createExportPlugin` | `Export` | 导出 Excel / JSON / CSV | `defaultFileName` / `useWorker` / `onProgress` |
 | `ImportPlugin` | `createImportPlugin` | `Import` | 导入文件 / JSON | `batchSize` / `onProgress` |

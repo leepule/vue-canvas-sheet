@@ -81,6 +81,7 @@ export class Workbook {
    * @param {boolean} [options.debug=false] - 是否输出调试日志
    * @param {boolean} [options.verbose=false] - debug 的别名
    * @param {string} [options.sheetId='default'] - 工作表唯一标识（用于指纹识别与秒开）
+   * @param {string} [options.sheetName='Sheet1'] - 初始工作表名称
    */
   constructor(options = {}) {
     this._wasmInitMode = options.enableWasm === undefined ? 'auto' : options.enableWasm;
@@ -88,6 +89,17 @@ export class Workbook {
 
     // Phase 6: 委托给 WorkbookBuilder 工厂构造所有子系统
     WorkbookBuilder.build(this, options);
+
+    this.comments = [];
+
+    this._sheetSequence = 1;
+    this._activeSheetIndex = 0;
+    this._sheets = [{
+      id: 'sheet-1',
+      name: this._normalizeSheetName(options.sheetName || 'Sheet1'),
+      state: null
+    }];
+    this._sheetName = this._sheets[0].name;
 
     // Post-init: 异步初始化
     if (this._wasmInitMode === true) {
@@ -123,6 +135,182 @@ export class Workbook {
     if (this._wasmInitMode === 'auto') {
       this._startWasmInitialization();
     }
+  }
+
+  get sheetName() {
+    return this._sheetName;
+  }
+
+  set sheetName(name) {
+    this.renameSheet(name);
+  }
+
+  get activeSheetId() {
+    return this._sheets[this._activeSheetIndex]?.id || null;
+  }
+
+  _normalizeSheetName(name) {
+    const normalized = String(name ?? '').trim();
+    if (!normalized) throw new TypeError('工作表名称不能为空');
+    if (normalized.length > 100) throw new RangeError('工作表名称不能超过 100 个字符');
+    return normalized;
+  }
+
+  _nextDefaultSheetName() {
+    let maxNumber = 0;
+    for (const sheet of this._sheets) {
+      const match = /^Sheet(\d+)$/.exec(sheet.name);
+      if (match) maxNumber = Math.max(maxNumber, Number(match[1]));
+    }
+    return `Sheet${maxNumber + 1}`;
+  }
+
+  _uniqueSheetName(name = null) {
+    const base = this._normalizeSheetName(name || this._nextDefaultSheetName());
+    const names = new Set(this._sheets.map(sheet => sheet.name));
+    if (!names.has(base)) return base;
+
+    let suffix = 2;
+    while (names.has(`${base} (${suffix})`)) suffix++;
+    return `${base} (${suffix})`;
+  }
+
+  _nextSheetId() {
+    this._sheetSequence++;
+    return `sheet-${this._sheetSequence}`;
+  }
+
+  _defaultSheetState() {
+    return {
+      rowCount: 1000,
+      colCount: 200,
+      rowHeights: {},
+      colWidths: {},
+      defaultColWidth: 100,
+      defaultRowHeight: 25,
+      headerDepth: 0,
+      fieldMap: {},
+      cells: [],
+      merges: [],
+      mergeMap: {},
+      freeze: { r: 0, c: 0 },
+      selection: { s: { r: 0, c: 0 }, e: { r: 0, c: 0 } },
+      activeCell: { r: 0, c: 0 },
+      comments: [],
+      dataVersion: 1
+    };
+  }
+
+  getSheets() {
+    return this._sheets.map((sheet, index) => ({
+      id: sheet.id,
+      name: sheet.name,
+      isActive: index === this._activeSheetIndex
+    }));
+  }
+
+  addSheet(name = null, options = {}) {
+    const activate = options.activate !== false;
+    const sheet = {
+      id: this._nextSheetId(),
+      name: this._uniqueSheetName(name),
+      state: this._defaultSheetState()
+    };
+
+    this._sheets.push(sheet);
+    if (!activate) this._persistenceManager?.markWorkbookDirty();
+    if (activate) this.switchSheet(sheet.id);
+    return sheet.id;
+  }
+
+  switchSheet(idOrName) {
+    const index = this._sheets.findIndex(sheet => sheet.id === idOrName || sheet.name === idOrName);
+    if (index === -1) return false;
+    if (index === this._activeSheetIndex) return true;
+
+    const current = this._sheets[this._activeSheetIndex];
+    current.state = this._captureJSONImportState();
+
+    const target = this._sheets[index];
+    this._activeSheetIndex = index;
+    this._sheetName = target.name;
+    this._applyJSONImportState(target.state || this._defaultSheetState());
+    this.history.clear();
+    this._layoutEngine.markDirty();
+
+    const payload = {
+      id: target.id,
+      name: target.name,
+      previousId: current.id,
+      previousName: current.name
+    };
+    this._emit(Events.SHEET_CHANGE, payload);
+    this.notify({ type: 'sheet-change', ...payload });
+    this._persistenceManager?.markWorkbookDirty();
+    return true;
+  }
+
+  renameSheet(idOrName, newName = null) {
+    const targetName = arguments.length > 1 ? newName : idOrName;
+    const selector = arguments.length > 1 ? idOrName : this.activeSheetId;
+    const index = this._sheets.findIndex(sheet => sheet.id === selector || sheet.name === selector);
+    if (index === -1) return false;
+
+    const name = this._normalizeSheetName(targetName);
+    if (this._sheets.some((sheet, i) => i !== index && sheet.name === name)) {
+      throw new Error(`工作表名称已存在: ${name}`);
+    }
+
+    const previousName = this._sheets[index].name;
+    if (previousName === name) return true;
+
+    this._sheets[index].name = name;
+    if (index === this._activeSheetIndex) this._sheetName = name;
+
+    const payload = { id: this._sheets[index].id, name, previousName };
+    this._emit(Events.SHEET_CHANGE, payload);
+    this.notify({ type: 'sheet-change', ...payload });
+    this._persistenceManager?.markWorkbookDirty();
+    return true;
+  }
+
+  deleteSheet(idOrName) {
+    const index = this._sheets.findIndex(sheet => sheet.id === idOrName || sheet.name === idOrName);
+    if (index === -1) return false;
+    if (this._sheets.length <= 1) {
+      throw new Error('至少保留一个工作表');
+    }
+
+    const target = this._sheets[index];
+    const wasActive = index === this._activeSheetIndex;
+
+    if (wasActive) {
+      target.state = this._captureJSONImportState();
+      this._sheets.splice(index, 1);
+
+      const nextIndex = index > 0 ? index - 1 : 0;
+      const next = this._sheets[nextIndex];
+      this._activeSheetIndex = nextIndex;
+      this._sheetName = next.name;
+      this._applyJSONImportState(next.state || this._defaultSheetState());
+      this.history.clear();
+      this._layoutEngine.markDirty();
+    } else {
+      this._sheets.splice(index, 1);
+      if (index < this._activeSheetIndex) this._activeSheetIndex--;
+    }
+
+    const payload = {
+      id: target.id,
+      name: target.name,
+      deleted: true,
+      nextId: this.activeSheetId,
+      nextName: this.sheetName
+    };
+    this._emit(Events.SHEET_CHANGE, payload);
+    this.notify({ type: 'sheet-change', ...payload });
+    this._persistenceManager?.markWorkbookDirty();
+    return true;
   }
 
   // ================================================================
@@ -314,10 +502,6 @@ export class Workbook {
    * @returns {number}
    */
   get rowCount() {
-    if (this._readOnly) {
-      const bounds = this._dataMatrix.getBounds();
-      return Math.max(1, bounds.maxRow + 1);
-    }
     return this._dataStore.getState().rowCount;
   }
 
@@ -332,10 +516,6 @@ export class Workbook {
    * @returns {number}
    */
   get colCount() {
-    if (this._readOnly) {
-      const bounds = this._dataMatrix.getBounds();
-      return Math.max(1, bounds.maxCol + 1);
-    }
     return this._dataStore.getState().colCount;
   }
   set colCount(val) {
@@ -644,6 +824,59 @@ export class Workbook {
     this.dataVersion++;
     this._schedulePersistence();
   }
+
+  /**
+   * 注册业务自定义公式函数。
+   * 已使用该函数的公式会立即在主线程重算，确保 Worker/WASM 不会接收到不可序列化的函数实例。
+   * @param {string} name - 函数名（大小写不敏感）
+   * @param {Function} fn - 计算函数；范围参数以二维数组传入
+   * @returns {Workbook}
+   */
+  registerFunction(name, fn) {
+    this._formulaEvaluator.registerFunction(name, fn);
+    this._recalcFormulasUsingCustomFunction(name);
+    return this;
+  }
+
+  /**
+   * 注销业务自定义函数。
+   * @param {string} name - 函数名（大小写不敏感）
+   * @returns {boolean} 是否确实移除
+   */
+  unregisterFunction(name) {
+    const normalized = String(name ?? '').trim().toUpperCase();
+    const affected = this._hasFormulasUsingCustomFunction(normalized);
+    const removed = this._formulaEvaluator.unregisterFunction(normalized);
+    if (removed && affected) {
+      this.recalcAll({ useWorker: false });
+    }
+    return removed;
+  }
+
+  hasRegisteredFunction(name) {
+    return this._formulaEvaluator.hasCustomFunction(name);
+  }
+
+  getRegisteredFunctions() {
+    return this._formulaEvaluator.getCustomFunctionNames();
+  }
+
+  _hasFormulasUsingCustomFunction(name) {
+    let affected = false;
+    this._dataMatrix.forEach((r, c, cell) => {
+      if (!affected && cell?.f && this._formulaEvaluator.usesCustomFunction(cell.f, name)) {
+        affected = true;
+      }
+    });
+    return affected;
+  }
+
+  _recalcFormulasUsingCustomFunction(name) {
+    if (this._hasFormulasUsingCustomFunction(name)) {
+      this.recalcAll({ useWorker: false });
+    }
+  }
+
   recalcAll(options = {}) {
     if (options.useWorker !== false && this._formulaEngine.isUsingWorker && this._formulaEngine.workerManager) {
       return this._formulaEngine.recalcAllWithWorker().then(result => {
@@ -681,6 +914,40 @@ export class Workbook {
   paste(range) {
     this.clipboardManager.paste(range);
   }
+
+  _exportSheetState(state) {
+    const data = {};
+    for (const { r, c, cell } of state.cells) {
+      data[cellKey(r, c)] = cloneCell(cell);
+    }
+    return {
+      rowCount: state.rowCount,
+      colCount: state.colCount,
+      rowHeights: { ...state.rowHeights },
+      colWidths: { ...state.colWidths },
+      defaultColWidth: state.defaultColWidth,
+      defaultRowHeight: state.defaultRowHeight,
+      headerDepth: state.headerDepth,
+      fieldMap: { ...state.fieldMap },
+      data,
+      merges: state.merges.map(merge => cloneRange(merge)),
+      freeze: { ...state.freeze },
+      comments: Array.isArray(state.comments)
+        ? state.comments.map(comment => this._cloneComment(comment)).filter(Boolean)
+        : []
+    };
+  }
+
+  _captureSheetRecords() {
+    return this._sheets.map((sheet, index) => ({
+      id: sheet.id,
+      name: sheet.name,
+      state: index === this._activeSheetIndex
+        ? this._captureJSONImportState()
+        : sheet.state
+    }));
+  }
+
   toJSON() {
     // 单次遍历直接写出字符串键格式，避免先 toObject(true) 再 _exportDataToStringKeys
     // 造成的双倍 O(N) 临时对象分配。
@@ -688,15 +955,24 @@ export class Workbook {
     this._dataMatrix.forEach((r, c, cell) => {
       data[cellKey(r, c)] = cell;
     });
-    return {
+    const json = {
       rowCount: this.rowCount,
       colCount: this.colCount,
       rowHeights: { ...this.rowHeights },
       colWidths: { ...this.colWidths },
       data,
       merges: [...this.merges],
-      freeze: { ...this.freeze }
+      freeze: { ...this.freeze },
+      comments: this.getComments()
     };
+    json.sheetName = this.sheetName;
+    json.activeSheetId = this.activeSheetId;
+    json.sheets = this._captureSheetRecords().map(sheet => ({
+      id: sheet.id,
+      name: sheet.name,
+      state: this._exportSheetState(sheet.state)
+    }));
+    return json;
   }
   find(query, startFrom = { r: 0, c: 0 }) {
     return this.searchEngine.find(query, startFrom);
@@ -712,12 +988,17 @@ export class Workbook {
       colCount: this.colCount,
       rowHeights: { ...this.rowHeights },
       colWidths: { ...this.colWidths },
+      defaultColWidth: this.defaultColWidth,
+      defaultRowHeight: this.defaultRowHeight,
+      headerDepth: this.headerDepth,
+      fieldMap: { ...this.fieldMap },
       cells,
       merges: [...this.merges],
       mergeMap: { ...this.mergeMap },
       freeze: { ...this.freeze },
       selection: cloneRange(this.selection),
       activeCell: { ...this.activeCell },
+      comments: this.getComments(),
       dataVersion: this.dataVersion
     };
   }
@@ -735,6 +1016,10 @@ export class Workbook {
     this.colCount = importState.colCount;
     this.rowHeights = { ...importState.rowHeights };
     this.colWidths = { ...importState.colWidths };
+    this.defaultColWidth = importState.defaultColWidth ?? this.defaultColWidth;
+    this.defaultRowHeight = importState.defaultRowHeight ?? this.defaultRowHeight;
+    this.headerDepth = importState.headerDepth ?? 0;
+    this.fieldMap = { ...(importState.fieldMap || {}) };
     this._replaceJSONImportCells(importState.cells);
     this.merges = [...importState.merges];
     this.mergeMap = { ...importState.mergeMap };
@@ -745,9 +1030,146 @@ export class Workbook {
     this.activeCell = importState.activeCell
       ? { ...importState.activeCell }
       : { r: 0, c: 0 };
+    this.comments = Array.isArray(importState.comments)
+      ? importState.comments.map(comment => this._normalizeComment(comment)).filter(Boolean)
+      : [];
     this.dataVersion = importState.dataVersion ?? this.dataVersion + 1;
     this._mergeManager._mergeIndexDirty = true;
     this.rebuildDependencyMap();
+  }
+
+  _cloneComment(comment) {
+    if (!comment || typeof comment !== 'object') return null;
+    return {
+      ...comment,
+      messages: Array.isArray(comment.messages)
+        ? comment.messages.map(message => ({ ...message }))
+        : []
+    };
+  }
+
+  _normalizeComment(comment) {
+    const cloned = this._cloneComment(comment);
+    if (!cloned || !Number.isInteger(cloned.r) || !Number.isInteger(cloned.c) || cloned.r < 0 || cloned.c < 0) return null;
+    cloned.id = String(cloned.id || `comment-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+    cloned.messages = (Array.isArray(cloned.messages) ? cloned.messages : []).filter(message => message && String(message.text ?? '').trim()).map(message => ({
+      id: String(message.id || `message-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+      text: String(message.text).trim(),
+      authorId: String(message.authorId || 'unknown'),
+      authorName: String(message.authorName || '未知用户'),
+      authorColor: message.authorColor || '#64748b',
+      createdAt: Number(message.createdAt) || Date.now()
+    }));
+    return cloned.messages.length > 0 ? cloned : null;
+  }
+
+  getComments() {
+    return (this.comments || []).map(comment => this._cloneComment(comment)).filter(Boolean);
+  }
+
+  getComment(id) {
+    const comment = (this.comments || []).find(item => item.id === id);
+    return this._cloneComment(comment);
+  }
+
+  addComment(r, c, text, author = {}) {
+    if (!Number.isInteger(r) || !Number.isInteger(c) || r < 0 || c < 0 || !String(text ?? '').trim()) {
+      return null;
+    }
+    const now = Date.now();
+    const message = {
+      id: `message-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      text: String(text).trim(),
+      authorId: author.authorId || author.userId || 'local',
+      authorName: author.authorName || author.userName || '我',
+      authorColor: author.authorColor || author.userColor || '#2563eb',
+      createdAt: now
+    };
+    const comment = this._normalizeComment({
+      id: author.commentId || `comment-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      r, c, resolved: false, createdAt: now, updatedAt: now, messages: [message]
+    });
+    if (!comment) return null;
+    this.comments = [...(this.comments || []), comment];
+    this._emit(Events.COMMENT_CHANGE, { action: 'add', comment: this._cloneComment(comment) });
+    this.notify({ type: 'comment', comment: this._cloneComment(comment) });
+    this._persistenceManager?.markWorkbookDirty();
+    return this._cloneComment(comment);
+  }
+
+  replyComment(id, text, author = {}) {
+    const index = (this.comments || []).findIndex(comment => comment.id === id);
+    if (index < 0 || !String(text ?? '').trim()) return null;
+    const now = Date.now();
+    const message = {
+      id: `message-${now}-${Math.random().toString(36).slice(2, 8)}`,
+      text: String(text).trim(),
+      authorId: author.authorId || author.userId || 'local',
+      authorName: author.authorName || author.userName || '我',
+      authorColor: author.authorColor || author.userColor || '#2563eb',
+      createdAt: now
+    };
+    const next = this._cloneComment(this.comments[index]);
+    next.messages.push(message);
+    next.updatedAt = now;
+    this.comments = this.comments.map((comment, i) => i === index ? next : comment);
+    this._emit(Events.COMMENT_CHANGE, { action: 'reply', comment: this._cloneComment(next), message: { ...message } });
+    this.notify({ type: 'comment', comment: this._cloneComment(next) });
+    this._persistenceManager?.markWorkbookDirty();
+    return this._cloneComment(next);
+  }
+
+  updateComment(id, patch = {}) {
+    const index = (this.comments || []).findIndex(comment => comment.id === id);
+    if (index < 0) return null;
+    const next = this._normalizeComment({ ...this._cloneComment(this.comments[index]), ...patch, updatedAt: Date.now() });
+    if (!next) return null;
+    this.comments = this.comments.map((comment, i) => i === index ? next : comment);
+    this._emit(Events.COMMENT_CHANGE, { action: 'update', comment: this._cloneComment(next) });
+    this.notify({ type: 'comment', comment: this._cloneComment(next) });
+    this._persistenceManager?.markWorkbookDirty();
+    return this._cloneComment(next);
+  }
+
+  removeComment(id, options = {}) {
+    const comment = this.getComment(id);
+    if (!comment) return false;
+    this.comments = this.comments.filter(item => item.id !== id);
+    this._emit(Events.COMMENT_CHANGE, { action: 'remove', comment, remote: options.remote === true });
+    this.notify({ type: 'comment', comment, remote: options.remote === true });
+    this._persistenceManager?.markWorkbookDirty();
+    return true;
+  }
+
+  upsertComment(comment) {
+    const next = this._normalizeComment(comment);
+    if (!next) return null;
+    const index = (this.comments || []).findIndex(item => item.id === next.id);
+    this.comments = index < 0
+      ? [...(this.comments || []), next]
+      : this.comments.map((item, i) => i === index ? next : item);
+    this._emit(Events.COMMENT_CHANGE, { action: index < 0 ? 'add' : 'update', comment: this._cloneComment(next), remote: true });
+    this.notify({ type: 'comment', comment: this._cloneComment(next), remote: true });
+    this._persistenceManager?.markWorkbookDirty();
+    return this._cloneComment(next);
+  }
+
+  _shiftComments(isRow, index, delta) {
+    if (!Array.isArray(this.comments) || this.comments.length === 0) return;
+    this.comments = this.comments.reduce((result, comment) => {
+      const coordinate = isRow ? comment.r : comment.c;
+      if (delta < 0 && coordinate === index) return result;
+      if (coordinate >= index) {
+        const shifted = { ...comment };
+        if (isRow) shifted.r += delta;
+        else shifted.c += delta;
+        result.push(shifted);
+      } else {
+        result.push(comment);
+      }
+      return result;
+    }, []);
+    this._persistenceManager?.markWorkbookDirty();
   }
   _restoreJSONImportState(previousState) {
     this._applyJSONImportState(previousState);
@@ -756,17 +1178,78 @@ export class Workbook {
       if (restoredCell) restoredCell.dirty = cell.dirty;
     }
   }
+
+  _prepareSheetRecordsFromJSON(source, activeState) {
+    if (!Array.isArray(source.sheets)) {
+      return [{
+        id: 'sheet-1',
+        name: this._normalizeSheetName(source.sheetName || 'Sheet1'),
+        state: activeState
+      }];
+    }
+
+    const records = [];
+    const ids = new Set();
+    const names = new Set();
+    for (const rawSheet of source.sheets) {
+      if (!rawSheet || typeof rawSheet !== 'object' || Array.isArray(rawSheet)) {
+        throw new TypeError('sheets 中的每一项必须是对象');
+      }
+
+      const name = this._normalizeSheetName(rawSheet.name);
+      if (names.has(name)) throw new Error(`工作表名称重复: ${name}`);
+      names.add(name);
+
+      let id = typeof rawSheet.id === 'string' && rawSheet.id ? rawSheet.id : this._nextSheetId();
+      while (ids.has(id)) id = this._nextSheetId();
+      ids.add(id);
+
+      const stateSource = rawSheet.state || rawSheet;
+      const state = prepareWorkbookJSON(stateSource);
+      state.comments = Array.isArray(stateSource.comments)
+        ? stateSource.comments.map(comment => this._normalizeComment(comment)).filter(Boolean)
+        : [];
+      if (rawSheet.state?.selection) state.selection = cloneRange(rawSheet.state.selection);
+      if (rawSheet.state?.activeCell) state.activeCell = { ...rawSheet.state.activeCell };
+      records.push({ id, name, state });
+    }
+
+    if (records.length === 0) throw new TypeError('sheets 不能为空');
+    return records;
+  }
+
   fromJSON(json) {
     let previousState;
+    let previousSheets;
+    let previousActiveSheetIndex;
+    let previousSheetName;
     try {
       const importState = prepareWorkbookJSON(json);
       previousState = this._captureJSONImportState();
+      previousSheets = this._captureSheetRecords();
+      previousActiveSheetIndex = this._activeSheetIndex;
+      previousSheetName = this._sheetName;
+
+      const sheets = this._prepareSheetRecordsFromJSON(json, importState);
+      const activeIndex = sheets.findIndex(sheet =>
+        sheet.id === json.activeSheetId || sheet.name === json.sheetName
+      );
+
+      this._sheets = sheets;
+      this._activeSheetIndex = activeIndex === -1 ? 0 : activeIndex;
+      this._sheetName = this._sheets[this._activeSheetIndex].name;
       this._applyJSONImportState(importState);
       this.history.clear();
       this._layoutEngine.markDirty();
+      this._persistenceManager?.markWorkbookDirty();
       this.notify();
     } catch (e) {
       if (previousState) this._restoreJSONImportState(previousState);
+      if (previousSheets) {
+        this._sheets = previousSheets;
+        this._activeSheetIndex = previousActiveSheetIndex;
+        this._sheetName = previousSheetName;
+      }
       const err = this.errorHandler.handle(
         new SheetError(ErrorCodes.DATA_LOAD_ERROR, '从 JSON 加载数据失败', { originalError: e.message }),
         { json }
@@ -1347,7 +1830,11 @@ export class Workbook {
   }
 
   async loadFromStorage(sheetId = 'default') {
-    return this._persistenceManager.loadFromStorage(sheetId);
+    const loaded = await this._persistenceManager.loadFromStorage(sheetId);
+    if (loaded) {
+      this._emit(Events.DATA_LOAD, { source: 'storage', sheetId });
+    }
+    return loaded;
   }
 
   _schedulePersistence() {

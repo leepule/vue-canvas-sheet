@@ -46,7 +46,7 @@ export class AutoSavePlugin {
     this.sheetId = options.sheetId || this.key;
     this.eventDriven = options.eventDriven !== false;
     this.debounce = options.debounce ?? 1000;
-    this.events = options.events || ['cell-change', 'data-load', 'structure-change'];
+    this.events = options.events || ['cell-change', 'data-load', 'structure-change', 'sheet-change'];
     this.allowLocalStorageFallback = options.allowLocalStorageFallback !== false;
     this.storageOptions = options.storageOptions || {};
 
@@ -61,6 +61,7 @@ export class AutoSavePlugin {
     this._lastBackend = null;
     this._lastSize = 0;
     this._savePromise = null;
+    this._flushOnLeave = null;
   }
 
   onInit(workbook, registry) {
@@ -91,6 +92,14 @@ export class AutoSavePlugin {
       this.timer = setInterval(() => {
         this._save(workbook);
       }, this.interval);
+    }
+
+    if (typeof window !== 'undefined') {
+      this._flushOnLeave = () => {
+        this.saveNow(workbook);
+      };
+      window.addEventListener('pagehide', this._flushOnLeave);
+      window.addEventListener('beforeunload', this._flushOnLeave);
     }
 
     this._mounted = true;
@@ -278,6 +287,11 @@ export class AutoSavePlugin {
   }
 
   onUnmount() {
+    if (typeof window !== 'undefined' && this._flushOnLeave) {
+      window.removeEventListener('pagehide', this._flushOnLeave);
+      window.removeEventListener('beforeunload', this._flushOnLeave);
+      this._flushOnLeave = null;
+    }
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;

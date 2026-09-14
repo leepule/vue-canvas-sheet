@@ -58,6 +58,38 @@ export class FormulaEvaluator {
     this._currentStack = null;
     /** @type {FormulaRPNEvaluator|null} 共享 RPN 求值器（延迟初始化） */
     this._rpnEvaluator = null;
+    /** @type {Map<string, Function>} 业务侧注册的自定义公式函数 */
+    this._customFunctions = new Map();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 自定义函数
+  // ═══════════════════════════════════════════════════════════
+
+  registerFunction(name, fn) {
+    this._ensureRpnEvaluator();
+    this._rpnEvaluator.registerFunction(name, fn);
+    return this;
+  }
+
+  unregisterFunction(name) {
+    this._ensureRpnEvaluator();
+    return this._rpnEvaluator.unregisterFunction(name);
+  }
+
+  hasCustomFunction(name) {
+    this._ensureRpnEvaluator();
+    return this._rpnEvaluator.hasCustomFunction(name);
+  }
+
+  getCustomFunctionNames() {
+    this._ensureRpnEvaluator();
+    return this._rpnEvaluator.getCustomFunctionNames();
+  }
+
+  usesCustomFunction(formula, name = null) {
+    this._ensureRpnEvaluator();
+    return this._rpnEvaluator.usesCustomFunction(formula, name);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -159,7 +191,11 @@ export class FormulaEvaluator {
 
   getDependencies(formula) {
     if (!formula || !formula.startsWith('=')) return { cells: new Set(), ranges: [] };
-    const expression = formula.substring(1).toUpperCase();
+    // 先屏蔽函数名，避免 MYFN2 这类名称被 DEP_CELL_REGEX 误判为单元格引用。
+    const expression = formula
+      .substring(1)
+      .toUpperCase()
+      .replace(/[A-Z_][A-Z0-9_]*(?=\s*\()/g, match => ' '.repeat(match.length));
 
     const cells = new Set();
     const ranges = [];
@@ -429,7 +465,8 @@ export class FormulaEvaluator {
     if (this._rpnEvaluator) return;
     const self = this;
     this._rpnEvaluator = new FormulaRPNEvaluator({
-      getCellValue: (r, c, stack) => self.getCellValue(r, c, stack)
+      getCellValue: (r, c, stack) => self.getCellValue(r, c, stack),
+      customFunctions: this._customFunctions
     });
   }
 

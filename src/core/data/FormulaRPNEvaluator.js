@@ -23,7 +23,7 @@ import { cellKey, parseCellKey } from './CellKey.js';
 // ═══════════════════════════════════════════════════════════
 
 const PATTERNS = [
-  { type: 'fn',      regex: /[A-Z]+(?=\()/y },
+  { type: 'fn',      regex: /[A-Z_][A-Z0-9_]*(?=\()/iy },
   { type: 'range',   regex: /[A-Z]+[0-9]+:[A-Z]+[0-9]+/y },
   { type: 'cell',    regex: /[A-Z]+[0-9]+/y },
   { type: 'string',  regex: /"([^"]*)"/y },
@@ -50,6 +50,10 @@ const FUNCTION_TYPES = {
   LOGIC:     ['IF', 'AND', 'OR', 'NOT'],
   DATE:      ['TODAY', 'NOW', 'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE', 'SECOND', 'DATE', 'DATEDIF']
 };
+
+const BUILT_IN_FUNCTION_NAMES = new Set(Object.values(FUNCTION_TYPES).flat());
+const CUSTOM_FUNCTION_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
+const MAX_CUSTOM_FUNCTION_NAME_LENGTH = 64;
 
 const ErrorCodes = {
   FORMULA_ERROR:      'FORMULA_ERROR',
@@ -78,6 +82,20 @@ function createError(code) {
     [ErrorCodes.SYNTAX_ERROR]:       '#SYNTAX!'
   };
   return map[code] || '#ERROR!';
+}
+
+function normalizeCustomFunctionName(name) {
+  const normalized = String(name ?? '').trim().toUpperCase();
+  if (
+    !normalized ||
+    normalized.length > MAX_CUSTOM_FUNCTION_NAME_LENGTH ||
+    !CUSTOM_FUNCTION_NAME_PATTERN.test(normalized)
+  ) {
+    throw new TypeError(
+      '自定义函数名必须以字母开头，且只能包含字母、数字和下划线'
+    );
+  }
+  return normalized;
 }
 
 /**
@@ -161,6 +179,8 @@ class FormulaParser {
             if (type === 'string') {
               tokens.push({ type, value: match[1] !== undefined ? match[1] : match[0], pos: start });
             } else if (type === 'boolean') {
+              tokens.push({ type, value: match[0].toUpperCase(), pos: start });
+            } else if (type === 'fn') {
               tokens.push({ type, value: match[0].toUpperCase(), pos: start });
             } else {
               tokens.push({ type, value: match[0], pos: start });
@@ -310,6 +330,54 @@ export class FormulaRPNEvaluator {
   constructor(options = {}) {
     this._getCellValue = options.getCellValue || (() => null);
     this.parser = new FormulaParser();
+    this._customFunctions = options.customFunctions instanceof Map
+      ? options.customFunctions
+      : new Map();
+  }
+
+  // ─── 自定义函数注册 ─────────────────────────────────────
+
+  registerFunction(name, fn) {
+    const normalized = normalizeCustomFunctionName(name);
+    if (typeof fn !== 'function') {
+      throw new TypeError(`自定义函数 ${normalized} 必须是一个函数`);
+    }
+    if (BUILT_IN_FUNCTION_NAMES.has(normalized)) {
+      throw new Error(`不能覆盖内置函数: ${normalized}`);
+    }
+
+    this._customFunctions.set(normalized, fn);
+    return this;
+  }
+
+  unregisterFunction(name) {
+    return this._customFunctions.delete(normalizeCustomFunctionName(name));
+  }
+
+  hasCustomFunction(name) {
+    return this._customFunctions.has(normalizeCustomFunctionName(name));
+  }
+
+  getCustomFunctionNames() {
+    return [...this._customFunctions.keys()];
+  }
+
+  usesCustomFunction(formula, name = null) {
+    if (typeof formula !== 'string' || !formula.startsWith('=')) return false;
+    if (name === null && this._customFunctions.size === 0) return false;
+    const target = name === null ? null : normalizeCustomFunctionName(name);
+
+    try {
+      const tokens = this.parser.tokenize(formula.substring(1).toUpperCase());
+      return tokens.some(token => (
+        token.type === 'fn' &&
+        (target === null
+          ? this._customFunctions.has(token.value)
+          : token.value === target)
+      ));
+    } catch {
+      return false;
+    }
   }
 
   // ─── 单元格访问 ─────────────────────────────────────────
@@ -409,6 +477,49 @@ export class FormulaRPNEvaluator {
     return args;
   }
 
+  _resolveCustomFunctionArg(arg, context) {
+    if (!arg || typeof arg !== 'object' || arg.type !== REF_RANGE_TYPE) {
+      return arg;
+    }
+
+    const { start, end } = rangeToRC(arg.ref);
+    const startR = Math.min(start.r, end.r);
+    const endR = Math.max(start.r, end.r);
+    const startC = Math.min(start.c, end.c);
+    const endC = Math.max(start.c, end.c);
+    const matrix = [];
+    const stack = context?.stack || [];
+
+    for (let r = startR; r <= endR; r++) {
+      const row = [];
+      for (let c = startC; c <= endC; c++) {
+        row.push(this._parseCellValue(this._getCell(r, c, stack)));
+      }
+      matrix.push(row);
+    }
+    return matrix;
+  }
+
+  _normalizeCustomFunctionResult(value) {
+    if (value === undefined || value === null) return null;
+    if (typeof value === 'number') {
+      return Number.isFinite(value) ? value : createError(ErrorCodes.VALUE_ERROR);
+    }
+    if (typeof value === 'string' || typeof value === 'boolean') return value;
+    return createError(ErrorCodes.VALUE_ERROR);
+  }
+
+  _evalCustomFunction(fn, args, context) {
+    const resolvedArgs = args.map(arg => this._resolveCustomFunctionArg(arg, context));
+    try {
+      return this._normalizeCustomFunctionResult(fn(...resolvedArgs));
+    } catch (error) {
+      const message = error?.message ? String(error.message).trim() : '';
+      if (isFormulaErrorValue(message)) return message;
+      return createError(ErrorCodes.FORMULA_ERROR);
+    }
+  }
+
   // ─── 比较 ───────────────────────────────────────────────
 
   _compare(a, b, op) {
@@ -429,6 +540,10 @@ export class FormulaRPNEvaluator {
   // ─── 函数调度 ───────────────────────────────────────────
 
   _evalFunction(name, args, context) {
+    const customFunction = this._customFunctions.get(name);
+    if (customFunction) {
+      return this._evalCustomFunction(customFunction, args, context);
+    }
     if (FUNCTION_TYPES.AGGREGATE.includes(name)) return this._evalAggregate(name, args, context);
     if (FUNCTION_TYPES.MATH.includes(name))      return this._evalMath(name, args, context);
     if (FUNCTION_TYPES.TEXT.includes(name))      return this._evalText(name, args, context);

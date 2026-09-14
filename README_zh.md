@@ -81,6 +81,26 @@ const initialData = [
 
 ---
 
+---
+
+## 📑 多工作表
+
+`TableDesigner` 内置底部工作表标签页，组件 ref 也暴露同名 API：
+
+```js
+const sheetId = table.value.addSheet('明细');
+table.value.switchSheet('总表');
+table.value.sheetName = '汇总';
+table.value.deleteSheet(sheetId);
+table.value.getSheets(); // [{ id, name, isActive }]
+```
+
+在界面中双击底部工作表标签可以直接进入重命名输入框；回车或点击外部确认，Esc 取消，重名或空名称会保留编辑状态并提示。多表时标签右侧提供删除按钮；最后一个工作表不可删除。
+
+每个工作表独立保存数据、样式、合并、冻结与选区；`toJSON()` 会一并导出所有工作表。当前公式引擎仍以单工作表为边界，暂不支持 `=Sheet2!A1` 跨表引用。IndexedDB 自动保存在多 Sheet 场景会保存完整 Workbook 快照，可恢复所有工作表名称、活动表与数据。
+
+---
+
 ## 🧩 插件体系
 
 所有插件均以工厂函数形式从包根导出：
@@ -140,6 +160,8 @@ wb.setFreeze(1, 1);
 wb.undo();  wb.redo();
 
 // 计算引擎
+wb.registerFunction('DOUBLE', value => value * 2);
+wb.setCell(0, 2, { f: '=DOUBLE(A1)' });
 wb.enableWorker();
 wb.recalcAll({ useWorker: true });
 wb.getSystemReport();

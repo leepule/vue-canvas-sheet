@@ -30,17 +30,26 @@ import {
   createAutoSavePlugin,
   createRealtimeCollaborationPlugin
 } from 'vue-canvas-sheet/plugins';
-import type { PersistenceStorage } from 'vue-canvas-sheet/core';
+import type { FormulaFunction, PersistenceStorage } from 'vue-canvas-sheet/core';
 
 const workbook = new CoreWorkbook();
 const wasmDisabledWorkbook = new CoreWorkbook({ enableWasm: false });
+const detailSheetId = workbook.addSheet('明细');
+workbook.switchSheet(detailSheetId);
+workbook.sheetName = '数据';
+workbook.deleteSheet(detailSheetId);
+workbook.getSheets();
 const storage: PersistenceStorage = workbook.enablePersistenceStorage();
 storage.close();
 workbook.formulaEvaluator.recalcDirty();
 workbook.formulaEvaluator.triggerRecalc(0, 0);
 workbook.formulaEvaluator.evaluateFormula('=1+1', 0, 0);
 workbook.formulaEvaluator.getDependencies('=A1');
-
+const double: FormulaFunction = (value) => value * 2;
+workbook.registerFunction('MYFN', double);
+workbook.hasRegisteredFunction('myfn');
+workbook.getRegisteredFunctions();
+workbook.unregisterFunction('MYFN');
 void [
   TableDesigner,
   SvgIcon,
@@ -67,7 +76,8 @@ void [
   ExportPlugin,
   createAutoSavePlugin,
   createRealtimeCollaborationPlugin,
-  wasmDisabledWorkbook
+  wasmDisabledWorkbook,
+  detailSheetId
 ];
 
 // @ts-expect-error Store is only exported by vue-canvas-sheet/core.

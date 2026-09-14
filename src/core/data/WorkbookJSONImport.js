@@ -43,6 +43,8 @@ function prepareCells(rawCells, rowCount, colCount) {
   for (const [key, rawCell] of Object.entries(rawCells)) {
     const { r, c } = parseImportedCellKey(key, rowCount, colCount);
     const cell = cloneCell(requireRecord(rawCell, `单元格 ${key}`));
+    if (cell.f === null) delete cell.f;
+    if (cell.s === null) delete cell.s;
     if (cell.f !== undefined && typeof cell.f !== 'string') {
       throw new TypeError(`单元格 ${key} 的公式必须是字符串`);
     }
@@ -120,9 +122,14 @@ export function prepareWorkbookJSON(json) {
     colCount,
     rowHeights: { ...requireRecord(source.rowHeights ?? {}, 'rowHeights') },
     colWidths: { ...requireRecord(source.colWidths ?? {}, 'colWidths') },
+    defaultColWidth: source.defaultColWidth,
+    defaultRowHeight: source.defaultRowHeight,
+    headerDepth: source.headerDepth,
+    fieldMap: { ...requireRecord(source.fieldMap ?? {}, 'fieldMap') },
     cells,
     merges,
     mergeMap,
-    freeze: prepareFreeze(source.freeze ?? { r: 0, c: 0 }, rowCount, colCount)
+    freeze: prepareFreeze(source.freeze ?? { r: 0, c: 0 }, rowCount, colCount),
+    comments: Array.isArray(source.comments) ? source.comments : []
   };
 }

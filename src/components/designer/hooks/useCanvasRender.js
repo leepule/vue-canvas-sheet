@@ -297,7 +297,8 @@ export default function useCanvasRender(tableContext) {
                 ctx.textAlign = 'right';
                 ctx.textBaseline = 'bottom';
                 const dots = '.'.repeat((Math.floor(Date.now() / 500) % 3) + 1);
-                ctx.fillText(`${draft.userName} 正在输入${dots}`, cell.x + cell.w - 3, cell.y + cell.h - 2);
+                const draftUserName = draft.userName || '其他用户';
+                ctx.fillText(`${draftUserName} 正在输入${dots}`, cell.x + cell.w - 3, cell.y + cell.h - 2);
               }
             }
             ctx.restore();
@@ -582,6 +583,22 @@ export default function useCanvasRender(tableContext) {
       drawSelectionInQuadrants(ctx, sel, fR, fC, fW, fH, RW, CH, W, H, CH - tableContext.state.scrollY);
     }
 
+    if (tableContext.state.isDraggingFill && tableContext.state.fillTargetRange) {
+      drawFillTargetInQuadrants(
+        ctx,
+        tableContext.state.fillTargetRange,
+        tableContext.state.fillStartRange,
+        fR,
+        fC,
+        fW,
+        fH,
+        RW,
+        CH,
+        W,
+        H
+      );
+    }
+
     // 拖拽多字段放置预览提示
     if (tableContext.state.dragOverCell) {
       const { r, c } = tableContext.state.dragOverCell;
@@ -705,10 +722,89 @@ export default function useCanvasRender(tableContext) {
     }
   }
 
+  /**
+   * 绘制拖拽填充目标区域。只高亮源选区之外新增的部分。
+   */
+  function drawFillTargetInQuadrants(ctx, targetRange, sourceRange, fR, fC, fW, fH, RW, CH, W, H) {
+    const wb = tableContext.props.workbook;
+    if (!wb || !targetRange) return;
+
+    let range = targetRange;
+    if (sourceRange) {
+      if (targetRange.e.r > sourceRange.e.r) {
+        range = {
+          s: { r: sourceRange.e.r + 1, c: sourceRange.s.c },
+          e: { r: targetRange.e.r, c: targetRange.e.c }
+        };
+      } else if (targetRange.e.c > sourceRange.e.c) {
+        range = {
+          s: { r: sourceRange.s.r, c: sourceRange.e.c + 1 },
+          e: { r: targetRange.e.r, c: targetRange.e.c }
+        };
+      } else {
+        return;
+      }
+    }
+
+    const x = wb.getColPos(range.s.c);
+    const y = wb.getRowPos(range.s.r);
+    const w = wb.getColPos(range.e.c + 1) - x;
+    const h = wb.getRowPos(range.e.r + 1) - y;
+    const theme = tableContext.state.tableTheme || TableTheme;
+
+    const drawTarget = (ox, oy) => {
+      const cx = ox + x;
+      const cy = oy + y;
+      ctx.save();
+      ctx.fillStyle = theme.selectionBg;
+      ctx.fillRect(cx, cy, w, h);
+      ctx.strokeStyle = theme.fillTargetBorder || theme.selectionBorder;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(cx, cy, w, h);
+      ctx.restore();
+    };
+
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(RW + fW, CH + fH, W - (RW + fW), H - (CH + fH));
+    ctx.clip();
+    drawTarget(RW - tableContext.state.scrollX, CH - tableContext.state.scrollY);
+    ctx.restore();
+
+    if (fR > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(RW + fW, CH, W - (RW + fW), fH);
+      ctx.clip();
+      drawTarget(RW - tableContext.state.scrollX, CH);
+      ctx.restore();
+    }
+
+    if (fC > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(RW, CH + fH, fW, H - (CH + fH));
+      ctx.clip();
+      drawTarget(RW, CH - tableContext.state.scrollY);
+      ctx.restore();
+    }
+
+    if (fR > 0 && fC > 0) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(RW, CH, fW, fH);
+      ctx.clip();
+      drawTarget(RW, CH);
+      ctx.restore();
+    }
+  }
+
   function drawCollaborativeCursorsInQuadrants(ctx, fR, fC, fW, fH, RW, CH, W, H) {
     const wb = tableContext.props.workbook;
     if (!wb || !wb.plugins) return;
-    const activeCursors = wb.plugins.getSharedState('collaborative:active-cursors') || [];
+    const allCursors = wb.plugins.getSharedState('collaborative:active-cursors') || [];
+    const activeCursors = allCursors.filter(item => item.sheetId === null || item.sheetId === wb.activeSheetId);
     if (activeCursors.length === 0) return;
 
     const getRect = (r1, c1, r2, c2) => {
@@ -760,7 +856,7 @@ export default function useCanvasRender(tableContext) {
       ctx.setLineDash([]);
 
       ctx.fillStyle = item.userInfo.color;
-      const text = item.userInfo.name;
+      const text = item.userInfo?.name || `用户_${item.userId}`;
       ctx.font = '10px sans-serif';
       const textWidth = ctx.measureText(text).width;
 
@@ -864,6 +960,8 @@ export default function useCanvasRender(tableContext) {
     }
 
     if (wb.freeze) { mix(wb.freeze.r); mix(wb.freeze.c); }
+
+    if (typeof wb.dataVersion === 'number') mix(wb.dataVersion);
 
     const merges = wb.merges || [];
     mix(merges.length);

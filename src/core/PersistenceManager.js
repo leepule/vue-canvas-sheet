@@ -23,6 +23,9 @@
  * @property {(v: boolean) => void}          setEnablePersistence  — 设置持久化开关
  * @property {() => PersistenceConfig}       snapshotConfig        — 快照行列/尺寸/合并等布局配置（替代 8 个独立 getter）
  * @property {(cfg: PersistenceConfig) => void} applyConfig       — 批量应用布局配置（替代 8 个独立 setter）
+ * @property {() => Object}                  snapshotWorkbook      — 导出完整 Workbook 快照（含多 Sheet）
+ * @property {(snapshot: Object) => void}    applyWorkbookSnapshot — 恢复完整 Workbook 快照
+ * @property {() => number}                  getSheetCount         — 获取工作表数量
  * @property {() => SparseMatrix}            getDataMatrix         — 数据矩阵引用
  * @property {(k: string) => {r:number,c:number}} parseKey       — 键解析器
  * @property {(r: number, c: number, v: any) => void} setCell    — 设置单元格
@@ -45,13 +48,27 @@ export class PersistenceManager {
     this.d = deps;
     this._configRevision = deps.getStorage() ? 1 : 0;
     this._persistedConfigRevision = 0;
+    this._workbookRevision = 0;
+    this._persistedWorkbookRevision = 0;
+    this._hasPersistedWorkbookSnapshot = false;
     this._flushPromise = null;
+    this._loadPromise = null;
     this._destroyed = false;
   }
 
   async persist(sheetId = 'default') {
     const storage = this.d.getStorage();
     if (!storage) return;
+
+    const sheetCount = this.d.getSheetCount ? this.d.getSheetCount() : 1;
+    if (this.d.snapshotWorkbook && (sheetCount > 1 ||
+        this._workbookRevision > this._persistedWorkbookRevision)) {
+      await storage.saveMetadata(`workbook-${sheetId}`, this.d.snapshotWorkbook());
+      this._persistedWorkbookRevision = this._workbookRevision;
+      this._persistedConfigRevision = this._configRevision;
+      this._hasPersistedWorkbookSnapshot = true;
+      return;
+    }
 
     const config = this.d.snapshotConfig ? this.d.snapshotConfig() : {};
 
@@ -79,13 +96,41 @@ export class PersistenceManager {
   }
 
   async loadFromStorage(sheetId = 'default') {
+    if (this._loadPromise) return this._loadPromise;
+    this._loadPromise = this._loadFromStorage(sheetId)
+      .finally(() => {
+        this._loadPromise = null;
+        if (this._hasPendingChanges()) this._schedulePersistence();
+      });
+    return this._loadPromise;
+  }
+
+  async _loadFromStorage(sheetId = 'default') {
     const storage = this.d.getStorage();
     if (!storage) return false;
+
+    if (typeof storage.getMetadata === 'function') {
+      const workbookSnapshot = await storage.getMetadata(`workbook-${sheetId}`);
+      if (workbookSnapshot && Array.isArray(workbookSnapshot.sheets) &&
+          typeof this.d.applyWorkbookSnapshot === 'function') {
+        const pendingDirtyCells = this.d.getDirtyCells();
+        if (pendingDirtyCells) pendingDirtyCells.clear();
+        this.d.applyWorkbookSnapshot(workbookSnapshot);
+        this._persistedWorkbookRevision = this._workbookRevision;
+        this._persistedConfigRevision = this._configRevision;
+        this._hasPersistedWorkbookSnapshot = true;
+        this.d.markOffsetsDirty();
+        this.d.notify();
+        return true;
+      }
+    }
 
     const sheetData = await storage.exportSheet(sheetId);
     if (!sheetData || !sheetData.config) return false;
 
     const { config, data } = sheetData;
+    const pendingDirtyCells = this.d.getDirtyCells();
+    if (pendingDirtyCells) pendingDirtyCells.clear();
 
     // 批量应用布局配置（替代 8 个独立 setter，减少 deps 回调数）
     if (this.d.applyConfig) {
@@ -141,6 +186,13 @@ export class PersistenceManager {
     this._schedulePersistence();
   }
 
+  markWorkbookDirty() {
+    if (this._destroyed) return;
+    this._workbookRevision++;
+    if (!this.d.getStorage()) return;
+    this._schedulePersistence();
+  }
+
   flushPersistence() {
     if (this._flushPromise) return this._flushPromise;
     this._flushPromise = this._flushPendingChanges()
@@ -152,6 +204,28 @@ export class PersistenceManager {
     const storage = this.d.getStorage();
     const dirtyCells = this.d.getDirtyCells();
     if (!storage) return;
+    if (this._loadPromise) return;
+
+    if (this._shouldPersistWorkbookSnapshot()) {
+      const diffs = new Map(dirtyCells || []);
+      if (dirtyCells) dirtyCells.clear();
+      const workbookRevision = this._workbookRevision;
+      const configRevision = this._configRevision;
+      try {
+        await storage.saveMetadata(`workbook-${this.d.getSheetId()}`, this.d.snapshotWorkbook());
+        this._persistedWorkbookRevision = workbookRevision;
+        this._persistedConfigRevision = configRevision;
+        this._hasPersistedWorkbookSnapshot = true;
+      } catch (error) {
+        if (dirtyCells) {
+          diffs.forEach((value, key) => {
+            if (!dirtyCells.has(key)) dirtyCells.set(key, value);
+          });
+        }
+        throw error;
+      }
+      return;
+    }
 
     const diffs = new Map(dirtyCells || []);
     if (dirtyCells) dirtyCells.clear();
@@ -178,11 +252,18 @@ export class PersistenceManager {
   }
 
   async savePendingChanges(sheetId = this.d.getSheetId()) {
+    if (this._loadPromise) await this._loadPromise;
+
+    const previousSheetId = this.d.getSheetId();
     const storage = this.d.getStorage();
     if (!storage) {
       this.enablePersistenceStorage({ sheetId });
     } else if (sheetId) {
       this.d.setSheetId(sheetId);
+    }
+    if (sheetId && sheetId !== previousSheetId) {
+      this._persistedWorkbookRevision = -1;
+      this._hasPersistedWorkbookSnapshot = false;
     }
 
     let timer = this.d.getPersistTimer();
@@ -194,6 +275,15 @@ export class PersistenceManager {
     const dirtyCells = this.d.getDirtyCells();
     const dirtyCount = dirtyCells ? dirtyCells.size : 0;
     const configChanged = this._configRevision > this._persistedConfigRevision;
+    if (this._shouldPersistWorkbookSnapshot()) {
+      await this.flushPersistence();
+      return {
+        mode: 'workbook',
+        sheetId: this.d.getSheetId(),
+        dirtyCount
+      };
+    }
+
     if (dirtyCount > 0 || configChanged) {
       await this.flushPersistence();
       return {
@@ -208,6 +298,7 @@ export class PersistenceManager {
   }
 
   async close() {
+    if (this._loadPromise) await this._loadPromise;
     this._clearTimer();
     do {
       await this.flushPersistence();
@@ -221,6 +312,22 @@ export class PersistenceManager {
   _hasPendingChanges() {
     const dirtyCells = this.d.getDirtyCells();
     return (dirtyCells && dirtyCells.size > 0) ||
+      this._configRevision > this._persistedConfigRevision ||
+      (Boolean(this.d.getStorage()) &&
+        this._workbookRevision > this._persistedWorkbookRevision);
+  }
+
+  _shouldPersistWorkbookSnapshot() {
+    if (!this.d.snapshotWorkbook || !this.d.getSheetCount) return false;
+    if (this._workbookRevision > this._persistedWorkbookRevision) return true;
+    // 一旦存在完整快照，后续增量也必须同步进该快照；
+    // 否则恢复时优先读取旧快照，会覆盖较新的 diff 单元格。
+    if (this._hasPersistedWorkbookSnapshot) return true;
+    if (this.d.getSheetCount() <= 1) return false;
+
+    const dirtyCells = this.d.getDirtyCells();
+    return !this._hasPersistedWorkbookSnapshot ||
+      Boolean(dirtyCells && dirtyCells.size > 0) ||
       this._configRevision > this._persistedConfigRevision;
   }
 

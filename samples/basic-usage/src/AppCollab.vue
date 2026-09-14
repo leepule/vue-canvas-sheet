@@ -44,7 +44,8 @@
       <TableDesigner 
         ref="table"
         :initial-data="initialData"
-        :read-only="readOnly"
+        :read-only="effectiveReadOnly"
+        :show-editing-ui-in-read-only="collabReadOnly"
         :loading="loading"
         :plugins="designerPlugins"
         enable-persistence
@@ -52,7 +53,12 @@
       />
 
       <div :class="['collab-floating-card', { collapsed: isCardCollapsed }]">
-        <div v-if="isCardCollapsed" class="collapsed-trigger" @click="isCardCollapsed = false" title="展开协同控制台">
+        <div
+          v-if="isCardCollapsed"
+          class="collapsed-trigger"
+          @click="isCardCollapsed = false"
+          :title="`展开协同控制台（${connectionStatusLabel}）`"
+        >
           <span :class="['status-pulse-dot', connectionStatus.toLowerCase()]"></span>
           <span class="collapsed-icon">👥</span>
         </div>
@@ -66,13 +72,37 @@
             <button class="collapse-btn" @click="isCardCollapsed = true" title="收起面板">×</button>
           </div>
 
+          <div class="connection-summary">
+            <div class="connection-state">
+              <span :class="['status-indicator-dot', connectionStatus.toLowerCase()]"></span>
+              <span>{{ connectionStatusLabel }}</span>
+            </div>
+            <span class="member-count">{{ roomMembers.length }} 人在线</span>
+          </div>
+
+          <div v-if="roomMembers.length" class="member-list" aria-live="polite">
+            <span
+              v-for="member in roomMembers"
+              :key="member.userId"
+              class="member-chip"
+              :title="member.userName"
+            >
+              <span
+                class="member-avatar"
+                :style="{ backgroundColor: member.userColor }"
+              >{{ member.userName.slice(0, 1).toUpperCase() }}</span>
+              <span class="member-name">{{ member.userName }}</span>
+              <span v-if="member.readOnly" class="member-readonly-badge">只读</span>
+            </span>
+          </div>
+
           <div class="card-body">
             <div class="input-group">
               <label>服务地址</label>
               <input 
                 v-model="wsUrl" 
                 placeholder="ws://localhost:8080" 
-                :disabled="connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING'"
+                :disabled="isConnectionBusy"
                 class="card-input"
               />
             </div>
@@ -83,7 +113,7 @@
                 <input 
                   v-model="roomId" 
                   placeholder="房间ID" 
-                  :disabled="connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING'"
+                  :disabled="isConnectionBusy"
                   class="card-input"
                 />
               </div>
@@ -92,7 +122,7 @@
                 <input 
                   v-model="userName" 
                   placeholder="您的昵称" 
-                  :disabled="connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING'"
+                  :disabled="isConnectionBusy"
                   class="card-input"
                 />
               </div>
@@ -104,11 +134,33 @@
                 <input 
                   type="color" 
                   v-model="userColor" 
-                  :disabled="connectionStatus === 'CONNECTED' || connectionStatus === 'CONNECTING'"
+                  :disabled="isConnectionBusy"
                   class="card-color-picker"
                 />
                 <span class="color-hex-label" :style="{ color: userColor }">{{ userColor.toUpperCase() }}</span>
               </div>
+            </div>
+
+            <div class="permission-row">
+              <div class="permission-copy">
+                <span class="permission-title">协同权限</span>
+                <span class="permission-value">{{ collabReadOnly ? '只读' : '可编辑' }}</span>
+              </div>
+              <label
+                :class="['permission-toggle', { active: collabReadOnly, disabled: isConnectionBusy }]"
+                title="只读成员可以查看实时内容，但不能修改单元格、批注和锁"
+              >
+                <input
+                  v-model="collabReadOnly"
+                  class="permission-checkbox"
+                  type="checkbox"
+                  :disabled="isConnectionBusy"
+                />
+                <span class="permission-track" aria-hidden="true">
+                  <span class="permission-thumb"></span>
+                </span>
+                <span class="permission-state">{{ collabReadOnly ? '只读' : '编辑' }}</span>
+              </label>
             </div>
           </div>
 
@@ -116,8 +168,9 @@
             <button 
               @click="connectionStatus === 'CONNECTED' ? disconnectRealtime() : connectRealtime()"
               :class="['connect-action-btn', connectionStatus.toLowerCase()]"
+              :disabled="connectionStatus === 'CONNECTING' || connectionStatus === 'RECONNECTING'"
             >
-              {{ connectionStatus === 'CONNECTED' ? '断开协同连接' : (connectionStatus === 'CONNECTING' ? '正在连接中...' : '建立协同连接') }}
+              {{ connectionActionButtonLabel }}
             </button>
           </div>
         </div>
@@ -177,7 +230,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onBeforeUnmount } from 'vue';
+import { computed, ref, onMounted, onBeforeUnmount } from 'vue';
 import { 
   TableDesigner, 
   createSelectionHistoryPlugin, 
@@ -186,6 +239,7 @@ import {
 } from 'vue-canvas-sheet';
 
 const readOnly = ref(false);
+const collabReadOnly = ref(false);
 const table = ref(null);
 const showReport = ref(false);
 const loading = ref(false);
@@ -207,7 +261,8 @@ const roomId = ref('demo-sheet');
 const userName = ref(chosenName);
 const userColor = ref(chosenColor);
 const connectionStatus = ref('DISCONNECTED');
-let statusTimer = null;
+const roomMembers = ref([]);
+const effectiveReadOnly = computed(() => readOnly.value || collabReadOnly.value);
 
 const realCollabPlugin = createRealtimeCollaborationPlugin({
   serverUrl: '',
@@ -215,6 +270,7 @@ const realCollabPlugin = createRealtimeCollaborationPlugin({
   userName: userName.value,
   userColor: userColor.value,
   autoConnect: false,
+  authRequired: false,
   fieldNames: {}
 });
 
@@ -243,35 +299,60 @@ const goForward = () => {
 };
 
 const updateCollabStatus = () => {
-  connectionStatus.value = realCollabPlugin.getConnectionStatus();
+  const info = realCollabPlugin.getConnectionInfo();
+  connectionStatus.value = info.status;
+  roomMembers.value = info.members || [];
+  collabReadOnly.value = info.readOnly;
 };
+
+const connectionStatusLabel = computed(() => {
+  const labels = {
+    CONNECTING: '连接中',
+    CONNECTED: '已连接',
+    RECONNECTING: '重连中',
+    OFFLINE: '离线'
+  };
+  return labels[connectionStatus.value] || '状态未知';
+});
+
+const isConnectionBusy = computed(() =>
+  connectionStatus.value === 'CONNECTED' ||
+  connectionStatus.value === 'CONNECTING' ||
+  connectionStatus.value === 'RECONNECTING'
+);
+
+const connectionActionButtonLabel = computed(() => {
+  if (connectionStatus.value === 'CONNECTED') return '断开协同连接';
+  if (connectionStatus.value === 'CONNECTING') return '正在连接中...';
+  if (connectionStatus.value === 'RECONNECTING') return '正在重连中...';
+  return '建立协同连接';
+});
 
 const connectRealtime = () => {
   realCollabPlugin.roomId = roomId.value;
   realCollabPlugin.userName = userName.value;
   realCollabPlugin.userColor = userColor.value;
+  realCollabPlugin.readOnly = collabReadOnly.value;
 
   realCollabPlugin.connect(wsUrl.value);
   updateCollabStatus();
-  
-  if (!statusTimer) {
-    statusTimer = setInterval(updateCollabStatus, 1000);
-  }
 };
 
 const disconnectRealtime = () => {
   realCollabPlugin.disconnect();
   updateCollabStatus();
-  if (statusTimer) {
-    clearInterval(statusTimer);
-    statusTimer = null;
-  }
 };
 
 let selectionListener = null;
+let connectionListener = null;
 
 onMounted(() => {
   if (table.value && table.value.workbook) {
+    updateCollabStatus();
+    connectionListener = table.value.workbook.on('collaboration-status', (info) => {
+      connectionStatus.value = info.status;
+      roomMembers.value = info.members || [];
+    });
     selectionListener = table.value.workbook.on('selection-change', () => {
       setTimeout(updateHistoryState, 50);
     });
@@ -282,6 +363,10 @@ onBeforeUnmount(() => {
   if (selectionListener) {
     selectionListener();
     selectionListener = null;
+  }
+  if (connectionListener) {
+    connectionListener();
+    connectionListener = null;
   }
   disconnectRealtime();
 });
@@ -558,6 +643,16 @@ const loadBigData = () => {
   animation: pulse-yellow 1.5s infinite;
 }
 
+.status-pulse-dot.reconnecting {
+  background-color: #f97316;
+  box-shadow: 0 0 0 0 rgba(249, 115, 22, 0.7);
+  animation: pulse-yellow 1.5s infinite;
+}
+
+.status-pulse-dot.offline {
+  background-color: #94a3b8;
+}
+
 .card-content {
   padding: 16px;
   display: flex;
@@ -599,6 +694,93 @@ const loadBigData = () => {
 
 .status-indicator-dot.connecting {
   background-color: #f59e0b;
+}
+
+.status-indicator-dot.reconnecting {
+  background-color: #f97316;
+}
+
+.status-indicator-dot.offline {
+  background-color: #94a3b8;
+}
+
+.connection-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.connection-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.member-count {
+  flex-shrink: 0;
+  color: #64748b;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.member-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  max-height: 84px;
+  overflow-y: auto;
+}
+
+.member-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  min-width: 0;
+  padding: 3px 7px 3px 3px;
+  border: 1px solid #e2e8f0;
+  border-radius: 999px;
+  background: #fff;
+  color: #475569;
+  font-size: 11px;
+}
+
+.member-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.member-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.member-readonly-badge {
+  flex-shrink: 0;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: #f1f5f9;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 600;
 }
 
 .collapse-btn {
@@ -651,6 +833,117 @@ const loadBigData = () => {
   color: #64748b;
   text-transform: uppercase;
   letter-spacing: 0.5px;
+}
+
+.permission-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 42px;
+  padding: 7px 9px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.permission-copy {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+
+.permission-title {
+  flex-shrink: 0;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.permission-value {
+  min-width: 0;
+  overflow: hidden;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.permission-toggle {
+  position: relative;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  flex-shrink: 0;
+  gap: 6px;
+  color: #475569;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.permission-checkbox {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.permission-track {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 32px;
+  height: 18px;
+  padding: 2px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  box-shadow: inset 0 1px 2px rgba(15, 23, 42, 0.12);
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.permission-thumb {
+  display: block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.24);
+  transition: transform 0.2s ease;
+}
+
+.permission-toggle.active .permission-track {
+  background: #3b82f6;
+  box-shadow: inset 0 1px 2px rgba(37, 99, 235, 0.24);
+}
+
+.permission-toggle.active .permission-thumb {
+  transform: translateX(14px);
+}
+
+.permission-toggle:hover:not(.disabled) .permission-track {
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12), inset 0 1px 2px rgba(15, 23, 42, 0.12);
+}
+
+.permission-toggle.disabled {
+  cursor: not-allowed;
+  color: #94a3b8;
+  opacity: 0.68;
+}
+
+.permission-toggle.disabled .permission-track {
+  background: #e2e8f0;
+}
+
+.permission-toggle:focus-within .permission-track {
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.18);
 }
 
 .card-input {
@@ -747,11 +1040,11 @@ const loadBigData = () => {
   box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
 }
 
-.connect-action-btn.disconnected {
+.connect-action-btn.offline {
   background: #3b82f6;
 }
 
-.connect-action-btn.disconnected:hover {
+.connect-action-btn.offline:hover:not(:disabled) {
   background: #2563eb;
   box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
 }
@@ -760,6 +1053,16 @@ const loadBigData = () => {
   background: #d97706;
   cursor: not-allowed;
   animation: pulse-btn-yellow 1.5s infinite;
+}
+
+.connect-action-btn.reconnecting {
+  background: #ea580c;
+  cursor: not-allowed;
+  animation: pulse-btn-yellow 1.5s infinite;
+}
+
+.connect-action-btn:disabled {
+  cursor: not-allowed;
 }
 
 .connect-action-btn.connected {
@@ -953,4 +1256,3 @@ const loadBigData = () => {
   box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
 }
 </style>
-

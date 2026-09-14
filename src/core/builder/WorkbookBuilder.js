@@ -221,6 +221,7 @@ export class WorkbookBuilder {
       getDependencyMap: () => ctx.dependencyMap,
       getReverseDependencyMap: () => ctx.reverseDependencyMap,
       getDependencies: (f) => ctx._formulaEvaluator.getDependencies(f),
+      hasCustomFunction: (f) => ctx._formulaEvaluator.usesCustomFunction(f),
       updateDependencyMap: (id, f) => ctx._formulaEvaluator._updateDependencyMap(id, f),
       getSharedValueStore: () => ctx._formulaEngine.sharedValueStore,
       setSharedValueStore: (s) => { ctx._formulaEngine.sharedValueStore = s; },
@@ -328,6 +329,7 @@ export class WorkbookBuilder {
       getHistory: () => ctx.history,
       getCell: (r, c) => ctx.getCell(r, c),
       bulkSetCells: (updates) => ctx.bulkSetCells(updates),
+      shiftComments: (isRow, index, delta) => ctx._shiftComments(isRow, index, delta),
       notify: (...a) => ctx.notify(...a),
     });
   }
@@ -372,7 +374,7 @@ export class WorkbookBuilder {
         mergeMap: ctx.mergeMap,
         defaultColWidth: ctx.defaultColWidth,
         defaultRowHeight: ctx.defaultRowHeight,
-        freeze: ctx.freeze,
+        freeze: ctx.freeze
       }),
       applyConfig: (cfg) => {
         ctx._dataStore.setState({
@@ -383,10 +385,13 @@ export class WorkbookBuilder {
           merges: cfg.merges || [],
           mergeMap: cfg.mergeMap || {},
           defaultColWidth: cfg.defaultColWidth || 80,
-          defaultRowHeight: cfg.defaultRowHeight || 25,
+          defaultRowHeight: cfg.defaultRowHeight || 25
         });
         ctx._uiStore.setState({ freeze: cfg.freeze || { r: 0, c: 0 } });
       },
+      snapshotWorkbook: () => ctx.toJSON(),
+      applyWorkbookSnapshot: snapshot => ctx.fromJSON(snapshot),
+      getSheetCount: () => ctx._sheets.length,
       getDataMatrix: () => ctx._dataMatrix,
       parseKey: (k) => ctx._parseKey(k),
       setCell: (r, c, v) => ctx.setCell(r, c, v),

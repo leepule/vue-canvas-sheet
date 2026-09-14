@@ -18,6 +18,45 @@
 			<input v-model="editValue" ref="editor" @input="handleEditorInput" @blur="finishEdit" @keydown.enter="finishEdit"
 				@keydown.esc="cancelEdit" />
 		</div>
+		<div v-for="item in visibleComments" :key="item.comment.id" class="vue-canvas-sheet-comment-marker-wrap"
+			:style="{ left: item.rect.x + item.rect.w - 12 + 'px', top: item.rect.y + 'px' }"
+			@mousedown.stop @mouseenter="state.hoveredCommentId = item.comment.id" @mouseleave="state.hoveredCommentId = null" @click.stop="openComment(item.comment)">
+			<button class="vue-canvas-sheet-comment-marker" type="button" :title="item.preview"
+				:aria-label="'打开单元格批注 ' + item.preview"> </button>
+			<div v-if="hoveredCommentId === item.comment.id && selectedCommentId !== item.comment.id"
+				class="vue-canvas-sheet-comment-tooltip">{{ item.preview }}</div>
+		</div>
+		<div v-if="commentComposer.visible" class="vue-canvas-sheet-comment-composer"
+			:style="commentPanelStyle(commentComposer.r, commentComposer.c)" @mousedown.stop>
+			<div class="vue-canvas-sheet-comment-heading">添加批注</div>
+			<textarea v-model="commentComposer.text" rows="3" placeholder="写下你的批注..." @keydown.stop @keydown.ctrl.enter.stop.prevent="submitComment"></textarea>
+			<div class="vue-canvas-sheet-comment-actions">
+				<button type="button" @click="closeCommentComposer">取消</button>
+				<button type="button" class="primary" @click="submitComment">发布</button>
+			</div>
+		</div>
+		<div v-if="selectedComment" class="vue-canvas-sheet-comment-panel"
+			:style="commentPanelStyle(selectedComment.r, selectedComment.c)" @mousedown.stop>
+			<div class="vue-canvas-sheet-comment-panel-header">
+				<strong>{{ propsCommentTitle }}</strong>
+				<button type="button" title="关闭批注" aria-label="关闭批注" @click="closeCommentPanel">×</button>
+			</div>
+			<div class="vue-canvas-sheet-comment-thread">
+				<div v-for="message in selectedComment.messages" :key="message.id" class="vue-canvas-sheet-comment-message">
+					<div class="vue-canvas-sheet-comment-author">
+						<span class="vue-canvas-sheet-comment-avatar" :style="{ backgroundColor: message.authorColor }">{{ message.authorName.slice(0, 1) }}</span>
+						<span>{{ message.authorName }}</span>
+					</div>
+					<div class="vue-canvas-sheet-comment-text">{{ message.text }}</div>
+				</div>
+			</div>
+			<textarea v-if="!selectedComment.resolved && !props.readOnly" v-model="commentReplyText" rows="2" placeholder="回复这条批注..." @keydown.stop @keydown.ctrl.enter.stop.prevent="submitCommentReply"></textarea>
+			<div class="vue-canvas-sheet-comment-actions">
+				<button v-if="!props.readOnly" type="button" @click="toggleCommentResolved">{{ selectedComment.resolved ? '重新打开' : '解决' }}</button>
+				<button v-if="!props.readOnly" type="button" class="danger" @click="removeSelectedComment">删除</button>
+				<button v-if="!props.readOnly && !selectedComment.resolved" type="button" class="primary" @click="submitCommentReply">回复</button>
+			</div>
+		</div>
 		<div v-if="contextMenuVisible" class="vue-canvas-sheet-context-menu"
 			:style="{ left: contextMenuPos.x + 'px', top: contextMenuPos.y + 'px' }" @mousedown.stop>
 			<div class="vue-canvas-sheet-menu-item" @click="handleMenuAction('insertRow')">插入行</div>
@@ -28,6 +67,8 @@
 			<div class="vue-canvas-sheet-divider"></div>
 			<div class="vue-canvas-sheet-menu-item" v-if="canMerge" @click="handleMenuAction('merge')">合并单元格</div>
 			<div class="vue-canvas-sheet-menu-item" v-if="canUnmerge" @click="handleMenuAction('unmerge')">取消合并</div>
+			<div class="vue-canvas-sheet-divider"></div>
+			<div class="vue-canvas-sheet-menu-item" @click="handleMenuAction('comment')">添加批注</div>
 			<div class="vue-canvas-sheet-divider"></div>
 			<div class="vue-canvas-sheet-menu-item" @click="handleMenuAction('clear')">清空内容</div>
 			<div class="vue-canvas-sheet-divider"></div>
@@ -102,7 +143,8 @@ const emit = defineEmits([
   'column-deleted',
   'drop-field',
   'trigger-find',
-  'progressive-render-complete'
+  'progressive-render-complete',
+  'show-alert'
 ]);
 
 // DOM elements refs
@@ -155,6 +197,11 @@ const state = reactive({
   contextMenuVisible: false,
   contextMenuPos: { x: 0, y: 0 },
   contextMenuTarget: null,
+  commentVersion: 0,
+  hoveredCommentId: null,
+  selectedCommentId: null,
+  commentReplyText: '',
+  commentComposer: { visible: false, r: 0, c: 0, text: '' },
   dragOverCell: null,
   totalWidth: 0,
   totalHeight: 0,
@@ -221,6 +268,34 @@ const isOffscreenActive = computed(() => {
   return state.useOffscreen && state.offscreenRenderer && state.offscreenRenderer.isUsingWorker();
 });
 
+const visibleComments = computed(() => {
+	void state.commentVersion;
+	if (!props.workbook || typeof props.workbook.getComments !== 'function') return [];
+	return props.workbook.getComments().map(comment => {
+		const rect = tableContext.methods.getCellScreenRect(comment.r, comment.c);
+		const messages = comment.messages || [];
+		return {
+			comment,
+			rect,
+			preview: messages[0]?.text || '批注'
+		};
+	}).filter(item => item.rect && item.rect.x + item.rect.w > 0 && item.rect.y + item.rect.h > 0 && item.rect.x < state.width && item.rect.y < state.height);
+});
+
+const selectedComment = computed(() => {
+	void state.commentVersion;
+	if (!state.selectedCommentId || !props.workbook || typeof props.workbook.getComment !== 'function') return null;
+	return props.workbook.getComment(state.selectedCommentId);
+});
+
+const hoveredCommentId = computed(() => state.hoveredCommentId);
+const selectedCommentId = computed(() => state.selectedCommentId);
+const commentReplyText = computed({
+	get: () => state.commentReplyText,
+	set: value => { state.commentReplyText = value; }
+});
+const propsCommentTitle = computed(() => selectedComment.value?.resolved ? '已解决的批注' : '批注讨论');
+
 // Setup unified tableContext
 const tableContext = {
   props,
@@ -248,7 +323,13 @@ const tableContext = {
   methods: {}
 };
 
+function showAlertDialog(payload) {
+  emit('show-alert', payload);
+}
+
 // Initialize hooks
+Object.assign(tableContext.methods, { showAlertDialog });
+
 const offscreenRender = useOffscreenRender(tableContext);
 Object.assign(tableContext.methods, offscreenRender);
 
@@ -286,8 +367,89 @@ Object.assign(tableContext.methods, {
   setupWorkbookSubscription,
   handleResize,
   rebuildContentCanvas,
-  preloadTextMetrics
+  preloadTextMetrics,
+  openCommentComposer
 });
+
+function commentPanelStyle(r, c) {
+	if (!props.workbook || !Number.isInteger(r) || !Number.isInteger(c)) return {};
+	const rect = tableContext.methods.getCellScreenRect(r, c);
+	const left = Math.min(Math.max(rect.x + rect.w + 8, 8), Math.max(8, state.width - 300));
+	const top = Math.min(Math.max(rect.y, 8), Math.max(8, state.height - 230));
+	return { left: left + 'px', top: top + 'px' };
+}
+
+function openComment(comment) {
+	state.selectedCommentId = comment.id;
+	state.commentReplyText = '';
+	state.commentComposer.visible = false;
+}
+
+function closeCommentPanel() {
+	state.selectedCommentId = null;
+	state.commentReplyText = '';
+}
+
+function openCommentComposer(r, c) {
+	state.selectedCommentId = null;
+	state.commentComposer = { visible: true, r, c, text: '' };
+}
+
+function closeCommentOverlays() {
+	state.selectedCommentId = null;
+	state.commentReplyText = '';
+	state.commentComposer.visible = false;
+	state.commentComposer.text = '';
+}
+
+function closeCommentComposer() {
+	closeCommentOverlays();
+}
+
+function submitComment() {
+	const { r, c, text } = state.commentComposer;
+	if (!text.trim() || !props.workbook) return;
+	const add = props.workbook.plugins?.getSharedState('comments:add');
+	const comment = add
+		? add(r, c, text)
+		: props.workbook.addComment(r, c, text, getCommentAuthor());
+	if (comment) openComment(comment);
+	state.commentComposer.visible = false;
+	state.commentComposer.text = '';
+}
+
+function submitCommentReply() {
+	if (!selectedComment.value || !state.commentReplyText.trim() || !props.workbook) return;
+	const reply = props.workbook.plugins?.getSharedState('comments:reply');
+	if (reply) reply(selectedComment.value.id, state.commentReplyText);
+	else props.workbook.replyComment(selectedComment.value.id, state.commentReplyText, getCommentAuthor());
+	state.commentReplyText = '';
+}
+
+function getCommentAuthor() {
+	const getUserInfo = props.workbook?.plugins?.getSharedState('collaboration:getUserInfo');
+	const userInfo = typeof getUserInfo === 'function' ? getUserInfo() : null;
+	return {
+		userId: userInfo?.userId || 'local',
+		userName: userInfo?.userName || '我',
+		userColor: userInfo?.userColor || '#2563eb'
+	};
+}
+
+function toggleCommentResolved() {
+	if (!selectedComment.value || !props.workbook) return;
+	const update = props.workbook.plugins?.getSharedState('comments:update');
+	if (update) update(selectedComment.value.id, { resolved: !selectedComment.value.resolved });
+	else props.workbook.updateComment(selectedComment.value.id, { resolved: !selectedComment.value.resolved });
+}
+
+function removeSelectedComment() {
+	if (!selectedComment.value || !props.workbook) return;
+	const remove = props.workbook.plugins?.getSharedState('comments:remove');
+	if (remove) remove(selectedComment.value.id);
+	else props.workbook.removeComment(selectedComment.value.id);
+	closeCommentPanel();
+}
 
 // Component methods (for template & local use)
 function focus() {
@@ -383,7 +545,7 @@ function setupWorkbookSubscription() {
     state._eventUnsubs = [];
 
     state._eventUnsubs.push(
-      props.workbook.on('selection-change', (payload) => {
+    props.workbook.on('selection-change', (payload) => {
         if (props.workbook.activeCell) {
           const { r, c } = props.workbook.activeCell;
           const cell = props.workbook.getCell(r, c);
@@ -395,12 +557,23 @@ function setupWorkbookSubscription() {
             tableContext.methods.scrollIntoView(r, c);
           }
 
+          closeCommentOverlays();
+
           emit('selection-change', {
             r, c,
             val,
             address
           });
         }
+      })
+    );
+
+    state._eventUnsubs.push(
+      props.workbook.on(Events.COMMENT_CHANGE || 'comment-change', () => {
+		state.commentVersion++;
+		if (state.selectedCommentId && !props.workbook.getComment(state.selectedCommentId)) closeCommentPanel();
+		if (state.commentComposer.visible) state.commentComposer.visible = false;
+		tableContext.methods.invalidate();
       })
     );
 
@@ -440,6 +613,7 @@ function setupWorkbookSubscription() {
 
       if (data && data.type === 'selection') {
         invalidateSelection();
+        _checkAnimationNeed();
         return;
       }
 
@@ -801,6 +975,7 @@ const onMouseDownWrapper = (e) => {
   if (state.contextMenuVisible) {
     state.contextMenuVisible = false;
   }
+  closeCommentOverlays();
   if (e.target.classList.contains('vue-canvas-sheet-scrollbar-h') ||
     e.target.classList.contains('vue-canvas-sheet-scrollbar-v') ||
     e.target.classList.contains('vue-canvas-sheet-scrollbar-spacer')) {
@@ -866,6 +1041,7 @@ const {
   editValue,
   editorPos,
   tableTheme,
+  commentComposer,
   contextMenuVisible,
   contextMenuPos,
   totalWidth,
@@ -876,7 +1052,10 @@ const {
   ariaCols
 } = toRefs(state);
 
-defineExpose({ focus });
+defineExpose({
+  focus,
+  scrollIntoView: (r, c) => tableContext.methods.scrollIntoView(r, c)
+});
 </script>
 <style scoped lang="scss">
 	.vue-canvas-sheet {
@@ -927,6 +1106,25 @@ defineExpose({ focus });
 				color: #409eff;
 			}
 		}
+
+		&-comment-marker-wrap { position: absolute; z-index: 8; display: flex; justify-content: flex-end; align-items: flex-start; width: 12px; height: 16px; cursor: pointer; }
+		&-comment-marker { display: block; width: 0; height: 0; padding: 0; border: 0; border-top: 7px solid #f59e0b; border-left: 7px solid transparent; background: transparent; cursor: pointer; }
+		&-comment-tooltip, &-comment-composer, &-comment-panel { position: absolute; z-index: 250; box-sizing: border-box; width: 288px; background: #fff; border: 1px solid #d7dee8; box-shadow: 0 8px 24px rgba(15, 23, 42, .14); border-radius: 6px; }
+		&-comment-tooltip { left: 8px; top: 12px; width: 220px; padding: 8px 10px; font-size: 12px; line-height: 1.45; color: #334155; pointer-events: none; }
+		&-comment-composer, &-comment-panel { padding: 12px; }
+		&-comment-heading, &-comment-panel-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; font-size: 13px; color: #1e293b; }
+		&-comment-panel-header button { border: 0; background: transparent; font-size: 18px; line-height: 1; color: #64748b; cursor: pointer; }
+		&-comment-composer textarea, &-comment-panel textarea { display: block; width: 100%; box-sizing: border-box; resize: vertical; border: 1px solid #cbd5e1; border-radius: 4px; padding: 7px 8px; font: inherit; font-size: 12px; outline: none; }
+		&-comment-composer textarea:focus, &-comment-panel textarea:focus { border-color: #2563eb; }
+		&-comment-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; }
+		&-comment-actions button { border: 1px solid #cbd5e1; border-radius: 4px; padding: 5px 9px; background: #fff; color: #475569; font-size: 12px; cursor: pointer; }
+		&-comment-actions button.primary { border-color: #2563eb; background: #2563eb; color: #fff; }
+		&-comment-actions button.danger { color: #dc2626; }
+		&-comment-thread { max-height: 210px; overflow-y: auto; }
+		&-comment-message { padding: 7px 0; border-bottom: 1px solid #eef2f7; }
+		&-comment-author { display: flex; align-items: center; gap: 6px; color: #475569; font-size: 11px; }
+		&-comment-avatar { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; color: #fff; font-size: 11px; }
+		&-comment-text { margin: 5px 0 0 26px; color: #1e293b; font-size: 12px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
 
 		&-divider {
 			height: 1px;

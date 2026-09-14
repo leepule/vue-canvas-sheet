@@ -72,12 +72,17 @@ describe('PersistenceManager.loadFromStorage 数据恢复', () => {
 });
 
 function makeWritableStorage(overrides = {}) {
+  const metadata = new Map();
   return {
     close: vi.fn(),
     exportSheet: vi.fn().mockResolvedValue(null),
+    getMetadata: vi.fn(async key => (metadata.has(key) ? metadata.get(key) : null)),
     saveDiffs: vi.fn().mockResolvedValue(undefined),
-    saveMetadata: vi.fn().mockResolvedValue(undefined),
+    saveMetadata: vi.fn(async (key, value) => {
+      metadata.set(key, value);
+    }),
     importSheet: vi.fn().mockResolvedValue(undefined),
+    metadata,
     ...overrides,
   };
 }
@@ -175,5 +180,132 @@ describe('PersistenceManager 自动保存与安全关闭', () => {
     expect(storage.saveDiffs).not.toHaveBeenCalled();
     expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('await workbook.close()'));
     warnSpy.mockRestore();
+  });
+
+  test('自动保存应持久化并恢复多 Sheet 名称、活动表与数据', async () => {
+    const storage = makeWritableStorage();
+    workbook = new Workbook({ enableWasm: false });
+    workbook._storage = storage;
+    workbook.enablePersistenceStorage({ sheetId: 'multi-sheet' });
+
+    workbook.renameSheet('sheet-1', '总表');
+    workbook.setCell(0, 0, { v: '总表数据' });
+    workbook.addSheet('明细');
+    workbook.setCell(1, 1, { v: '明细数据' });
+    workbook.switchSheet('总表');
+
+    const result = await workbook.savePendingChanges('multi-sheet');
+    expect(result).toMatchObject({ mode: 'workbook', sheetId: 'multi-sheet' });
+
+    const snapshot = storage.metadata.get('workbook-multi-sheet');
+    expect(snapshot.sheets.map(sheet => sheet.name)).toEqual(['总表', '明细']);
+    expect(snapshot.activeSheetId).toBe('sheet-1');
+    expect(snapshot.sheets[0].state.data['0-0']).toMatchObject({ v: '总表数据' });
+    expect(snapshot.sheets[1].state.data['1-1']).toMatchObject({ v: '明细数据' });
+    expect(workbook.getDirtyCells().size).toBe(0);
+
+    const restored = new Workbook({ enableWasm: false });
+    restored._storage = storage;
+    restored.enablePersistenceStorage({ sheetId: 'multi-sheet' });
+    await restored.loadFromStorage('multi-sheet');
+
+    expect(restored.getSheets()).toEqual([
+      { id: 'sheet-1', name: '总表', isActive: true },
+      { id: 'sheet-2', name: '明细', isActive: false },
+    ]);
+    expect(restored.sheetName).toBe('总表');
+    expect(restored.getCell(0, 0)).toMatchObject({ v: '总表数据' });
+    restored.switchSheet('明细');
+    expect(restored.getCell(1, 1)).toMatchObject({ v: '明细数据' });
+    await restored.close();
+  });
+
+  test('初始快照加载完成前自动保存不得覆盖多 Sheet 数据', async () => {
+    vi.useFakeTimers();
+    const sourceStorage = makeWritableStorage();
+    const source = new Workbook({ enableWasm: false });
+    source._storage = sourceStorage;
+    source.enablePersistenceStorage({ sheetId: 'slow-load' });
+    source.addSheet('第二张表');
+    source.setCell(0, 0, { v: '历史数据' });
+    await source.savePendingChanges('slow-load');
+    const historicalSnapshot = JSON.parse(JSON.stringify(
+      sourceStorage.metadata.get('workbook-slow-load')
+    ));
+    await source.close();
+
+    const delayedStorage = makeWritableStorage({
+      getMetadata: vi.fn(async key => {
+        await new Promise(resolve => setTimeout(resolve, 20));
+        return key === 'workbook-slow-load' ? historicalSnapshot : null;
+      }),
+    });
+    workbook = new Workbook({ enableWasm: false });
+    workbook._storage = delayedStorage;
+    workbook.enablePersistenceStorage({ sheetId: 'slow-load' });
+
+    const loadPromise = workbook.loadFromStorage('slow-load');
+    workbook.setCell(0, 0, { v: '启动期覆盖数据' });
+    const savePromise = workbook.savePendingChanges('slow-load');
+
+    await vi.advanceTimersByTimeAsync(20);
+    await Promise.all([loadPromise, savePromise]);
+
+    const snapshot = delayedStorage.metadata.get('workbook-slow-load');
+    expect(snapshot.sheets.map(sheet => sheet.name)).toEqual(['Sheet1', '第二张表']);
+    expect(snapshot.sheets[1].state.data['0-0']).toMatchObject({ v: '历史数据' });
+    expect(workbook.getSheets()).toHaveLength(2);
+  });
+
+  test('删除工作表后自动保存的快照不应保留该表', async () => {
+    const storage = makeWritableStorage();
+    workbook = new Workbook({ enableWasm: false });
+    workbook._storage = storage;
+    workbook.enablePersistenceStorage({ sheetId: 'delete-sheet' });
+
+    workbook.addSheet('明细');
+    workbook.setCell(0, 0, { v: '明细数据' });
+    await workbook.savePendingChanges('delete-sheet');
+
+    expect(workbook.deleteSheet('明细')).toBe(true);
+    await workbook.savePendingChanges('delete-sheet');
+
+    const snapshot = storage.metadata.get('workbook-delete-sheet');
+    expect(snapshot.sheets.map(sheet => sheet.name)).toEqual(['Sheet1']);
+
+    const restored = new Workbook({ enableWasm: false });
+    restored._storage = storage;
+    restored.enablePersistenceStorage({ sheetId: 'delete-sheet' });
+    await restored.loadFromStorage('delete-sheet');
+    expect(restored.getSheets()).toHaveLength(1);
+    await restored.close();
+  });
+
+  test('已有完整快照后单 Sheet 编辑也必须更新快照', async () => {
+    const storage = makeWritableStorage();
+    workbook = new Workbook({ enableWasm: false });
+    workbook._storage = storage;
+    workbook.enablePersistenceStorage({ sheetId: 'snapshot-diff' });
+
+    workbook.addSheet('明细', { activate: false });
+    workbook.setCell(0, 0, { v: '修改前' });
+    await workbook.savePendingChanges('snapshot-diff');
+
+    workbook.deleteSheet('明细');
+    await workbook.savePendingChanges('snapshot-diff');
+
+    workbook.setCell(0, 0, { v: '修改后' });
+    const result = await workbook.savePendingChanges('snapshot-diff');
+    expect(result.mode).toBe('workbook');
+
+    const snapshot = storage.metadata.get('workbook-snapshot-diff');
+    expect(snapshot.sheets[0].state.data['0-0']).toMatchObject({ v: '修改后' });
+
+    const restored = new Workbook({ enableWasm: false });
+    restored._storage = storage;
+    restored.enablePersistenceStorage({ sheetId: 'snapshot-diff' });
+    expect(await restored.loadFromStorage('snapshot-diff')).toBe(true);
+    expect(restored.getCell(0, 0)).toMatchObject({ v: '修改后' });
+    await restored.close();
   });
 });

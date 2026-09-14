@@ -51,6 +51,23 @@ describe('useCanvasClipboard contract', () => {
     expect(workbook.copyRange).toEqual({ s: { r: 0, c: 0 }, e: { r: 1, c: 1 } });
   });
 
+  test('剪贴板写入失败时仍应保留复制范围并显示蚂蚁线状态', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: {
+        writeText: vi.fn().mockRejectedValue(new Error('clipboard denied')),
+        readText: vi.fn()
+      }
+    });
+    workbook.setSelection(0, 0, 1, 1);
+
+    await clipboardActions().handleCopy();
+
+    expect(workbook.copyRange).toEqual({ s: { r: 0, c: 0 }, e: { r: 1, c: 1 } });
+    errorSpy.mockRestore();
+  });
+
   test('粘贴应解析数字并批量写入活动单元格', async () => {
     clipboardText = 'Carol\t28\nDave\t35';
     workbook.setSelection(2, 0, 2, 0);
@@ -76,5 +93,25 @@ describe('useCanvasClipboard contract', () => {
 
     expect(workbook.getCellValue(0, 0)).toBe('Alice');
     expect(workbook.getCellValue(0, 1)).toBe(25);
+  });
+
+  test('粘贴锁定区域时应通过自定义弹窗提示且不写入数据', async () => {
+    clipboardText = 'Locked\t99';
+    workbook.setSelection(0, 0, 0, 0);
+    const showAlert = vi.fn();
+    const actions = useCanvasClipboard({
+      getWorkbook: () => workbook,
+      isReadOnly: () => false,
+      isRangeLocked: () => true,
+      showAlert
+    });
+
+    await actions.handlePaste();
+
+    expect(showAlert).toHaveBeenCalledWith({
+      title: '操作被拦截',
+      message: '粘贴的目标区域包含他人正在编辑的锁定单元格，无法粘贴。'
+    });
+    expect(workbook.getCellValue(0, 0)).toBe('Alice');
   });
 });

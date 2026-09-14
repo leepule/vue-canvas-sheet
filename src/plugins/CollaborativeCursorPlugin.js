@@ -114,10 +114,13 @@ export class CollaborativeCursorPlugin {
    * 注册或更新远程协同用户的光标区域
    * @param {string|number} userId 用户唯一标识
    * @param {Object} range 选区范围 { startRow, startCol, endRow, endCol }
-   * @param {Object} userInfo 用户个人信息，如 { name: '张三', color: '#3498DB' }
+   * @param {Object} userInfo 用户个人信息，如 { name: '张三', color: '#3498DB', sheetId }
    */
   setRemoteCursor(userId, range, userInfo = {}) {
     if (!userId || !range) return;
+
+    const normalizedUserInfo = userInfo && typeof userInfo === 'object' ? userInfo : {};
+    const sheetId = normalizedUserInfo.sheetId || this._workbook?.activeSheetId || null;
 
     const normalizedRange = this._normalizeRange(range);
 
@@ -134,14 +137,15 @@ export class CollaborativeCursorPlugin {
 
     // 默认内置的彩虹协同颜色调色盘
     const defaultColors = ['#E74C3C', '#2ECC71', '#3498DB', '#F1C40F', '#9B59B6', '#1ABC9C', '#E67E22'];
-    const color = userInfo.color || defaultColors[Math.abs(String(userId).split('').reduce((acc, char) => acc + char.charCodeAt(0), 0)) % defaultColors.length];
+    const color = normalizedUserInfo.color || defaultColors[Math.abs(String(userId).split('').reduce((acc, char) => acc + char.charCodeAt(0), 0)) % defaultColors.length];
 
     this._cursors.set(userId, {
       range: normalizedRange,
+      sheetId,
       userInfo: {
-        name: userInfo.name || `用户_${userId}`,
-        color,
-        ...userInfo
+        ...normalizedUserInfo,
+        name: normalizedUserInfo.name || `用户_${userId}`,
+        color
       },
       focusTime,
       lastActive: Date.now()
@@ -179,14 +183,18 @@ export class CollaborativeCursorPlugin {
    * 获取所有未过期的活跃协同光标
    * @returns {Array<Object>}
    */
-  getActiveCursors() {
+  getActiveCursors(sheetId = null) {
     const now = Date.now();
     const active = [];
     this._cursors.forEach((data, userId) => {
-      if (now - data.lastActive < this.expireTime) {
+      if (
+        now - data.lastActive < this.expireTime &&
+        (sheetId === null || data.sheetId === null || data.sheetId === sheetId)
+      ) {
         active.push({
           userId,
           range: data.range,
+          sheetId: data.sheetId,
           userInfo: data.userInfo,
           focusTime: data.focusTime || data.lastActive
         });

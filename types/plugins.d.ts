@@ -1,11 +1,13 @@
 export {
   AutoSavePlugin,
+  CellCommentPlugin,
   CollaborativeCursorPlugin,
   ExportPlugin,
   ImportPlugin,
   RealtimeCollaborationPlugin,
   SelectionHistoryPlugin,
   createAutoSavePlugin,
+  createCellCommentPlugin,
   createCollaborativeCursorPlugin,
   createExportPlugin,
   createImportPlugin,
@@ -15,6 +17,7 @@ export {
 
 export type {
   AutoSaveOptions,
+  CellCommentOptions,
   CollaborativeCursorOptions,
   ExportOptions,
   ImportOptions,

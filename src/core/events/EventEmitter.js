@@ -17,10 +17,14 @@ export const Events = {
   DATA_LOAD: 'data-load',
   /** 行列结构变化 */
   STRUCTURE_CHANGE: 'structure-change',
+  /** 工作表切换或重命名 */
+  SHEET_CHANGE: 'sheet-change',
   /** 样式变化 */
   STYLE_CHANGE: 'style-change',
   /** 合并单元格变化 */
   MERGE_CHANGE: 'merge-change',
+  /** 单元格批注线程变化 */
+  COMMENT_CHANGE: 'comment-change',
   /** 冻结窗格变化 */
   FREEZE_CHANGE: 'freeze-change',
   /** 撤销/重做 */

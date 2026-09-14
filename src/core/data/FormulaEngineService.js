@@ -36,6 +36,7 @@ const MAX_INLINE_RANGE_SNAPSHOT_CELLS = 5000;
  * @property {() => Map}                      getDependencyMap       — 获取公式依赖图
  * @property {() => Map}                      getReverseDependencyMap — 获取反向依赖图
  * @property {(f: string) => Object}          getDependencies        — 解析公式依赖
+ * @property {(f: string) => boolean}         hasCustomFunction      — 公式是否使用已注册的自定义函数
  * @property {(id: string, f: string) => void} updateDependencyMap   — 更新依赖图
  * @property {() => SharedValueStore|null}    getSharedValueStore    — 获取共享数值存储
  * @property {(s: SharedValueStore) => void}  setSharedValueStore    — 设置共享数值存储
@@ -171,6 +172,13 @@ export class FormulaEngineService {
         return;
       }
 
+      // 函数实例无法结构化克隆到 Worker；含自定义函数的批次统一回退主线程。
+      if (this._containsCustomFunctions(formulas)) {
+        this._workerCalculating = false;
+        this._processWorkerQueue();
+        return null;
+      }
+
       const sharedChunks = this.sharedValueStore
         ? this.sharedValueStore.serialize()
         : null;
@@ -188,16 +196,7 @@ export class FormulaEngineService {
       });
 
       // 应用 Worker 返回的结果（含降级环境下的数字结果）
-      for (const [cellId, result] of Object.entries(results || {})) {
-        const { r, c } = this.d.parseKey(cellId);
-        const cell = this.d.getDataMatrix().get(r, c);
-        if (cell) {
-          cell.v = result;
-          cell.dirty = false;
-          // 无论是否为数字，均同步至共享内存（非数字类型在底层会自动转换为 EMPTY_VALUE 即 -Infinity）
-          this.d.syncSharedValue?.(r, c, result);
-        }
-      }
+      this._applyWorkerResults(results);
 
       this._workerCalculating = false;
       this._processWorkerQueue();
@@ -248,6 +247,13 @@ export class FormulaEngineService {
       return {};
     }
 
+    if (this._containsCustomFunctions(payload.formulas)) {
+      const results = this._fallbackExecutor('evaluateBatch', payload.task);
+      this._applyWorkerResults(results);
+      this.d.notify();
+      return results;
+    }
+
     const calcEngine = this.d.getCalcEngine();
     if (calcEngine) {
       calcEngine.recordWorkerPayloadStats(payload.stats);
@@ -257,6 +263,17 @@ export class FormulaEngineService {
       'evaluateBatch',
       payload.task
     );
+    this._applyWorkerResults(results);
+    this.d.notify();
+    return results || {};
+  }
+
+  _containsCustomFunctions(formulas) {
+    if (typeof this.d.hasCustomFunction !== 'function') return false;
+    return formulas.some(({ formula }) => this.d.hasCustomFunction(formula));
+  }
+
+  _applyWorkerResults(results) {
     for (const [cellId, result] of Object.entries(results || {})) {
       const { r, c } = this.d.parseKey(cellId);
       const cell = this.d.getDataMatrix().get(r, c);
@@ -266,8 +283,6 @@ export class FormulaEngineService {
         this.d.syncSharedValue(r, c, result);
       }
     }
-    this.d.notify();
-    return results || {};
   }
 
   // ───────── Worker 降级执行器 ─────────

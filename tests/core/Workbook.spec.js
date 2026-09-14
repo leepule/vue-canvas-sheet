@@ -164,6 +164,22 @@ describe('Workbook', () => {
         
         expect(workbook.formulaEvaluator.getCellValue(0, 2)).toBe(30);
       });
+
+      test('注册自定义函数后应立即重算已有公式', () => {
+        workbook.setCell(0, 0, { v: 7 });
+        workbook.setCell(0, 1, { v: '=DOUBLE(A1)' });
+
+        expect(workbook.formulaEvaluator.getCellValue(0, 1)).toBe('#NAME?');
+
+        const result = workbook.registerFunction('double', (value) => value * 2);
+
+        expect(result).toBe(workbook);
+        expect(workbook.formulaEvaluator.getCellValue(0, 1)).toBe(14);
+        expect(workbook.hasRegisteredFunction('DOUBLE')).toBe(true);
+        expect(workbook.getRegisteredFunctions()).toEqual(['DOUBLE']);
+        expect(workbook.unregisterFunction('double')).toBe(true);
+        expect(workbook.formulaEvaluator.getCellValue(0, 1)).toBe('#NAME?');
+      });
     });
 
     describe('bulkSetCells', () => {
@@ -1058,6 +1074,13 @@ describe('Workbook', () => {
         
         expect(deps.size).toBe(3);
       });
+
+      test('自定义函数名不应被误判为单元格引用', () => {
+        const deps = workbook.formulaEvaluator.getDependencies('=MY_FN2(A1)');
+
+        expect(deps.size).toBe(1);
+        expect([...deps.cells]).toEqual(['0-0']);
+      });
     });
   });
 
@@ -1111,6 +1134,24 @@ describe('Workbook', () => {
         
         // fromJSON 会清除历史栈
         expect(workbook.history.undoStackSize).toBe(0);
+      });
+
+      test('应兼容自动保存快照中的 f: null 和 s: null', () => {
+        workbook.fromJSON({
+          rowCount: 10,
+          colCount: 5,
+          data: {
+            '0-0': { v: 1111, dirty: false, s: null, f: null },
+            '0-1': { v: '正常文本', dirty: false, s: null, f: null }
+          },
+          merges: [],
+          freeze: { r: 0, c: 0 }
+        });
+
+        expect(workbook.getCell(0, 0)).toMatchObject({ v: 1111 });
+        expect(workbook.getCell(0, 0).f).toBeUndefined();
+        expect(workbook.getCell(0, 0).s).toBeUndefined();
+        expect(workbook.getCell(0, 1)).toMatchObject({ v: '正常文本' });
       });
 
       test.each([
@@ -1652,8 +1693,8 @@ describe('Workbook', () => {
     });
   });
 
-  describe('只读模式 (ReadOnly) 动态边界', () => {
-    test('只读模式应根据数据动态计算行列数', () => {
+  describe('只读模式 (ReadOnly) 显示边界', () => {
+    test('只读模式不应裁剪工作簿显示边界', () => {
       // 默认编辑模式
       expect(workbook.readOnly).toBe(false);
       expect(workbook.rowCount).toBe(1000);
@@ -1665,29 +1706,29 @@ describe('Workbook', () => {
 
       // 切换到只读模式
       workbook.readOnly = true;
-      expect(workbook.rowCount).toBe(31); // 30 + 1
-      expect(workbook.colCount).toBe(1);  // 只有一列有数据
+      expect(workbook.rowCount).toBe(1000);
+      expect(workbook.colCount).toBe(200);
 
       // 切换回编辑模式
       workbook.readOnly = false;
       expect(workbook.rowCount).toBe(1000);
     });
 
-    test('只读模式下增加数据应自动扩展边界', () => {
+    test('只读模式下写入超界数据不应影响显示边界', () => {
       workbook.readOnly = true;
       workbook.setCell(5, 5, { v: 'data' });
-      expect(workbook.rowCount).toBe(6);
-      expect(workbook.colCount).toBe(6);
+      expect(workbook.rowCount).toBe(1000);
+      expect(workbook.colCount).toBe(200);
 
       workbook.setCell(10, 2, { v: 'more' });
-      expect(workbook.rowCount).toBe(11);
-      expect(workbook.colCount).toBe(6);
+      expect(workbook.rowCount).toBe(1000);
+      expect(workbook.colCount).toBe(200);
     });
 
-    test('空数据时只读模式应显示 1x1 最小边界', () => {
+    test('空数据时只读模式仍显示完整网格', () => {
       workbook.readOnly = true;
-      expect(workbook.rowCount).toBe(1);
-      expect(workbook.colCount).toBe(1);
+      expect(workbook.rowCount).toBe(1000);
+      expect(workbook.colCount).toBe(200);
     });
   });
 });

@@ -36,8 +36,16 @@ export default function useCanvasInteraction(tableContext) {
   const { handleCopy, handlePaste } = useCanvasClipboard({
     getWorkbook: () => tableContext.props.workbook,
     isReadOnly: () => tableContext.props.readOnly,
-    isRangeLocked
+    isRangeLocked,
+    showAlert: tableContext.methods.showAlertDialog
   });
+
+  function showOperationBlocked(message) {
+    tableContext.methods.showAlertDialog({
+      title: '操作被拦截',
+      message
+    });
+  }
 
   /**
    * 初始化节流/防抖方法
@@ -526,7 +534,7 @@ export default function useCanvasInteraction(tableContext) {
         if (tableContext.props.readOnly) return;
         e.preventDefault();
         if (isSelectionLocked()) {
-          alert('操作被拦截：所选区域包含他人正在编辑锁定的单元格，无法清除。');
+          showOperationBlocked('所选区域包含他人正在编辑锁定的单元格，无法清除。');
           return;
         }
         tableContext.props.workbook.clearCells(tableContext.props.workbook.selection);
@@ -763,7 +771,10 @@ export default function useCanvasInteraction(tableContext) {
       const lockInfoFn = wb.plugins.getSharedState('collaboration:getCellLockInfo');
       const lockInfo = lockInfoFn ? lockInfoFn(targetR, targetC) : null;
       const userName = lockInfo ? lockInfo.userName : '其他用户';
-      alert(`无法编辑：单元格正由用户 "${userName}" 编辑锁定中`);
+      tableContext.methods.showAlertDialog({
+        title: '无法编辑',
+        message: `单元格正由用户 "${userName}" 编辑锁定中`
+      });
       return;
     }
 
@@ -1005,7 +1016,7 @@ export default function useCanvasInteraction(tableContext) {
       case 'insertRow': tableContext.props.workbook.sheetStructure.insertRow(targetR); break;
       case 'deleteRow':
         if (isRangeLocked(targetR, 0, targetR, tableContext.props.workbook.colCount - 1)) {
-          alert('操作被拦截：所删行包含他人正在编辑锁定的单元格，无法删除。');
+          showOperationBlocked('所删行包含他人正在编辑锁定的单元格，无法删除。');
           return;
         }
         tableContext.props.workbook.sheetStructure.deleteRow(targetR);
@@ -1013,7 +1024,7 @@ export default function useCanvasInteraction(tableContext) {
       case 'insertColumn': tableContext.props.workbook.sheetStructure.insertColumn(targetC); break;
       case 'deleteColumn':
         if (isRangeLocked(0, targetC, tableContext.props.workbook.rowCount - 1, targetC)) {
-          alert('操作被拦截：所删列包含他人正在编辑锁定的单元格，无法删除。');
+          showOperationBlocked('所删列包含他人正在编辑锁定的单元格，无法删除。');
           return;
         }
         tableContext.props.workbook.sheetStructure.deleteColumn(targetC);
@@ -1025,9 +1036,12 @@ export default function useCanvasInteraction(tableContext) {
       case 'unmerge':
         tableContext.props.workbook.mergeManager.unmergeCells(tableContext.props.workbook.selection);
         break;
+      case 'comment':
+        tableContext.methods.openCommentComposer(targetR, targetC);
+        break;
       case 'clear':
         if (isSelectionLocked()) {
-          alert('操作被拦截：所选区域包含他人正在编辑锁定的单元格，无法清除。');
+          showOperationBlocked('所选区域包含他人正在编辑锁定的单元格，无法清除。');
           return;
         }
         tableContext.props.workbook.styleManager.clearContent(tableContext.props.workbook.selection);

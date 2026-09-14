@@ -81,6 +81,8 @@ const initialData = [
 
 ---
 
+---
+
 ## 🧩 Plugins
 
 All plugins are factory functions exported from the package root.
@@ -140,6 +142,8 @@ wb.setFreeze(1, 1);
 wb.undo();  wb.redo();
 
 // Engine
+wb.registerFunction('DOUBLE', value => value * 2);
+wb.setCell(0, 2, { f: '=DOUBLE(A1)' });
 wb.enableWorker();
 wb.recalcAll({ useWorker: true });
 wb.getSystemReport();

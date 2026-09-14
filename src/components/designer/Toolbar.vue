@@ -1,5 +1,11 @@
 <template>
-	<div class="vue-canvas-sheet-toolbar" ref="toolbarContainer">
+	<div
+		class="vue-canvas-sheet-toolbar"
+		:class="{ disabled }"
+		:inert="disabled"
+		:aria-disabled="disabled ? 'true' : 'false'"
+		ref="toolbarContainer"
+	>
 		<ToolbarGroup v-if="isToolbarVisible('history')" label="撤销" icon="undo" :compact="toolbarGroups.history.compact">
 			<button class="vue-canvas-sheet-tool-btn" title="撤销" @click="$emit('command', { type: 'undo' })">
 				<SvgIcon name="undo" />
@@ -238,7 +244,8 @@ export default {
 		toolbar: {
 			type: Array,
 			default: () => []
-		}
+		},
+		disabled: Boolean
 	},
 	data() {
 		return {
@@ -393,6 +400,12 @@ export default {
 		display: flex;
 		align-items: center;
 		padding: 0 8px;
+
+		&.disabled {
+			opacity: 0.68;
+			pointer-events: none;
+			filter: grayscale(0.12);
+		}
 
 		.native-select {
 			height: 24px;

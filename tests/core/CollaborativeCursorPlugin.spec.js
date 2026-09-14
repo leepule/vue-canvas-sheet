@@ -71,4 +71,19 @@ describe('CollaborativeCursorPlugin', () => {
     plugin.removeRemoteCursor('user1');
     expect(plugin.getActiveCursors().length).toBe(0);
   });
+
+  it('falls back when the remote user name is missing', () => {
+    const plugin = new CollaborativeCursorPlugin();
+
+    plugin.setRemoteCursor(
+      'user2',
+      { startRow: 0, startCol: 0, endRow: 0, endCol: 0 },
+      { name: undefined, color: '#00ff00' }
+    );
+
+    expect(plugin.getActiveCursors()[0].userInfo).toEqual({
+      name: '用户_user2',
+      color: '#00ff00'
+    });
+  });
 });

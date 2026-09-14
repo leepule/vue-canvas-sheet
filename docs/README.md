@@ -9,6 +9,7 @@
 | [使用文档 USAGE](./USAGE.md) | 安装、快速开始、组件 Props / 方法 / 插槽、数据格式、懒加载、持久化、协同、导入导出、FAQ | 第一次接入，先读这篇 |
 | [包导出总览 API_OVERVIEW](./API_OVERVIEW.md) | 三个入口（主入口 / `core` / `render`）的完整导出清单与类型索引 | 想知道“包里到底有什么” |
 | [Workbook API](./WORKBOOK_API.md) | 核心引擎 `Workbook` 的全部属性与方法参考 | 直接操作数据引擎 |
+| [实时协同接入 REALTIME_COLLABORATION_INTEGRATION](./REALTIME_COLLABORATION_INTEGRATION.md) | 真实项目协同接入、鉴权、只读权限、部署与生产化方案 | 接入多人协同 |
 | [插件开发 PLUGIN_DEVELOPMENT](./PLUGIN_DEVELOPMENT.md) | 插件架构、生命周期、钩子系统、共享状态、内置插件、自定义插件 | 开发/定制插件 |
 | [公式 formulas](./FORMULAS.md) | 支持的公式函数与语法 | 编写公式 |
 

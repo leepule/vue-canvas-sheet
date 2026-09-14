@@ -30,12 +30,39 @@ export interface Cell {
   dirty?: boolean;
 }
 
+
+export interface CommentMessage {
+  id: string;
+  text: string;
+  authorId: string;
+  authorName: string;
+  authorColor?: string;
+  createdAt: number;
+}
+
+export interface CellComment {
+  id: string;
+  r: number;
+  c: number;
+  resolved?: boolean;
+  createdAt?: number;
+  updatedAt?: number;
+  messages: CommentMessage[];
+}
+
 export interface WorkbookOptions {
   enablePersistence?: boolean;
   enableWasm?: boolean | 'auto';
   debug?: boolean;
   verbose?: boolean;
   sheetId?: string;
+  sheetName?: string;
+}
+
+export interface SheetInfo {
+  id: string;
+  name: string;
+  isActive: boolean;
 }
 
 export type Unsubscribe = () => void;
@@ -86,11 +113,19 @@ export interface FormulaDependencies {
   readonly size: number;
 }
 
+/** 自定义公式函数；范围参数会以二维数组传入。 */
+export type FormulaFunction = (...args: any[]) => unknown;
+
 export interface FormulaEvaluator {
   recalcDirty(): void;
   triggerRecalc(r: number, c: number): void;
   evaluateFormula(formula: string, r: number, c: number, stack?: string[]): unknown;
   getDependencies(formula: string): FormulaDependencies;
+  registerFunction(name: string, fn: FormulaFunction): FormulaEvaluator;
+  unregisterFunction(name: string): boolean;
+  hasCustomFunction(name: string): boolean;
+  getCustomFunctionNames(): string[];
+  usesCustomFunction(formula: string, name?: string | null): boolean;
 }
 
 export class EventEmitter {
@@ -220,6 +255,8 @@ export class Workbook {
   reverseDependencyMap: Map<unknown, unknown>;
   readonly totalWidth: number;
   readonly totalHeight: number;
+  sheetName: string;
+  readonly activeSheetId: string | null;
 
   getDataMatrix(): unknown;
   getDirtyCells(): Map<string, Cell | null> | null;
@@ -231,6 +268,11 @@ export class Workbook {
   requestRender(): void;
 
   setData(cells: unknown[] | Record<string, Cell>): void;
+  getSheets(): SheetInfo[];
+  addSheet(name?: string, options?: { activate?: boolean }): string;
+  switchSheet(idOrName: string): boolean;
+  renameSheet(idOrName: string, newName?: string): boolean;
+  deleteSheet(idOrName: string): boolean;
   setColumns(columns: unknown[]): void;
   getCell(r: number, c: number): Cell | null;
   getStyle(r: number, c: number): CellStyle;
@@ -241,6 +283,20 @@ export class Workbook {
     oldValue?: Cell | null,
     options?: { skipEvent?: boolean; skipHistory?: boolean }
   ): void;
+  getComments(): CellComment[];
+  getComment(id: string): CellComment | null;
+  addComment(r: number, c: number, text: string, author?: Record<string, unknown>): CellComment | null;
+  replyComment(id: string, text: string, author?: Record<string, unknown>): CellComment | null;
+  updateComment(id: string, patch: Partial<CellComment>): CellComment | null;
+  removeComment(id: string, options?: { remote?: boolean }): boolean;
+  upsertComment(comment: CellComment): CellComment | null;
+  getComments(): CellComment[];
+  getComment(id: string): CellComment | null;
+  addComment(r: number, c: number, text: string, author?: Record<string, unknown>): CellComment | null;
+  replyComment(id: string, text: string, author?: Record<string, unknown>): CellComment | null;
+  updateComment(id: string, patch: Partial<CellComment>): CellComment | null;
+  removeComment(id: string, options?: { remote?: boolean }): boolean;
+  upsertComment(comment: CellComment): CellComment | null;
   bulkSetCells(updates: Array<{ r: number; c: number; val: Partial<Cell> }>): void;
   getCellValue(r: number, c: number, stack?: string[]): unknown;
   iterateRange(range: Range, callback: (r: number, c: number, cell: Cell | null) => void): void;
@@ -279,6 +335,10 @@ export class Workbook {
   paste(range: Range): void;
   clearCells(range: Range): void;
 
+  registerFunction(name: string, fn: FormulaFunction): Workbook;
+  unregisterFunction(name: string): boolean;
+  hasRegisteredFunction(name: string): boolean;
+  getRegisteredFunctions(): string[];
   recalcAll(options?: { useWorker?: boolean }): Promise<void> | void;
   rebuildDependencyMap(): void;
   getCalculationStats(): unknown;

@@ -24,10 +24,10 @@
     </a>
     <nav class="demo-nav">
       <span class="nav-title">Demo 选择：</span>
-      <button :class="['nav-btn', { active: currentRoute === 'basic' }]" @click="currentRoute = 'basic'"> 基础使用 </button>
-      <button :class="['nav-btn', { active: currentRoute === 'random' }]" @click="currentRoute = 'random'"> 随机样式
+      <button :class="['nav-btn', { active: currentRoute === 'basic' }]" @click="setRoute('basic')"> 基础使用 </button>
+      <button :class="['nav-btn', { active: currentRoute === 'random' }]" @click="setRoute('random')"> 随机样式
       </button>
-      <button :class="['nav-btn', { active: currentRoute === 'collab' }]" @click="currentRoute = 'collab'"> 实时协同
+      <button :class="['nav-btn', { active: currentRoute === 'collab' }]" @click="setRoute('collab')"> 实时协同
       </button>
       <button class="nav-btn" @click="goZread"> Zread文档
       </button>
@@ -38,12 +38,37 @@
   </div>
 </template>
 <script setup>
-import { ref } from "vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import AppBasic from "./AppBasic.vue";
 import AppRandom from "./AppRandom.vue";
 import AppCollab from "./AppCollab.vue";
 
-const currentRoute = ref("basic");
+const routes = ["basic", "random", "collab"];
+
+function getRouteFromHash() {
+  const route = window.location.hash.replace(/^#\/?/, "");
+  return routes.includes(route) ? route : "basic";
+}
+
+const currentRoute = ref(getRouteFromHash());
+
+function setRoute(route) {
+  if (route === currentRoute.value) return;
+  window.location.hash = `/${route}`;
+}
+
+function handleHashChange() {
+  currentRoute.value = getRouteFromHash();
+}
+
+onMounted(() => {
+  window.addEventListener("hashchange", handleHashChange);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("hashchange", handleHashChange);
+});
+
 const goZread = () => {
   window.open('https://zread.ai/leepule/vue-canvas-sheet', '_blank')
 }

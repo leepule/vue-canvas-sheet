@@ -133,7 +133,46 @@
 
 ---
 
-## 8. 错误代码
+## 8. 自定义函数
+
+业务侧可通过 `Workbook.registerFunction(name, fn)` 扩展公式函数：
+
+```js
+wb.registerFunction('DOUBLE', value => value * 2);
+wb.registerFunction('SUM_MATRIX', matrix =>
+  matrix.flat().reduce((sum, value) => sum + value, 0)
+);
+
+wb.setCell(0, 0, { v: 21 });
+wb.setCell(0, 1, { v: '=DOUBLE(A1)' });       // 42
+wb.setCell(0, 2, { v: '=SUM_MATRIX(A1:A2)' });
+```
+
+规则：
+
+- 函数名大小写不敏感，必须以字母开头，可包含字母、数字和下划线。
+- 不能使用 `SUM`、`IF` 等内置函数名覆盖现有行为。
+- 普通参数传入解析后的标量；范围参数传入按行列排列的二维数组。
+- 同步返回 `number`、`string`、`boolean` 或 `null`；抛出异常时公式返回 `#ERROR!`。
+- 自定义函数仅在主线程执行。公式引擎检测到自定义函数后会自动绕过 Worker/WASM。
+- 注册或注销函数时，正在使用该函数的公式会立即在主线程重新计算。
+
+```js
+wb.registerFunction('LEVEL', score => {
+  if (score >= 90) return 'A';
+  if (score >= 60) return 'B';
+  return 'C';
+});
+
+wb.setCell(0, 0, { v: 88 });
+wb.setCell(0, 1, { v: '=LEVEL(A1)' }); // "B"
+
+wb.unregisterFunction('LEVEL');
+```
+
+---
+
+## 9. 错误代码
 
 公式计算出错时返回以下代码：
 
@@ -148,7 +187,7 @@
 
 ---
 
-## 9. 综合示例
+## 10. 综合示例
 
 ```js
 // 在 TableDesigner / Workbook 中写入公式单元格

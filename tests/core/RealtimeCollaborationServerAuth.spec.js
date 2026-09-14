@@ -41,7 +41,7 @@ describe('collab-server WebSocket 鉴权', () => {
         params('roomId=room-1&userId=me&token=valid-token'),
         'valid-token'
       )
-    ).toEqual({ ok: true, roomId: 'room-1', userId: 'me' });
+    ).toEqual({ ok: true, roomId: 'room-1', userId: 'me', readOnly: false });
 
     expect(
       authenticateCollabRequestParams(
@@ -49,6 +49,46 @@ describe('collab-server WebSocket 鉴权', () => {
         'valid-token'
       )
     ).toEqual({ ok: false, reason: 'roomId and userId are required' });
+  });
+
+  it('编辑权限由服务端令牌决定，未持有编辑令牌的连接为只读', () => {
+    expect(
+      authenticateCollabRequestParams(
+        params('roomId=room-1&userId=me&token=valid-token&editToken=edit-secret'),
+        'valid-token',
+        'edit-secret'
+      )
+    ).toEqual({
+      ok: true,
+      roomId: 'room-1',
+      userId: 'me',
+      readOnly: false
+    });
+
+    expect(
+      authenticateCollabRequestParams(
+        params('roomId=room-1&userId=me&token=valid-token'),
+        'valid-token',
+        'edit-secret'
+      )
+    ).toEqual({
+      ok: true,
+      roomId: 'room-1',
+      userId: 'me',
+      readOnly: true
+    });
+
+    expect(
+      authenticateCollabRequestParams(
+        params('roomId=room-1&userId=me&readOnly=true'),
+        ''
+      )
+    ).toEqual({
+      ok: true,
+      roomId: 'room-1',
+      userId: 'me',
+      readOnly: true
+    });
   });
 
   it('已认证连接不能在消息中冒用其它 roomId 或 userId', () => {

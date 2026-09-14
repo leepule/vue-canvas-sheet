@@ -94,7 +94,11 @@ function createDeferred() {
   return { promise, resolve, reject };
 }
 
-function createFormulaEngineHarness({ calcEngine = null } = {}) {
+function createFormulaEngineHarness({
+  calcEngine = null,
+  hasCustomFunction = () => false,
+  evaluateFormula = vi.fn()
+} = {}) {
   const cells = new Map([
     ['0,0', { f: '=OLD()', v: null, dirty: true }]
   ]);
@@ -119,12 +123,13 @@ function createFormulaEngineHarness({ calcEngine = null } = {}) {
     getDependencyMap: () => new Map(),
     getReverseDependencyMap: () => new Map(),
     getDependencies: () => [],
+    hasCustomFunction,
     updateDependencyMap: vi.fn(),
     getSharedValueStore: () => null,
     setSharedValueStore: vi.fn(),
     syncSharedValue,
     getCalcEngine: () => calcEngine,
-    evaluateFormula: vi.fn(),
+    evaluateFormula,
     getRowCount: () => 10,
     getColCount: () => 10,
     getPerformanceMonitor: () => null,
@@ -141,7 +146,7 @@ function createFormulaEngineHarness({ calcEngine = null } = {}) {
     })
   };
 
-  return { service, cells, workerCalls, syncSharedValue, calcEngine };
+  return { service, cells, workerCalls, syncSharedValue, calcEngine, evaluateFormula };
 }
 
 // ─── 测试套件 ───
@@ -544,6 +549,31 @@ describe('FormulaEngineService 并发队列', () => {
     expect(cells.get('0,0').v).toBe('new-result');
     expect(cells.get('0,0').dirty).toBe(false);
     expect(syncSharedValue).toHaveBeenLastCalledWith(0, 0, 'new-result');
+  });
+
+  it('recalcAllWithWorker 遇到自定义函数时应回退主线程且不发送 Worker 任务', async () => {
+    const { service, workerCalls } = createFormulaEngineHarness({
+      hasCustomFunction: () => true
+    });
+
+    await expect(service.recalcAllWithWorker()).resolves.toBeNull();
+    expect(workerCalls).toHaveLength(0);
+  });
+
+  it('recalcDirtyWithWorker 遇到自定义函数时应主线程计算并写回结果', async () => {
+    const evaluateFormula = vi.fn(() => 42);
+    const { service, cells, workerCalls, syncSharedValue } = createFormulaEngineHarness({
+      hasCustomFunction: () => true,
+      evaluateFormula
+    });
+
+    const results = await service.recalcDirtyWithWorker(['0,0']);
+
+    expect(workerCalls).toHaveLength(0);
+    expect(evaluateFormula).toHaveBeenCalledWith('=OLD()', 0, 0);
+    expect(results).toEqual({ '0,0': 42 });
+    expect(cells.get('0,0')).toMatchObject({ v: 42, dirty: false });
+    expect(syncSharedValue).toHaveBeenCalledWith(0, 0, 42);
   });
 
   it('recalcAllWithWorker 统计应复用轻量载荷估算而不重新序列化', async () => {

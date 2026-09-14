@@ -124,16 +124,22 @@ describe('RealtimeCollaborationPlugin - 弱网冲突收敛', () => {
 
     expect(alice.lockLocalCell(1, 1)).toBe(true);
     expect(bob.lockLocalCell(1, 1)).toBe(true);
-    expect(alice._lockedCells.get('1,1')).toEqual({ userId: 'alice', userName: 'Alice' });
-    expect(bob._lockedCells.get('1,1')).toEqual({ userId: 'bob', userName: 'Bob' });
+    expect(alice._lockedCells.get(alice._cellStateKey(null, 1, 1)))
+      .toEqual({ userId: 'alice', userName: 'Alice', sheetId: null });
+    expect(bob._lockedCells.get(bob._cellStateKey(null, 1, 1)))
+      .toEqual({ userId: 'bob', userName: 'Bob', sheetId: null });
 
     vi.advanceTimersByTime(35);
-    expect(alice._lockedCells.get('1,1')).toEqual({ userId: 'alice', userName: 'Alice' });
-    expect(bob._lockedCells.get('1,1')).toEqual({ userId: 'bob', userName: 'Bob' });
+    expect(alice._lockedCells.get(alice._cellStateKey(null, 1, 1)))
+      .toEqual({ userId: 'alice', userName: 'Alice', sheetId: null });
+    expect(bob._lockedCells.get(bob._cellStateKey(null, 1, 1)))
+      .toEqual({ userId: 'bob', userName: 'Bob', sheetId: null });
 
     vi.advanceTimersByTime(65);
-    expect(alice._lockedCells.get('1,1')).toEqual({ userId: 'alice', userName: 'Alice' });
-    expect(bob._lockedCells.get('1,1')).toEqual({ userId: 'alice', userName: 'Alice' });
+    expect(alice._lockedCells.get(alice._cellStateKey(null, 1, 1)))
+      .toEqual({ userId: 'alice', userName: 'Alice', sheetId: null });
+    expect(bob._lockedCells.get(bob._cellStateKey(null, 1, 1)))
+      .toEqual({ userId: 'alice', userName: 'Alice', sheetId: null });
 
     const bobSentBeforeRetry = bobSocket.sent.length;
     expect(bob.lockLocalCell(1, 1)).toBe(false);

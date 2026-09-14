@@ -64,12 +64,15 @@ function selectedText(workbook) {
   return rows.join('\n');
 }
 
-export default function useCanvasClipboard({ getWorkbook, isReadOnly, isRangeLocked }) {
+export default function useCanvasClipboard({ getWorkbook, isReadOnly, isRangeLocked, showAlert }) {
   async function handleCopy() {
     const workbook = getWorkbook();
+    if (!workbook?.selection) return;
+
+    // 先进入复制状态，保证剪贴板权限异常时仍能显示复制蚂蚁线。
+    workbook.setCopyRange(workbook.selection);
     try {
       await navigator.clipboard.writeText(selectedText(workbook));
-      workbook.setCopyRange(workbook.selection);
     } catch (error) {
       console.error('Failed to copy', error);
     }
@@ -87,7 +90,10 @@ export default function useCanvasClipboard({ getWorkbook, isReadOnly, isRangeLoc
       const startColumn = workbook.activeCell.c;
       const bounds = clipboardBounds(workbook, clipboardRows, startRow, startColumn);
       if (isRangeLocked(startRow, startColumn, bounds.endRow, bounds.endColumn)) {
-        alert('操作被拦截：粘贴的目标区域包含他人正在编辑的锁定单元格，无法粘贴。');
+        showAlert?.({
+          title: '操作被拦截',
+          message: '粘贴的目标区域包含他人正在编辑的锁定单元格，无法粘贴。'
+        });
         return;
       }
 

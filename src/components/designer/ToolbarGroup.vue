@@ -88,6 +88,10 @@
     transition: all 0.2s ease;
     user-select: none;
     min-height: auto;
+
+    &:last-child .group-separator {
+      display: none;
+    }
   }
 
   .group-content {

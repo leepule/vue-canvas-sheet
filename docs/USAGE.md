@@ -73,6 +73,7 @@ const data = [
 | `reloadKey` | `String \| Number \| Boolean` | `null` | 显式重载标记。当数据原地修改时，可通过变更此值触发重载，避免深比较。 |
 | `columns` | `Array` | `[]` | 列定义（含表头、字段映射等），具体结构见下方说明。 |
 | `readOnly` | `Boolean` | `false` | 只读模式，隐藏工具栏并禁止编辑。 |
+| `showEditingUiInReadOnly` | `Boolean` | `false` | 只读模式下保留工具栏和 Sheet 操作按钮，但禁用交互。协同查看场景可开启。 |
 | `loading` | `Boolean` | `false` | 是否显示内置加载遮罩。 |
 | `plugins` | `Array` | `[]` | 要装载的插件列表（见 [插件系统](#7-插件系统)）。 |
 | `toolbar` | `Array<String>` | `['history','cells','font','alignment','numbers','table','freeze','data']` | 工具栏分组开关。从数组中移除某组即可隐藏。 |
@@ -275,7 +276,7 @@ const autoSave = createAutoSavePlugin({
   interval: 5000,                // 定时保存，0 表示禁用
   eventDriven: true,             // 单元格变化即触发（带防抖）
   debounce: 1000,
-  events: ['cell-change', 'data-load', 'structure-change'],
+  events: ['cell-change', 'data-load', 'structure-change', 'sheet-change'],
 });
 ```
 
@@ -319,12 +320,16 @@ const collabPlugin = createRealtimeCollaborationPlugin({
   userId:    'lee',
   userName:  '李雷',
   userColor: '#3498db',
+  readOnly:  false,
+  editToken: '服务端配置的编辑令牌',
 });
 
 const plugins = [cursorPlugin, collabPlugin];
 ```
 
 仓库内含 `scripts/collab-server.mjs`，本地可用 `npm run collab:server` 启动测试服务器。
+`readOnly: true` 的协作者可以同步查看选区、单元格与批注，但不能发送写入消息。若服务端设置
+`COLLAB_EDIT_TOKEN`，只有携带匹配 `editToken` 的连接拥有编辑权限，其余连接会由服务端降级为只读。
 
 ---
 
@@ -366,7 +371,7 @@ wb.recalcAll({ useWorker: true });
 <TableDesigner enable-persistence sheet-id="dashboard-2026" :initial-data="data" />
 ```
 
-- 启用后内部使用 IndexedDB 的 diff 持久化路径。
+- 启用后内部使用 IndexedDB 持久化；单表走 diff 增量，多 Sheet 会保存完整 Workbook 快照。
 - `sheetId` 必须唯一，不同表用不同 ID，避免相互覆盖。
 - 与 `AutoSavePlugin` 可共存：组件自身负责 diff 写入，插件负责事件 / 定时调度。
 

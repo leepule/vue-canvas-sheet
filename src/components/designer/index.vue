@@ -1,8 +1,8 @@
 <template>
 	<div class="vue-canvas-sheet" ref="tableDesigner">
-		<Toolbar v-if="!readOnly" :active-style="activeStyle" :can-merge="canMerge" :can-unmerge="canUnmerge"
+		<Toolbar v-if="!readOnly || showEditingUiInReadOnly" :active-style="activeStyle" :can-merge="canMerge" :can-unmerge="canUnmerge"
 			:can-clear="canClear" v-model:freeze-row-count="freezeRowCount" v-model:freeze-col-count="freezeColCount"
-			:toolbar="toolbar" @command="handleToolbarCommand">
+			:toolbar="toolbar" :disabled="readOnly" @command="handleToolbarCommand">
 			<template #toolbar-end>
 				<slot name="toolbar-end"></slot>
 			</template>
@@ -16,7 +16,8 @@
 			<div class="vue-canvas-sheet-table-container">
 				<CanvasTable ref="canvasTable" :workbook="currentWorkbook" :version="uiVersion" :read-only="readOnly"
 					:data-controller="dataController" @drop-field="handleDropField"
-					@trigger-find="showFindDialog = true" @selection-change="handleSelectionChange" @column-deleted="handleColumnDeleted" />
+					@trigger-find="showFindDialog = true" @selection-change="handleSelectionChange" @column-deleted="handleColumnDeleted"
+					@show-alert="showAlertDialog" />
 				
 				<!-- 内置 Loading 遮罩层 -->
 				<div v-if="loading" class="vue-canvas-sheet-loading-overlay">
@@ -25,6 +26,32 @@
 						<div class="loading-text">正在处理数据...</div>
 					</div>
 				</div>
+				</div>
+				<div class="vue-canvas-sheet-sheet-bar" role="tablist" aria-label="工作表">
+					<div v-for="sheet in sheets" :key="sheet.id" class="vue-canvas-sheet-tab"
+						:class="{ active: sheet.isActive }" role="tab" tabindex="0" :aria-selected="sheet.isActive"
+						:title="readOnly ? sheet.name : `${sheet.name}（双击重命名）`"
+						@click="handleSwitchSheet(sheet)" @dblclick="handleSheetRenameStart(sheet)"
+						@keydown.enter.prevent="handleSwitchSheet(sheet)" @keydown.space.prevent="handleSwitchSheet(sheet)">
+						<input v-if="editingSheetId === sheet.id" :ref="setSheetRenameInput" v-model="sheetRenameDraft"
+							class="vue-canvas-sheet-tab-input" :class="{ invalid: sheetRenameError }" maxlength="100"
+							:aria-label="'重命名工作表 ' + sheet.name"
+							:title="sheetRenameError || '重命名工作表'" @click.stop @dblclick.stop @keydown.stop
+							@input="sheetRenameError = ''" @keydown.enter.prevent="confirmSheetRename"
+							@keydown.esc.prevent="cancelSheetRename" @blur="confirmSheetRename" />
+						<span v-else class="vue-canvas-sheet-tab-name">{{ sheet.name }}</span>
+						<button v-if="(!readOnly || showEditingUiInReadOnly) && sheets.length > 1 && editingSheetId !== sheet.id"
+							class="vue-canvas-sheet-tab-delete" type="button" title="删除工作表"
+							:aria-label="'删除工作表 ' + sheet.name" :disabled="readOnly" @click.stop="handleDeleteSheet(sheet)"
+							@keydown.stop>
+							<SvgIcon name="close" />
+						</button>
+					</div>
+					<button v-if="!readOnly || showEditingUiInReadOnly" class="vue-canvas-sheet-tab-add" type="button"
+						:title="readOnly ? '只读模式下不可新增工作表' : '新增工作表'" aria-label="新增工作表"
+						:disabled="readOnly" @click="handleAddSheet">
+					<SvgIcon name="plus" />
+				</button>
 			</div>
 			<div v-if="showFindDialog" class="vue-canvas-sheet-find-dialog">
 					<div class="find-dialog-header">
@@ -65,13 +92,16 @@
 	</div>
 	<!-- WASM 降级 / 全局通知 -->
 	<ToastNotification ref="toast" :container-bottom="60" />
+	<AlertDialog ref="alertDialog" />
 </template>
 <script>
-	import { markRaw } from 'vue';
+	import { markRaw, nextTick } from 'vue';
 	import Toolbar from "./Toolbar.vue";
 	import CanvasTable from "./CanvasTable.vue";
 	import FormulaBar from "./FormulaBar.vue";
+	import SvgIcon from "./icons/SvgIcon.vue";
 	import ToastNotification from "./ToastNotification.vue";
+	import AlertDialog from "./AlertDialog.vue";
 	import { Workbook } from "../../core/Workbook";
 	import { ThemeHelper } from "./ThemeHelper";
 	import { cloneCell } from '@/core/utils/Clipboard';
@@ -83,8 +113,10 @@
 		components: {
 			CanvasTable,
 			FormulaBar,
+			SvgIcon,
 			Toolbar,
-			ToastNotification
+			ToastNotification,
+			AlertDialog
 		},
 		data() {
 			return {
@@ -112,6 +144,9 @@
 				lastActiveCell: null,
 				originalCellData: {},
 				dataController: null,
+				editingSheetId: null,
+				sheetRenameDraft: '',
+				sheetRenameError: '',
 			};
 		},
 		computed: {
@@ -127,6 +162,19 @@
 			currentWorkbook() {
 				void this.uiVersion;
 				return this.workbook;
+			},
+			sheets() {
+				void this.uiVersion;
+				return this.workbook ? this.workbook.getSheets() : [];
+			},
+			sheetName: {
+				get() {
+					void this.uiVersion;
+					return this.workbook ? this.workbook.sheetName : '';
+				},
+				set(name) {
+					this.renameSheet(name);
+				}
 			},
 			isFormulaBarDisabled() {
 				void this.uiVersion;
@@ -170,6 +218,114 @@
 
 			triggerUpdate() {
 				this.uiVersion++;
+			},
+			addSheet(name = null, options = {}) {
+				if (!this.workbook) return '';
+				return this.workbook.addSheet(name, options);
+			},
+			switchSheet(idOrName) {
+				if (!this.workbook) return false;
+				return this.workbook.switchSheet(idOrName);
+			},
+			renameSheet(idOrName, newName = null) {
+				if (!this.workbook) return false;
+				return this.workbook.renameSheet(idOrName, newName);
+			},
+			deleteSheet(idOrName) {
+				if (!this.workbook) return false;
+				return this.workbook.deleteSheet(idOrName);
+			},
+			getSheets() {
+				return this.workbook ? this.workbook.getSheets() : [];
+			},
+			handleAddSheet() {
+				if (!this.workbook) return;
+				this.workbook.addSheet();
+			},
+			handleSwitchSheet(sheet) {
+				if (!this.workbook) return;
+				if (this.editingSheetId === sheet.id) return;
+				if (this.dataController) {
+					this.dataController.reset();
+					this.dataController.setInitialData([]);
+				}
+				this.workbook.switchSheet(sheet.id);
+			},
+			handleDeleteSheet(sheet) {
+				if (!this.workbook) return;
+				this.workbook.deleteSheet(sheet.id);
+			},
+			setSheetRenameInput(el) {
+				this._sheetRenameInput = el;
+			},
+			handleSheetRenameStart(sheet) {
+				if (this.readOnly || !this.workbook) return;
+
+				this.editingSheetId = sheet.id;
+				this.sheetRenameDraft = sheet.name;
+				this.sheetRenameError = '';
+
+				this.$nextTick(() => {
+					const input = this._sheetRenameInput;
+					if (input) {
+						input.focus();
+						input.select();
+					}
+				});
+			},
+			confirmSheetRename() {
+				const sheetId = this.editingSheetId;
+				if (!sheetId) return;
+
+				try {
+					if (this.renameSheet(sheetId, this.sheetRenameDraft)) {
+						this.editingSheetId = null;
+						this.sheetRenameDraft = '';
+						this.sheetRenameError = '';
+					}
+				} catch (error) {
+					this.sheetRenameError = error?.message || '工作表名称无效';
+					this.$nextTick(() => {
+						const input = this._sheetRenameInput;
+						if (input) {
+							input.focus();
+							input.select();
+						}
+					});
+				}
+			},
+			cancelSheetRename() {
+				this.editingSheetId = null;
+				this.sheetRenameDraft = '';
+				this.sheetRenameError = '';
+			},
+			_syncSheetUiState() {
+				if (!this.workbook) return;
+
+				this.cancelSheetRename();
+				this.freezeRowCount = this.workbook.freeze?.r || 0;
+				this.freezeColCount = this.workbook.freeze?.c || 0;
+
+				const active = this.workbook.activeCell || { r: 0, c: 0 };
+				const cell = this.workbook.getCell(active.r, active.c);
+				this.activeCellAddress = this.workbook.getAddress(active.r, active.c);
+				this.activeCellValue = cell ? (cell.f || cell.v || '') : '';
+				this.lastActiveCell = { ...active };
+				this.originalCellData = cell ? cloneCell(cell) : {};
+				this.activeStyle = cell?.s || {};
+				this.isFormulaBarDirty = false;
+				this.showFindDialog = false;
+				this.matchCount = 0;
+				this.currentMatchIndex = 0;
+				this.allMatches = [];
+
+				this.triggerUpdate();
+				nextTick(() => {
+					const canvasTable = this.$refs.canvasTable;
+					if (typeof canvasTable?.scrollIntoView === 'function') {
+						canvasTable.scrollIntoView(active.r, active.c);
+					}
+				});
 			},
 			handleFreeze() {
 				if (!this.workbook) return;
@@ -426,7 +582,6 @@
 					this.dataController.renderPage();
 				}
 			},
-
 			setData(data) {
 				if (this.dataController) {
 					this.dataController.setInitialData(data);
@@ -521,7 +676,10 @@
 					const lockInfoFn = this.workbook.plugins.getSharedState('collaboration:getCellLockInfo');
 					const lockInfo = lockInfoFn ? lockInfoFn(r, c) : null;
 					const userName = lockInfo ? lockInfo.userName : '其他用户';
-					alert(`无法编辑：单元格正由用户 "${userName}" 编辑锁定中`);
+					this.showAlertDialog({
+						title: '无法编辑',
+						message: `单元格正由用户 "${userName}" 编辑锁定中`
+					});
 					this.isFormulaBarDirty = false;
 					const cell = this.workbook.getCell(r, c);
 					this.activeCellValue = cell ? (cell.f || cell.v) : '';
@@ -556,6 +714,12 @@
 				this.triggerUpdate();
 				this.$refs.canvasTable.focus();
 			},
+			showAlertDialog(payload) {
+				const dialog = this.$refs.alertDialog;
+				if (dialog && typeof dialog.open === 'function') {
+					dialog.open(payload);
+				}
+			},
 		},
 		props: {
 			loading: {
@@ -580,6 +744,13 @@
 				default: () => []
 			},
 			readOnly: {
+				type: Boolean,
+				default: false
+			},
+			/**
+			 * 只读模式下是否保留编辑 UI。用于协同查看场景：工具栏和 Sheet 操作按钮仍显示，但不可交互。
+			 */
+			showEditingUiInReadOnly: {
 				type: Boolean,
 				default: false
 			},
@@ -732,6 +903,16 @@
 				}
 			});
 
+			this._unsubSheetChange = this.workbook.on(Events.SHEET_CHANGE, () => {
+				this._syncSheetUiState();
+			});
+
+			this._unsubDataLoad = this.workbook.on(Events.DATA_LOAD, () => {
+				this._syncSheetUiState();
+			});
+
+			this._sheetRenameInput = null;
+
 			if (this.columns && this.columns.length > 0) {
 				this.workbook.setColumns(this.columns);
 			}
@@ -747,6 +928,12 @@
 			}
 			if (this._unsubWasmDowngrade) {
 				this._unsubWasmDowngrade();
+			}
+			if (this._unsubSheetChange) {
+				this._unsubSheetChange();
+			}
+			if (this._unsubDataLoad) {
+				this._unsubDataLoad();
 			}
 			// 清理数据控制器
 			if (this.dataController) {
@@ -982,6 +1169,7 @@
 		&-body {
 			flex: 1;
 			display: flex;
+			flex-direction: column;
 			overflow: hidden;
 			position: relative;
 		}
@@ -990,6 +1178,133 @@
 			flex: 1;
 			position: relative;
 			overflow: hidden;
+		}
+
+		&-sheet-bar {
+			display: flex;
+			align-items: stretch;
+			gap: 2px;
+			min-height: 32px;
+			padding: 3px 6px 0;
+			background: #f7f8fa;
+			border-top: 1px solid #dcdfe6;
+			overflow-x: auto;
+			overflow-y: hidden;
+			flex-shrink: 0;
+		}
+
+		&-tab {
+			display: inline-flex;
+			align-items: center;
+			max-width: 180px;
+			min-width: 56px;
+			height: 28px;
+			padding: 0 10px;
+			border: 1px solid transparent;
+			border-bottom: none;
+			border-radius: 4px 4px 0 0;
+			background: transparent;
+			color: #606266;
+			font-size: 13px;
+			cursor: pointer;
+			white-space: nowrap;
+
+			&:hover {
+				color: #1f2d3d;
+				background: #eef1f6;
+			}
+
+			&.active {
+				background: #ffffff;
+				border-color: #dcdfe6;
+				color: #1f2d3d;
+				font-weight: 600;
+			}
+
+			&-name {
+				flex: 1;
+				min-width: 0;
+				overflow: hidden;
+				text-overflow: ellipsis;
+			}
+
+			&-input {
+				width: 100%;
+				height: 22px;
+				min-width: 0;
+				padding: 0 5px;
+				border: 1px solid #409eff;
+				border-radius: 3px;
+				box-sizing: border-box;
+				color: #1f2d3d;
+				font-size: 13px;
+				font-weight: 400;
+				outline: none;
+
+				&.invalid {
+					border-color: #f56c6c;
+					box-shadow: 0 0 0 2px rgba(245, 108, 108, 0.15);
+				}
+			}
+
+			&-delete {
+				display: inline-flex;
+				align-items: center;
+				justify-content: center;
+				width: 18px;
+				height: 18px;
+				flex-shrink: 0;
+				margin-left: 6px;
+				padding: 0;
+				border: none;
+				border-radius: 3px;
+				background: transparent;
+				color: #909399;
+				cursor: pointer;
+
+				.vue-canvas-sheet-svg-icon {
+					font-size: 13px;
+				}
+
+				&:hover {
+					background: #f56c6c;
+					color: #ffffff;
+				}
+
+				&:focus-visible {
+					outline: 2px solid #409eff;
+					outline-offset: 1px;
+				}
+
+				&:disabled {
+					cursor: not-allowed;
+					opacity: 0.55;
+				}
+			}
+		}
+
+		&-tab-add {
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			width: 28px;
+			height: 28px;
+			flex-shrink: 0;
+			border: none;
+			border-radius: 4px;
+			background: transparent;
+			color: #606266;
+			cursor: pointer;
+
+			&:hover {
+				background: #e8ebf0;
+				color: #1f2d3d;
+			}
+
+			&:disabled {
+				cursor: not-allowed;
+				opacity: 0.55;
+			}
 		}
 
 		&-loading-overlay {

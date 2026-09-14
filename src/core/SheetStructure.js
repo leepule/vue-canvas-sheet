@@ -15,6 +15,7 @@
  * @property {(r: number, c: number) => Cell}   getCell          — 获取单元格
  * @property {(updates: Array) => void}         bulkSetCells     — 批量设置单元格
  * @property {(...args: any[]) => void}         notify           — UI 通知
+ * @property {(isRow: boolean, index: number, delta: number) => void} [shiftComments]
  */
 
 import { cloneCell } from './utils/Clipboard.js';
@@ -140,6 +141,8 @@ export class SheetStructure {
   _shiftDimension(isRow, index, delta) {
     const isInsert = delta > 0;
     const dataMatrix = this.d.getDataMatrix();
+
+    this.d.shiftComments?.(isRow, index, delta);
 
     if (!isInsert) {
       if (isRow) dataMatrix.deleteRow(index);

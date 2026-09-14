@@ -10,3 +10,4 @@ export { CollaborativeCursorPlugin, createCollaborativeCursorPlugin } from './Co
 export { RealtimeCollaborationPlugin, createRealtimeCollaborationPlugin } from './RealtimeCollaborationPlugin.js';
 export { ExportPlugin, createExportPlugin } from './ExportPlugin.js';
 export { ImportPlugin, createImportPlugin } from './ImportPlugin.js';
+export { CellCommentPlugin, createCellCommentPlugin } from './CellCommentPlugin.js';

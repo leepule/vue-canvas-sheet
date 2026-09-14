@@ -1,5 +1,7 @@
 import type { DefineComponent } from 'vue';
 import type {
+  CellComment,
+  CommentMessage,
   PluginInterface,
   PluginRegistry,
   Range,
@@ -9,14 +11,19 @@ import type {
 export { Workbook } from './core';
 export type {
   Cell,
+  CellComment,
+  CommentMessage,
   CellRef,
   CellStyle,
+  FormulaFunction,
   PersistenceStorage,
   PluginInterface,
   Range,
+  SheetInfo,
   Unsubscribe,
   WorkbookOptions
 } from './core';
+import type { SheetInfo } from './core';
 
 export interface AutoSaveOptions {
   backend?: 'indexedDB' | 'localStorage';
@@ -59,6 +66,21 @@ export class SelectionHistoryPlugin implements PluginInterface {
 export function createSelectionHistoryPlugin(
   options?: SelectionHistoryOptions
 ): SelectionHistoryPlugin;
+
+export interface CellCommentOptions {
+  userId?: string;
+  userName?: string;
+  userColor?: string;
+}
+
+export class CellCommentPlugin implements PluginInterface {
+  name: string;
+  constructor(options?: CellCommentOptions);
+  addComment(r: number, c: number, text: string): CellComment | null;
+  replyComment(id: string, text: string): CellComment | null;
+}
+
+export function createCellCommentPlugin(options?: CellCommentOptions): CellCommentPlugin;
 
 export interface ExportOptions {
   defaultFileName?: string;
@@ -165,6 +187,7 @@ export interface TableDesignerProps {
   reloadKey?: string | number | boolean | null;
   columns?: unknown[];
   readOnly?: boolean;
+  showEditingUiInReadOnly?: boolean;
   plugins?: PluginInterface[];
   toolbar?: string[];
   lazyLoad?: LazyLoadConfig;
@@ -175,6 +198,18 @@ export interface TableDesignerProps {
   sheetId?: string;
 }
 
-export const TableDesigner: DefineComponent<TableDesignerProps>;
+export interface TableDesignerInstance {
+  sheetName: string;
+  readonly activeSheetId: string | null;
+  addSheet(name?: string, options?: { activate?: boolean }): string;
+  switchSheet(idOrName: string): boolean;
+  renameSheet(idOrName: string, newName?: string): boolean;
+  deleteSheet(idOrName: string): boolean;
+  getSheets(): SheetInfo[];
+}
+
+export const TableDesigner: DefineComponent<TableDesignerProps> & {
+  new (...args: unknown[]): TableDesignerInstance;
+};
 export const SvgIcon: DefineComponent<{ name: string }>;
 export default TableDesigner;
