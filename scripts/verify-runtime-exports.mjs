@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises';
 const entrypointContracts = {
   'vue-canvas-sheet': [
     'AutoSavePlugin',
+    'CellCommentPlugin',
     'CollaborativeCursorPlugin',
     'ExportPlugin',
     'ImportPlugin',
@@ -13,6 +14,7 @@ const entrypointContracts = {
     'TableDesigner',
     'Workbook',
     'createAutoSavePlugin',
+    'createCellCommentPlugin',
     'createCollaborativeCursorPlugin',
     'createExportPlugin',
     'createImportPlugin',
@@ -33,12 +35,14 @@ const entrypointContracts = {
   ],
   'vue-canvas-sheet/plugins': [
     'AutoSavePlugin',
+    'CellCommentPlugin',
     'CollaborativeCursorPlugin',
     'ExportPlugin',
     'ImportPlugin',
     'RealtimeCollaborationPlugin',
     'SelectionHistoryPlugin',
     'createAutoSavePlugin',
+    'createCellCommentPlugin',
     'createCollaborativeCursorPlugin',
     'createExportPlugin',
     'createImportPlugin',
