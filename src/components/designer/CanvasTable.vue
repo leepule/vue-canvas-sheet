@@ -908,6 +908,7 @@ onMounted(() => {
   handleResize();
   setupDprMediaQuery();
   updateScrollbarSize();
+  document.addEventListener('mousedown', handleDocumentMouseDown);
 });
 
 onBeforeUnmount(() => {
@@ -935,6 +936,7 @@ onBeforeUnmount(() => {
   stopAnimation();
   tableContext.methods.destroyOffscreenRenderer();
   tableContext.methods.destroyProgressiveRenderer();
+  document.removeEventListener('mousedown', handleDocumentMouseDown);
 
   if (tableContext.methods.cleanupCanvasRender) {
     tableContext.methods.cleanupCanvasRender();
@@ -970,6 +972,15 @@ watch(() => props.version, () => {
 });
 
 // Template Event Handlers (redirected to tableContext.methods)
+const handleDocumentMouseDown = (e) => {
+  if (state.contextMenuVisible) {
+    const menuEl = container.value?.querySelector('.vue-canvas-sheet-context-menu');
+    if (menuEl && menuEl.contains(e.target)) {
+      return;
+    }
+    state.contextMenuVisible = false;
+  }
+};
 const onKeyDownWrapper = (e) => tableContext.methods.handleKeyDown(e);
 const onMouseDownWrapper = (e) => {
   if (state.contextMenuVisible) {

@@ -27,7 +27,7 @@ import { FileSpreadsheet, Search as SearchIcon } from 'vue-canvas-sheet/icons';
 import {
   AutoSavePlugin,
   ExportPlugin,
-  createAutoSavePlugin,
+  createAutoSavePlugin as createPluginsAutoSavePlugin,
   createRealtimeCollaborationPlugin
 } from 'vue-canvas-sheet/plugins';
 import type { FormulaFunction, PersistenceStorage } from 'vue-canvas-sheet/core';
@@ -74,7 +74,7 @@ void [
   SearchIcon,
   AutoSavePlugin,
   ExportPlugin,
-  createAutoSavePlugin,
+  createPluginsAutoSavePlugin,
   createRealtimeCollaborationPlugin,
   wasmDisabledWorkbook,
   detailSheetId

@@ -25,7 +25,7 @@ export class RealtimeCollaborationPlugin {
     this.autoConnect = options.autoConnect !== false;
     this.authToken = options.token ?? options.authToken ?? '';
     this.authTokenParam = options.authTokenParam || 'token';
-    this.authRequired = options.authRequired ?? (!!(options.token || options.authToken));
+    this.authRequired = options.authRequired ?? true;
     this.readOnly = options.readOnly === true || options.permission === 'viewer';
     this.editToken = options.editToken ?? '';
     this.editTokenParam = options.editTokenParam || 'editToken';
@@ -381,7 +381,7 @@ export class RealtimeCollaborationPlugin {
     if (url) this.serverUrl = url;
     if (!this.serverUrl) {
       console.warn('[RealtimeCollaboration] Cannot connect: serverUrl is not specified.');
-      return;
+      return false;
     }
 
     this.disconnect();
@@ -561,7 +561,7 @@ export class RealtimeCollaborationPlugin {
         userId: member.userId,
         userName: member.userName || member.userId,
         userColor: member.userColor || '#3498db',
-        readOnly: member.readOnly === undefined ? undefined : member.readOnly === true
+        readOnly: member.readOnly === true
       });
     }
     const self = this._roomMembers.get(this.userId);

@@ -9,6 +9,8 @@ export function authenticateCollabRequestParams(params, expectedToken, expectedE
     if (!token || token !== expectedToken) {
       return { ok: false, reason: 'invalid collaboration token' };
     }
+  } else if (token) {
+    return { ok: false, reason: 'server auth token is not configured' };
   }
   if (!roomId || !userId) {
     return { ok: false, reason: 'roomId and userId are required' };
