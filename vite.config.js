@@ -7,6 +7,7 @@ const crossOriginIsolationHeaders = {
 }
 
 export default defineConfig(({ command }) => ({
+  base: './',
   plugins: [vue()],
   resolve: {
     alias: [
