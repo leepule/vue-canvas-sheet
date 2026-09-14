@@ -1,7 +1,7 @@
 import TableDesigner, {
   SvgIcon,
   Workbook,
-  createAutoSavePlugin
+  createAutoSavePlugin as createRootAutoSavePlugin
 } from 'vue-canvas-sheet';
 import {
   EventEmitter,
@@ -54,7 +54,7 @@ void [
   TableDesigner,
   SvgIcon,
   Workbook,
-  createAutoSavePlugin,
+  createRootAutoSavePlugin,
   EventEmitter,
   HookTypes,
   PluginRegistry,
