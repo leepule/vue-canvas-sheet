@@ -1,0 +1,25 @@
+{
+  "name": "@ai-sheet/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "test": "vitest run --config vitest.config.js"
+  },
+  "dependencies": {
+    "@ai-sdk/vue": "^4.0.102",
+    "@ai-sheet/contracts": "file:../../packages/ai-contracts",
+    "ai": "^7.0.102",
+    "vue": "^3.5.0",
+    "vue-canvas-sheet": "file:../..",
+    "vue-router": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.0",
+    "jsdom": "^26.1.0",
+    "sass": "^1.97.3",
+    "vite": "^6.2.0",
+    "vitest": "^3.1.0"
+  }
+}

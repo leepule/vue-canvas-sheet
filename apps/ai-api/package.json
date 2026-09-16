@@ -1,0 +1,17 @@
+{
+  "name": "@ai-sheet/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=.env.local --watch src/server.js",
+    "test": "vitest run --config vitest.config.js"
+  },
+  "dependencies": {
+    "@ai-sheet/contracts": "file:../../packages/ai-contracts",
+    "fastify": "^5.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.1.0"
+  }
+}

@@ -31,6 +31,7 @@
  * @property {() => void}                                      maybeInitWasm
  * @property {() => void}                                      recalcAll
  * @property {() => void}                                      rebuildContext
+ * @property {(change: Object) => void} [recordMutation]
  */
 
 import { cloneCell } from '../utils/Clipboard.js';
@@ -208,6 +209,7 @@ export class DataLoader {
           matrix.set(tr, c, pool.acquireCell(val));
         } else {
           existingCell.v = val;
+          this.d.recordMutation?.({ r: tr, c });
         }
 
         const cellId = this.d.cellKey(tr, c);

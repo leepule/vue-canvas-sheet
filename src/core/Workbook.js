@@ -67,6 +67,8 @@ import { prepareWorkbookJSON } from './data/WorkbookJSONImport.js';
 import { WorkbookBuilder } from './builder/WorkbookBuilder.js';
 import { parseColumns } from './builder/ColumnParser.js';
 
+const MAX_CELL_PATCH_CHANGES = 5000;
+
 /**
  * 工作簿核心数据模型
  * 管理单元格数据、样式、合并、选区、冻结等状态
@@ -89,6 +91,10 @@ export class Workbook {
 
     // Phase 6: 委托给 WorkbookBuilder 工厂构造所有子系统
     WorkbookBuilder.build(this, options);
+
+    /** 已成功提交的受控补丁结果，用于同 ID 重试幂等。 */
+    this._appliedCellPatchResults = new Map();
+    this._appliedCellPatchSignatures = new Map();
 
     this.comments = [];
 
@@ -146,7 +152,115 @@ export class Workbook {
   }
 
   get activeSheetId() {
-    return this._sheets[this._activeSheetIndex]?.id || null;
+    return this._sheets?.[this._activeSheetIndex]?.id || null;
+  }
+
+  /**
+   * Workbook 实例级内容修订号，不随切表、导入或撤销恢复旧值。
+   * @returns {number}
+   */
+  getContentRevision() {
+    return this._contentRevision;
+  }
+
+  _beginContentMutation(source = 'edit') {
+    if (this._contentMutationDepth === 0) this._contentMutationSource = source;
+    this._contentMutationDepth++;
+  }
+
+  _endContentMutation() {
+    if (this._contentMutationDepth === 0) return;
+    this._contentMutationDepth--;
+    if (this._contentMutationDepth === 0) {
+      this._contentMutationSource = null;
+      this._commitContentMutation();
+    }
+  }
+
+  _withContentMutation(source, operation) {
+    this._beginContentMutation(source);
+    try {
+      return operation();
+    } finally {
+      // 旧写入接口不是事务；异常前已产生的修改也必须使旧预览失效。
+      this._endContentMutation();
+    }
+  }
+
+  _withoutContentMutations(operation) {
+    this._contentMutationSuppression++;
+    try {
+      return operation();
+    } finally {
+      this._contentMutationSuppression--;
+    }
+  }
+
+  _abortContentMutation() {
+    this._pendingContentMutation = null;
+    if (this._contentMutationDepth > 0) {
+      this._contentMutationDepth--;
+      this._contentMutationSource = null;
+    }
+  }
+
+  _recordContentMutation({
+    source = 'edit',
+    sheetId = this.activeSheetId,
+    r,
+    c,
+    allCells = false,
+    mutationId = null
+  } = {}) {
+    if (this._destroyed || this._contentMutationSuppression > 0) return;
+    if (!this._pendingContentMutation) {
+      this._pendingContentMutation = {
+        mutationId: mutationId || null,
+        source: this._contentMutationSource || source,
+        sheetIds: new Set(),
+        cells: new Set(),
+        allCells: false
+      };
+    }
+    const pending = this._pendingContentMutation;
+    if (sheetId) pending.sheetIds.add(sheetId);
+    if (allCells) {
+      pending.allCells = true;
+      pending.cells.clear();
+    } else if (!pending.allCells && r !== undefined && c !== undefined) {
+      pending.cells.add(`${sheetId}:${this._cellKey(r, c)}`);
+    }
+    if (this._contentMutationDepth === 0) this._commitContentMutation();
+  }
+
+  _commitContentMutation() {
+    const pending = this._pendingContentMutation;
+    if (!pending) return;
+    this._pendingContentMutation = null;
+
+    const previousRevision = this._contentRevision;
+    this._contentRevision++;
+    const sheetIds = [...pending.sheetIds];
+    this._contentMutationEvents.push({
+      mutationId: pending.mutationId || `mutation-${this._contentRevision}`,
+      previousRevision,
+      revision: this._contentRevision,
+      sheetId: sheetIds.length === 1 ? sheetIds[0] : null,
+      sheetIds,
+      source: pending.source,
+      changedCells: pending.allCells ? null : pending.cells.size
+    });
+
+    // 监听器中再次写入时，仍按修订号顺序派发提交事件。
+    if (this._emittingContentMutation) return;
+    this._emittingContentMutation = true;
+    try {
+      while (this._contentMutationEvents.length > 0) {
+        this._emit(Events.MUTATION_COMMITTED, this._contentMutationEvents.shift());
+      }
+    } finally {
+      this._emittingContentMutation = false;
+    }
   }
 
   _normalizeSheetName(name) {
@@ -210,6 +324,10 @@ export class Workbook {
   }
 
   addSheet(name = null, options = {}) {
+    return this._withContentMutation('structure', () => this._addSheetInternal(name, options));
+  }
+
+  _addSheetInternal(name, options) {
     const activate = options.activate !== false;
     const sheet = {
       id: this._nextSheetId(),
@@ -220,6 +338,7 @@ export class Workbook {
     this._sheets.push(sheet);
     if (!activate) this._persistenceManager?.markWorkbookDirty();
     if (activate) this.switchSheet(sheet.id);
+    this._recordContentMutation({ sheetId: sheet.id });
     return sheet.id;
   }
 
@@ -250,7 +369,11 @@ export class Workbook {
     return true;
   }
 
-  renameSheet(idOrName, newName = null) {
+  renameSheet(...args) {
+    return this._withContentMutation('structure', () => this._renameSheetInternal(...args));
+  }
+
+  _renameSheetInternal(idOrName, newName = null) {
     const targetName = arguments.length > 1 ? newName : idOrName;
     const selector = arguments.length > 1 ? idOrName : this.activeSheetId;
     const index = this._sheets.findIndex(sheet => sheet.id === selector || sheet.name === selector);
@@ -271,10 +394,15 @@ export class Workbook {
     this._emit(Events.SHEET_CHANGE, payload);
     this.notify({ type: 'sheet-change', ...payload });
     this._persistenceManager?.markWorkbookDirty();
+    this._recordContentMutation({ sheetId: payload.id });
     return true;
   }
 
   deleteSheet(idOrName) {
+    return this._withContentMutation('structure', () => this._deleteSheetInternal(idOrName));
+  }
+
+  _deleteSheetInternal(idOrName) {
     const index = this._sheets.findIndex(sheet => sheet.id === idOrName || sheet.name === idOrName);
     if (index === -1) return false;
     if (this._sheets.length <= 1) {
@@ -310,6 +438,7 @@ export class Workbook {
     this._emit(Events.SHEET_CHANGE, payload);
     this.notify({ type: 'sheet-change', ...payload });
     this._persistenceManager?.markWorkbookDirty();
+    this._recordContentMutation({ sheetId: target.id, allCells: true });
     return true;
   }
 
@@ -493,7 +622,9 @@ export class Workbook {
     return this._dataCache;
   }
   set data(val) {
-    this._dataMatrix.fromObject(val, key => this._parseKey(key));
+    this._withContentMutation('import', () => {
+      this._dataMatrix.fromObject(val, key => this._parseKey(key));
+    });
   }
 
   /** @type {number} 行数 */
@@ -541,7 +672,10 @@ export class Workbook {
 
   setData(data) {
     return this._performanceMonitor.measure(MetricTypes.DATA_SET, () => {
-      this._setDataInternal(data);
+      this._withContentMutation('import', () => {
+        this._setDataInternal(data);
+        this._recordContentMutation({ allCells: true });
+      });
     }, { dataSize: Array.isArray(data) ? data.length : Object.keys(data).length });
   }
 
@@ -553,6 +687,10 @@ export class Workbook {
     this._dataLoader.load(data);
   }
   setColumns(columns) {
+    return this._withContentMutation('structure', () => this._setColumnsInternal(columns));
+  }
+
+  _setColumnsInternal(columns) {
     // Optimization: Do NOT wipe this.data to preserve manual styles.
 
     // Clear merges that intersect with the header area, as headers are about to be rebuilt.
@@ -674,6 +812,7 @@ export class Workbook {
       this._dirtyCells.set(this._cellKey(r, c), cell);
     }
     this.dataVersion++;
+    this._recordContentMutation({ r, c });
     this._schedulePersistence();
   }
 
@@ -693,6 +832,10 @@ export class Workbook {
    * @param {Array<{r: number, c: number, val: Partial<Cell>}>} updates - 更新列表
    */
   bulkSetCells(updates) {
+    return this._withContentMutation('edit', () => this._bulkSetCellsInternal(updates));
+  }
+
+  _bulkSetCellsInternal(updates) {
     const changes = [];
 
 
@@ -750,6 +893,441 @@ export class Workbook {
     this.notify();
   }
 
+  _cellPatchError(reason, message, details = {}) {
+    return new SheetError(ErrorCodes.INVALID_ARGUMENT, message, { reason, ...details });
+  }
+
+  _clonePatchValue(value, path = 'patch', seen = new WeakSet()) {
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'boolean' || typeof value === 'string') return value;
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) {
+        throw this._cellPatchError('INVALID_VALUE', `${path} 不能包含非有限数字`);
+      }
+      return value;
+    }
+    if (typeof value === 'bigint' || typeof value === 'symbol' || typeof value === 'function') {
+      throw this._cellPatchError('INVALID_VALUE', `${path} 不能包含函数、Symbol 或 BigInt`);
+    }
+    if (Array.isArray(value)) {
+      if (seen.has(value)) {
+        throw this._cellPatchError('INVALID_VALUE', `${path} 不能包含循环引用`);
+      }
+      seen.add(value);
+      const result = value.map((item, index) => this._clonePatchValue(item, `${path}[${index}]`, seen));
+      seen.delete(value);
+      return result;
+    }
+    if (typeof value !== 'object') {
+      throw this._cellPatchError('INVALID_VALUE', `${path} 包含不支持的数据类型`);
+    }
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw this._cellPatchError('INVALID_VALUE', `${path} 只能使用普通对象`);
+    }
+    if (seen.has(value)) {
+      throw this._cellPatchError('INVALID_VALUE', `${path} 不能包含循环引用`);
+    }
+    seen.add(value);
+    const result = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (item !== undefined) result[key] = this._clonePatchValue(item, `${path}.${key}`, seen);
+    }
+    seen.delete(value);
+    return result;
+  }
+
+  _normalizePatchScalar(value, path) {
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'boolean' || typeof value === 'string') return value;
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    throw this._cellPatchError('INVALID_VALUE', `${path} 必须是 null、boolean、有限 number 或 string`);
+  }
+
+  _normalizePatchBefore(before) {
+    if (before === null) return null;
+    if (typeof before !== 'object' || Array.isArray(before)) {
+      throw this._cellPatchError('INVALID_BEFORE', 'before 必须是普通单元格对象或 null');
+    }
+    const cloned = this._clonePatchValue(before, 'before');
+    for (const key of Object.keys(cloned)) {
+      if (!['v', 'f', 's', 'm', 'dirty'].includes(key)) {
+        throw this._cellPatchError('INVALID_BEFORE', `before 不允许字段 ${key}`);
+      }
+    }
+
+    const normalized = {};
+    if (cloned.f !== undefined) {
+      if (typeof cloned.f !== 'string' || !cloned.f.startsWith('=')) {
+        throw this._cellPatchError('INVALID_BEFORE', 'before.f 必须是以 "=" 开头的公式字符串');
+      }
+      normalized.f = cloned.f;
+    } else {
+      if (cloned.v !== undefined) normalized.v = this._normalizePatchScalar(cloned.v, 'before.v');
+      if (cloned.m !== undefined) {
+        if (typeof cloned.m !== 'string') {
+          throw this._cellPatchError('INVALID_BEFORE', 'before.m 必须是字符串');
+        }
+        normalized.m = cloned.m;
+      }
+    }
+    if (cloned.s !== undefined) {
+      if (typeof cloned.s !== 'object' || cloned.s === null || Array.isArray(cloned.s)) {
+        throw this._cellPatchError('INVALID_BEFORE', 'before.s 必须是普通样式对象');
+      }
+      normalized.s = cloned.s;
+    }
+    return normalized;
+  }
+
+  _normalizePatchAfter(after) {
+    if (after === null) return null;
+    if (typeof after !== 'object' || Array.isArray(after)) {
+      throw this._cellPatchError('INVALID_AFTER', 'after 必须是普通单元格对象或 null');
+    }
+    const cloned = this._clonePatchValue(after, 'after');
+    for (const key of Object.keys(cloned)) {
+      if (!['v', 'f', 's', 'm'].includes(key)) {
+        throw this._cellPatchError('INVALID_AFTER', `after 不允许字段 ${key}`);
+      }
+    }
+
+    const normalized = {};
+    let formula = null;
+    if (cloned.f !== undefined) {
+      if (cloned.v !== undefined || cloned.m !== undefined) {
+        throw this._cellPatchError('INVALID_AFTER', '公式单元格不能同时携带计算缓存 v 或 m');
+      }
+      if (typeof cloned.f !== 'string' || !cloned.f.startsWith('=')) {
+        throw this._cellPatchError('INVALID_AFTER', 'after.f 必须是以 "=" 开头的公式字符串');
+      }
+      formula = cloned.f;
+    } else if (cloned.v !== undefined) {
+      const value = this._normalizePatchScalar(cloned.v, 'after.v');
+      if (typeof value === 'string' && value.startsWith('=')) {
+        formula = value;
+      } else {
+        normalized.v = value;
+      }
+    }
+
+    if (formula !== null) {
+      const inspection = this.inspectFormula(formula);
+      if (!inspection.valid) {
+        const issue = inspection.errors[0];
+        throw new SheetError(ErrorCodes.FORMULA_SYNTAX, issue.message, {
+          reason: 'INVALID_FORMULA',
+          formula,
+          issue
+        });
+      }
+      normalized.f = formula;
+    } else if (cloned.m !== undefined) {
+      if (typeof cloned.m !== 'string') {
+        throw this._cellPatchError('INVALID_AFTER', 'after.m 必须是字符串');
+      }
+      normalized.m = cloned.m;
+    }
+
+    if (cloned.s !== undefined) {
+      if (typeof cloned.s !== 'object' || cloned.s === null || Array.isArray(cloned.s)) {
+        throw this._cellPatchError('INVALID_AFTER', 'after.s 必须是普通样式对象');
+      }
+      normalized.s = cloned.s;
+    }
+    return normalized;
+  }
+
+  _persistentCellForPatch(cell) {
+    if (!cell) return null;
+    const normalized = {};
+    if (typeof cell.f === 'string') {
+      normalized.f = cell.f;
+    } else {
+      if (cell.v !== undefined) normalized.v = cell.v;
+      if (cell.m !== undefined) normalized.m = cell.m;
+    }
+    if (cell.s !== undefined && cell.s !== null) normalized.s = cell.s;
+    return normalized;
+  }
+
+  _isPatchValueEqual(a, b) {
+    if (a === b) return true;
+    if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') {
+      return false;
+    }
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    if (Array.isArray(a)) {
+      return a.length === b.length && a.every((item, index) => this._isPatchValueEqual(item, b[index]));
+    }
+    const aKeys = Object.keys(a);
+    const bKeys = Object.keys(b);
+    return aKeys.length === bKeys.length &&
+      aKeys.every(key => Object.prototype.hasOwnProperty.call(b, key) && this._isPatchValueEqual(a[key], b[key]));
+  }
+
+  _validateCellPatch(patch) {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+      throw this._cellPatchError('INVALID_PATCH', 'patch 必须是普通对象');
+    }
+    for (const key of Object.keys(patch)) {
+      if (!['mutationId', 'sheetId', 'expectedRevision', 'changes'].includes(key)) {
+        throw this._cellPatchError('INVALID_PATCH', `patch 不允许字段 ${key}`);
+      }
+    }
+    if (typeof patch.mutationId !== 'string' || !patch.mutationId.trim() || patch.mutationId.length > 128) {
+      throw this._cellPatchError('INVALID_MUTATION_ID', 'mutationId 必须是 1 到 128 个字符的非空字符串');
+    }
+    if (typeof patch.sheetId !== 'string' || !patch.sheetId.trim()) {
+      throw this._cellPatchError('INVALID_SHEET', 'sheetId 必须是非空字符串');
+    }
+    if (!Number.isInteger(patch.expectedRevision) || patch.expectedRevision < 0) {
+      throw this._cellPatchError('INVALID_REVISION', 'expectedRevision 必须是非负整数');
+    }
+    if (!Array.isArray(patch.changes)) {
+      throw this._cellPatchError('INVALID_CHANGES', 'changes 必须是数组');
+    }
+    if (patch.changes.length === 0 || patch.changes.length > MAX_CELL_PATCH_CHANGES) {
+      throw this._cellPatchError('PATCH_TOO_LARGE', `changes 数量必须在 1 到 ${MAX_CELL_PATCH_CHANGES} 之间`);
+    }
+    if (this.history.batching || this.history._batchDepth > 0 || this._contentMutationDepth > 0) {
+      throw this._cellPatchError('NESTED_MUTATION', 'applyCellPatch 不能嵌套在其他修改批次中执行');
+    }
+
+    const normalized = [];
+    const coordinates = new Set();
+    for (let index = 0; index < patch.changes.length; index++) {
+      const change = patch.changes[index];
+      const path = `changes[${index}]`;
+      if (!change || typeof change !== 'object' || Array.isArray(change)) {
+        throw this._cellPatchError('INVALID_CHANGE', `${path} 必须是普通对象`);
+      }
+      for (const key of Object.keys(change)) {
+        if (!['r', 'c', 'before', 'after'].includes(key)) {
+          throw this._cellPatchError('INVALID_CHANGE', `${path} 不允许字段 ${key}`);
+        }
+      }
+      const { r, c } = change;
+      if (!Number.isInteger(r) || !Number.isInteger(c) || r < 0 || c < 0 || r >= this.rowCount || c >= this.colCount) {
+        throw this._cellPatchError('INVALID_COORDINATE', `${path} 坐标超出当前表格边界`);
+      }
+      const coordinateKey = `${r}:${c}`;
+      if (coordinates.has(coordinateKey)) {
+        throw this._cellPatchError('DUPLICATE_TARGET', `${path} 重复目标坐标`);
+      }
+      coordinates.add(coordinateKey);
+      if (!Object.prototype.hasOwnProperty.call(change, 'before') || !Object.prototype.hasOwnProperty.call(change, 'after')) {
+        throw this._cellPatchError('INVALID_CHANGE', `${path} 必须同时携带 before 和 after`);
+      }
+
+      const before = this._normalizePatchBefore(change.before);
+      const after = this._normalizePatchAfter(change.after);
+      normalized.push({ r, c, before, after, currentOldValue: cloneCell(this.getCell(r, c)) });
+    }
+
+    return {
+      mutationId: patch.mutationId,
+      sheetId: patch.sheetId,
+      expectedRevision: patch.expectedRevision,
+      changes: normalized
+    };
+  }
+
+  _snapshotCellPatchState(changes) {
+    const matrix = this._dataMatrix;
+    const sharedStore = this._formulaEngine?.sharedValueStore;
+    const sharedValues = new Map();
+    if (sharedStore) {
+      for (const { r, c } of changes) sharedValues.set(`${r}:${c}`, sharedStore.get(r, c));
+    }
+
+    return {
+      matrix: {
+        _rows: structuredClone(matrix._rows),
+        _colIndex: structuredClone(matrix._colIndex),
+        _dirtyCols: new Set(matrix._dirtyCols),
+        _size: matrix._size,
+        _version: matrix._version,
+        _bounds: { ...matrix._bounds },
+        _boundsDirty: matrix._boundsDirty,
+        _stats: { ...matrix._stats }
+      },
+      dependencyMap: structuredClone(this.dependencyMap),
+      reverseDependencyMap: structuredClone(this.reverseDependencyMap),
+      numericDepIndex: structuredClone(this._numericDepIndex),
+      rangeDependencyIndex: structuredClone(this.rangeDependencyIndex),
+      dirtyCells: structuredClone(this._dirtyCells || new Map()),
+      dataVersion: this.dataVersion,
+      dataCache: this._dataCache ? structuredClone(this._dataCache) : null,
+      dataCacheVersion: this._dataCacheVersion,
+      history: {
+        undo: this.history.undoStack.toArray(),
+        redo: this.history.redoStack.toArray(),
+        batching: this.history.batching,
+        batchDepth: this.history._batchDepth,
+        batchCmds: [...this.history.batchCmds],
+        lastOpTime: this.history.lastOpTime,
+        lastOpType: this.history.lastOpType,
+        lastOpCell: this.history.lastOpCell ? { ...this.history.lastOpCell } : null,
+        optimizerMemoryUsage: this.history.optimizer.memoryUsage,
+        optimizerLastMemoryCheck: this.history.optimizer.lastMemoryCheck
+      },
+      sharedValues
+    };
+  }
+
+  _restoreCellPatchState(snapshot) {
+    Object.assign(this._dataMatrix, snapshot.matrix);
+
+    this.dependencyMap.clear();
+    for (const [key, value] of snapshot.dependencyMap) this.dependencyMap.set(key, value);
+    this.reverseDependencyMap.clear();
+    for (const [key, value] of snapshot.reverseDependencyMap) this.reverseDependencyMap.set(key, value);
+    this._numericDepIndex.clear();
+    for (const [key, value] of snapshot.numericDepIndex) this._numericDepIndex.set(key, value);
+    Object.assign(this.rangeDependencyIndex, snapshot.rangeDependencyIndex);
+
+    this._dirtyCells.clear();
+    for (const [key, value] of snapshot.dirtyCells) this._dirtyCells.set(key, value);
+    this.dataVersion = snapshot.dataVersion;
+    this._dataCache = snapshot.dataCache;
+    this._dataCacheVersion = snapshot.dataCacheVersion;
+
+    this.history.undoStack.replace(snapshot.history.undo);
+    this.history.redoStack.replace(snapshot.history.redo);
+    this.history.batching = snapshot.history.batching;
+    this.history._batchDepth = snapshot.history.batchDepth;
+    this.history.batchCmds = [...snapshot.history.batchCmds];
+    this.history.lastOpTime = snapshot.history.lastOpTime;
+    this.history.lastOpType = snapshot.history.lastOpType;
+    this.history.lastOpCell = snapshot.history.lastOpCell;
+    this.history.optimizer.memoryUsage = snapshot.history.optimizerMemoryUsage;
+    this.history.optimizer.lastMemoryCheck = snapshot.history.optimizerLastMemoryCheck;
+
+    for (const [coordinate, value] of snapshot.sharedValues) {
+      const [r, c] = coordinate.split(':').map(Number);
+      this._syncSharedValue(r, c, value);
+    }
+  }
+
+  _writeCellPatchCell({ r, c, after }) {
+    const cellId = this._cellKey(r, c);
+    if (after === null) {
+      this._dataMatrix.delete(r, c);
+      this._syncSharedValue(r, c, null);
+      if (this._storage) this._dirtyCells.set(cellId, null);
+      this._formulaEvaluator._updateDependencyMap(cellId, null);
+      return;
+    }
+
+    const liveCell = { ...after };
+    liveCell.dirty = Boolean(after.f);
+    this._dataMatrix.set(r, c, liveCell);
+    this._syncSharedValue(r, c, after.f ? -Infinity : after.v);
+    if (this._storage) this._dirtyCells.set(cellId, liveCell);
+    this._formulaEvaluator._updateDependencyMap(cellId, after.f || null);
+  }
+
+  /**
+   * 受控原子单元格补丁。写入前完成幂等、版本、权限、坐标、旧值与公式检查；
+   * 写入阶段不触发计算、持久化或对外通知，失败时完整恢复已触及状态。
+   * @param {{ mutationId: string, sheetId: string, expectedRevision: number, changes: Array<{r:number,c:number,before:Cell|null,after:Cell|null}> }} patch
+   * @returns {{ mutationId: string, previousRevision: number, revision: number, changedCells: number }}
+   */
+  applyCellPatch(patch) {
+    const normalizedPatch = this._validateCellPatch(patch);
+    const signature = JSON.stringify({
+      mutationId: normalizedPatch.mutationId,
+      sheetId: normalizedPatch.sheetId,
+      expectedRevision: normalizedPatch.expectedRevision,
+      changes: normalizedPatch.changes.map(({ r, c, before, after }) => ({ r, c, before, after }))
+    });
+
+    const existingSignature = this._appliedCellPatchSignatures.get(normalizedPatch.mutationId);
+    if (existingSignature !== undefined) {
+      if (existingSignature === signature) return this._appliedCellPatchResults.get(normalizedPatch.mutationId);
+      throw this._cellPatchError('MUTATION_ID_CONFLICT', '相同 mutationId 不能提交不同内容', {
+        mutationId: normalizedPatch.mutationId
+      });
+    }
+
+    if (this.readOnly) {
+      throw this._cellPatchError('READ_ONLY', '工作簿处于只读状态');
+    }
+    if (normalizedPatch.sheetId !== this.activeSheetId) {
+      throw this._cellPatchError('SHEET_MISMATCH', '补丁只能应用到当前活动 Sheet');
+    }
+    const previousRevision = this.getContentRevision();
+    if (normalizedPatch.expectedRevision !== previousRevision) {
+      throw this._cellPatchError('VERSION_CONFLICT', '内容修订号已过期', {
+        expectedRevision: normalizedPatch.expectedRevision,
+        currentRevision: previousRevision
+      });
+    }
+
+    for (const change of normalizedPatch.changes) {
+      if (!this._isPatchValueEqual(change.before, this._persistentCellForPatch(change.currentOldValue))) {
+        throw this._cellPatchError('BEFORE_MISMATCH', `单元格 (${change.r}, ${change.c}) 的旧值前置条件不匹配`, {
+          r: change.r,
+          c: change.c
+        });
+      }
+    }
+
+    const snapshot = this._snapshotCellPatchState(normalizedPatch.changes);
+    let committed = false;
+    this._beginContentMutation('patch');
+    try {
+      this._recordContentMutation({
+        source: 'patch',
+        sheetId: normalizedPatch.sheetId,
+        mutationId: normalizedPatch.mutationId
+      });
+      for (const change of normalizedPatch.changes) this._writeCellPatchCell(change);
+
+      const historyChanges = normalizedPatch.changes.map(change => {
+        const after = change.after === null ? null : { ...change.after };
+        if (after?.f) after.dirty = true;
+        else if (after) after.dirty = false;
+        return {
+          r: change.r,
+          c: change.c,
+          oldValue: change.currentOldValue,
+          newValue: after
+        };
+      });
+      this.history.execute({ type: 'batch-set-cell', changes: historyChanges });
+
+      for (const { r, c } of normalizedPatch.changes) this._markCellChanged(r, c);
+      if (normalizedPatch.changes.some(change => change.after?.f)) {
+        this._maybeStartWasmInitialization();
+      }
+      this.dataVersion++;
+      this._schedulePersistence();
+      this._layoutEngine.markDirty();
+
+      committed = true;
+      this._endContentMutation();
+      const revision = this.getContentRevision();
+      const result = {
+        mutationId: normalizedPatch.mutationId,
+        previousRevision,
+        revision,
+        changedCells: normalizedPatch.changes.length
+      };
+      this._appliedCellPatchSignatures.set(result.mutationId, signature);
+      this._appliedCellPatchResults.set(result.mutationId, { ...result });
+      this.notify();
+      return result;
+    } catch (error) {
+      if (!committed) {
+        this._abortContentMutation();
+        this._restoreCellPatchState(snapshot);
+      }
+      throw error;
+    }
+  }
+
   /**
    * 设置单元格值（带历史记录）
    * @param {number} r - 行索引
@@ -762,6 +1340,10 @@ export class Workbook {
    *   会导致本地与远端永久分叉）。
    */
   setCell(r, c, val, optOldValue = null, options = {}) {
+    return this._withContentMutation('edit', () => this._setCellInternal(r, c, val, optOldValue, options));
+  }
+
+  _setCellInternal(r, c, val, optOldValue, options) {
     const { skipEvent = false, skipHistory = false } = options;
     const oldVal = optOldValue || cloneCell(this.getCell(r, c));
     if (val === null || val === undefined) {
@@ -859,6 +1441,26 @@ export class Workbook {
 
   getRegisteredFunctions() {
     return this._formulaEvaluator.getCustomFunctionNames();
+  }
+
+  /**
+   * 静态检查 AI 计划公式；不执行公式、不读取单元格值、不做循环依赖预演。
+   * @param {string} formula - 以 "=" 开头的公式
+   * @returns {{ valid: boolean, functions: string[], references: Array<Object>, errors: Array<Object> }}
+   */
+  inspectFormula(formula) {
+    return this._formulaEvaluator.inspectFormula(formula);
+  }
+
+  /**
+   * 按目标单元格位置平移公式中的相对 A1 引用。
+   * 检查失败时抛出 FormulaInspectionError，不返回部分翻译结果。
+   * @param {string} formula - 已通过检查的起始公式
+   * @param {{ from: {r: number, c: number}, to: {r: number, c: number} }} options
+   * @returns {string}
+   */
+  translateFormula(formula, options) {
+    return this._formulaEvaluator.translateFormula(formula, options);
   }
 
   _hasFormulasUsingCustomFunction(name) {
@@ -1012,6 +1614,10 @@ export class Workbook {
     }
   }
   _applyJSONImportState(importState) {
+    return this._withoutContentMutations(() => this._applyJSONImportStateInternal(importState));
+  }
+
+  _applyJSONImportStateInternal(importState) {
     this.rowCount = importState.rowCount;
     this.colCount = importState.colCount;
     this.rowHeights = { ...importState.rowHeights };
@@ -1073,6 +1679,10 @@ export class Workbook {
   }
 
   addComment(r, c, text, author = {}) {
+    return this._withContentMutation('comment', () => this._addCommentInternal(r, c, text, author));
+  }
+
+  _addCommentInternal(r, c, text, author) {
     if (!Number.isInteger(r) || !Number.isInteger(c) || r < 0 || c < 0 || !String(text ?? '').trim()) {
       return null;
     }
@@ -1094,10 +1704,15 @@ export class Workbook {
     this._emit(Events.COMMENT_CHANGE, { action: 'add', comment: this._cloneComment(comment) });
     this.notify({ type: 'comment', comment: this._cloneComment(comment) });
     this._persistenceManager?.markWorkbookDirty();
+    this._recordContentMutation();
     return this._cloneComment(comment);
   }
 
   replyComment(id, text, author = {}) {
+    return this._withContentMutation('comment', () => this._replyCommentInternal(id, text, author));
+  }
+
+  _replyCommentInternal(id, text, author) {
     const index = (this.comments || []).findIndex(comment => comment.id === id);
     if (index < 0 || !String(text ?? '').trim()) return null;
     const now = Date.now();
@@ -1116,10 +1731,15 @@ export class Workbook {
     this._emit(Events.COMMENT_CHANGE, { action: 'reply', comment: this._cloneComment(next), message: { ...message } });
     this.notify({ type: 'comment', comment: this._cloneComment(next) });
     this._persistenceManager?.markWorkbookDirty();
+    this._recordContentMutation();
     return this._cloneComment(next);
   }
 
   updateComment(id, patch = {}) {
+    return this._withContentMutation('comment', () => this._updateCommentInternal(id, patch));
+  }
+
+  _updateCommentInternal(id, patch) {
     const index = (this.comments || []).findIndex(comment => comment.id === id);
     if (index < 0) return null;
     const next = this._normalizeComment({ ...this._cloneComment(this.comments[index]), ...patch, updatedAt: Date.now() });
@@ -1128,20 +1748,30 @@ export class Workbook {
     this._emit(Events.COMMENT_CHANGE, { action: 'update', comment: this._cloneComment(next) });
     this.notify({ type: 'comment', comment: this._cloneComment(next) });
     this._persistenceManager?.markWorkbookDirty();
+    this._recordContentMutation();
     return this._cloneComment(next);
   }
 
   removeComment(id, options = {}) {
+    return this._withContentMutation('comment', () => this._removeCommentInternal(id, options));
+  }
+
+  _removeCommentInternal(id, options) {
     const comment = this.getComment(id);
     if (!comment) return false;
     this.comments = this.comments.filter(item => item.id !== id);
     this._emit(Events.COMMENT_CHANGE, { action: 'remove', comment, remote: options.remote === true });
     this.notify({ type: 'comment', comment, remote: options.remote === true });
     this._persistenceManager?.markWorkbookDirty();
+    this._recordContentMutation();
     return true;
   }
 
   upsertComment(comment) {
+    return this._withContentMutation('comment', () => this._upsertCommentInternal(comment));
+  }
+
+  _upsertCommentInternal(comment) {
     const next = this._normalizeComment(comment);
     if (!next) return null;
     const index = (this.comments || []).findIndex(item => item.id === next.id);
@@ -1151,6 +1781,7 @@ export class Workbook {
     this._emit(Events.COMMENT_CHANGE, { action: index < 0 ? 'add' : 'update', comment: this._cloneComment(next), remote: true });
     this.notify({ type: 'comment', comment: this._cloneComment(next), remote: true });
     this._persistenceManager?.markWorkbookDirty();
+    this._recordContentMutation();
     return this._cloneComment(next);
   }
 
@@ -1170,6 +1801,7 @@ export class Workbook {
       return result;
     }, []);
     this._persistenceManager?.markWorkbookDirty();
+    this._recordContentMutation({ source: 'comment' });
   }
   _restoreJSONImportState(previousState) {
     this._applyJSONImportState(previousState);
@@ -1219,6 +1851,10 @@ export class Workbook {
   }
 
   fromJSON(json) {
+    return this._withContentMutation('import', () => this._fromJSONInternal(json));
+  }
+
+  _fromJSONInternal(json) {
     let previousState;
     let previousSheets;
     let previousActiveSheetIndex;
@@ -1242,6 +1878,7 @@ export class Workbook {
       this.history.clear();
       this._layoutEngine.markDirty();
       this._persistenceManager?.markWorkbookDirty();
+      this._recordContentMutation({ allCells: true });
       this.notify();
     } catch (e) {
       if (previousState) this._restoreJSONImportState(previousState);
@@ -1273,7 +1910,9 @@ export class Workbook {
     });
   }
   applyCommand(cmd, isUndo) {
-    this._commandExecutor.execute(cmd, isUndo);
+    this._withContentMutation(isUndo ? 'undo' : 'redo', () => {
+      this._commandExecutor.execute(cmd, isUndo);
+    });
   }
   undo() {
     this.history.undo();
@@ -1295,6 +1934,10 @@ export class Workbook {
    * @param {number} w - 宽度（像素）
    */
   setColWidth(c, w) {
+    return this._withContentMutation('structure', () => this._setColWidthInternal(c, w));
+  }
+
+  _setColWidthInternal(c, w) {
     const oldW = this.getColWidth(c);
     this.history.execute({
       type: 'set-col-width',
@@ -1327,6 +1970,10 @@ export class Workbook {
    * @param {number} h - 高度（像素）
    */
   setRowHeight(r, h) {
+    return this._withContentMutation('structure', () => this._setRowHeightInternal(r, h));
+  }
+
+  _setRowHeightInternal(r, h) {
     const oldH = this.getRowHeight(r);
     this.history.execute({
       type: 'set-row-height',
@@ -1351,6 +1998,10 @@ export class Workbook {
    * @param {number} c - 冻结列数
    */
   setFreeze(r, c) {
+    return this._withContentMutation('structure', () => this._setFreezeInternal(r, c));
+  }
+
+  _setFreezeInternal(r, c) {
     this.freeze = { r, c };
     // 冻结区域变化，标记缓存为脏
     this._layoutEngine.markFrozenDirty();
@@ -1358,6 +2009,10 @@ export class Workbook {
     this.notify();
   }
   moveColumn(fromC, toC) {
+    return this._withContentMutation('structure', () => this._moveColumnInternal(fromC, toC));
+  }
+
+  _moveColumnInternal(fromC, toC) {
     if (fromC === toC) return;
     const cmd = {
       type: 'move-column',
@@ -1420,12 +2075,15 @@ export class Workbook {
    */
   _applyBatchRange(mutatorFn) {
     this.history.startBatch();
-    const changes = mutatorFn();
-    if (changes.length > 0) {
-      this.history.execute({ type: 'batch-set-cell', changes });
-      this.notify();
+    try {
+      const changes = mutatorFn();
+      if (changes.length > 0) {
+        this.history.execute({ type: 'batch-set-cell', changes });
+        this.notify();
+      }
+    } finally {
+      this.history.endBatch();
     }
-    this.history.endBatch();
   }
 
   // mergeCells 由 _setupDynamicAccessors 动态生成
@@ -1677,6 +2335,8 @@ export class Workbook {
 
     // 清理数据
     this._dataMatrix.clear();
+    this._appliedCellPatchResults?.clear();
+    this._appliedCellPatchSignatures?.clear();
     this.merges = [];
     this.mergeMap = {};
 

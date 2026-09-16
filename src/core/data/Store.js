@@ -577,14 +577,18 @@ export class StoreManager {
   /**
    * 创建 StoreManager 实例
    * @param {Object} stores - Store 实例映射
+   * @param {{onBatchStart?: Function, onBatchEnd?: Function}} [options]
    */
-  constructor(stores = {}) {
+  constructor(stores = {}, options = {}) {
     /** @type {Map<string, Store>} Store 映射 */
     this._stores = new Map();
     /** @type {Set<Function>} 全局监听器 */
     this._globalListeners = new Set();
     /** @type {Map<string, Function>} Store 取消订阅句柄 */
     this._unsubscribes = new Map();
+    this._batchDepth = 0;
+    this._onBatchStart = options.onBatchStart;
+    this._onBatchEnd = options.onBatchEnd;
 
     Object.entries(stores).forEach(([name, store]) => {
       this.addStore(name, store);
@@ -639,6 +643,8 @@ export class StoreManager {
    * 开始批量更新所有 Store
    */
   beginBatch() {
+    this._batchDepth++;
+    if (this._batchDepth === 1) this._onBatchStart?.();
     this._stores.forEach(store => store.beginBatch());
   }
  
@@ -646,7 +652,13 @@ export class StoreManager {
    * 结束批量更新所有 Store
    */
   endBatch() {
-    this._stores.forEach(store => store.endBatch());
+    if (this._batchDepth === 0) return;
+    try {
+      this._stores.forEach(store => store.endBatch());
+    } finally {
+      this._batchDepth--;
+      if (this._batchDepth === 0) this._onBatchEnd?.();
+    }
   }
  
   /**

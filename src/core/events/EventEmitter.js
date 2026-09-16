@@ -11,6 +11,8 @@
 export const Events = {
   /** 单元格内容变化 */
   CELL_CHANGE: 'cell-change',
+  /** 一个内容修改批次已完成 */
+  MUTATION_COMMITTED: 'mutation-committed',
   /** 选区变化 */
   SELECTION_CHANGE: 'selection-change',
   /** 数据加载完成 */

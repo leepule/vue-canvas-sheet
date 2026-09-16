@@ -35,6 +35,8 @@
  * @property {() => number|null}             getPersistTimer       — 获取持久化定时器 ID
  * @property {(t: number) => void}           setPersistTimer       — 设置持久化定时器 ID
  * @property {(...args: any[]) => void}      notify                — UI 通知
+ * @property {(source: string, operation: Function) => any} [withMutation]
+ * @property {(change: Object) => void} [recordMutation]
  */
 
 import { cellKey } from './data/CellKey.js';
@@ -46,6 +48,7 @@ export class PersistenceManager {
   constructor(deps) {
     /** @type {PersistenceManagerDeps} */
     this.d = deps;
+    this._withMutation = deps.withMutation || ((_source, operation) => operation());
     this._configRevision = deps.getStorage() ? 1 : 0;
     this._persistedConfigRevision = 0;
     this._workbookRevision = 0;
@@ -113,21 +116,26 @@ export class PersistenceManager {
       const workbookSnapshot = await storage.getMetadata(`workbook-${sheetId}`);
       if (workbookSnapshot && Array.isArray(workbookSnapshot.sheets) &&
           typeof this.d.applyWorkbookSnapshot === 'function') {
-        const pendingDirtyCells = this.d.getDirtyCells();
-        if (pendingDirtyCells) pendingDirtyCells.clear();
-        this.d.applyWorkbookSnapshot(workbookSnapshot);
-        this._persistedWorkbookRevision = this._workbookRevision;
-        this._persistedConfigRevision = this._configRevision;
-        this._hasPersistedWorkbookSnapshot = true;
-        this.d.markOffsetsDirty();
-        this.d.notify();
-        return true;
+        return this._withMutation('import', () => {
+          const pendingDirtyCells = this.d.getDirtyCells();
+          if (pendingDirtyCells) pendingDirtyCells.clear();
+          this.d.applyWorkbookSnapshot(workbookSnapshot);
+          this._persistedWorkbookRevision = this._workbookRevision;
+          this._persistedConfigRevision = this._configRevision;
+          this._hasPersistedWorkbookSnapshot = true;
+          this.d.markOffsetsDirty();
+          this.d.notify();
+          return true;
+        });
       }
     }
 
     const sheetData = await storage.exportSheet(sheetId);
     if (!sheetData || !sheetData.config) return false;
+    return this._withMutation('import', () => this._applyStoredSheet(sheetData));
+  }
 
+  _applyStoredSheet(sheetData) {
     const { config, data } = sheetData;
     const pendingDirtyCells = this.d.getDirtyCells();
     if (pendingDirtyCells) pendingDirtyCells.clear();
@@ -161,6 +169,7 @@ export class PersistenceManager {
     }
 
     this.d.markOffsetsDirty();
+    this.d.recordMutation?.({ allCells: true });
     this.d.notify();
     return true;
   }

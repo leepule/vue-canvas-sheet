@@ -13,6 +13,8 @@
  * @property {(r: number, c: number) => void}          markCellChanged   — 标记单元格变更
  * @property {(...args: any[]) => void}                emit              — 事件发射
  * @property {(...args: any[]) => void}                notify            — UI 通知
+ * @property {(source: string, operation: Function) => any} [withMutation]
+ * @property {(change: Object) => void} [recordMutation]
  */
 
 import { cloneCell } from './utils/Clipboard.js';
@@ -24,9 +26,14 @@ export class StyleManager {
   constructor(deps) {
     /** @type {StyleManagerDeps} */
     this.d = deps;
+    this._withMutation = deps.withMutation || ((_source, operation) => operation());
   }
 
   setStyle(range, style) {
+    return this._withMutation('style', () => this._setStyle(range, style));
+  }
+
+  _setStyle(range, style) {
     const changes = [];
     this.d.iterateRange(range, (r, c, cell) => {
       const oldVal = cloneCell(cell);
@@ -47,6 +54,10 @@ export class StyleManager {
   }
 
   setBorder(range, type, color, style = 'solid') {
+    return this._withMutation('style', () => this._setBorder(range, type, color, style));
+  }
+
+  _setBorder(range, type, color, style) {
     if (!range) return;
     const changes = [];
     const getStyle = (r, c) => {
@@ -116,6 +127,10 @@ export class StyleManager {
   }
 
   setFormat(range, fmt) {
+    return this._withMutation('style', () => this._setFormat(range, fmt));
+  }
+
+  _setFormat(range, fmt) {
     if (!range) return;
     const changes = [];
     this.d.iterateRange(range, (r, c, cell) => {
@@ -135,6 +150,10 @@ export class StyleManager {
   }
 
   setDecimals(range, delta) {
+    return this._withMutation('style', () => this._setDecimals(range, delta));
+  }
+
+  _setDecimals(range, delta) {
     if (!range) return;
     const changes = [];
     this.d.iterateRange(range, (r, c, cell) => {
@@ -157,6 +176,10 @@ export class StyleManager {
   }
 
   clearContent(range) {
+    return this._withMutation('edit', () => this._clearContent(range));
+  }
+
+  _clearContent(range) {
     if (!range) return;
     const changes = [];
     this.d.iterateRange(range, (r, c, cell) => {
@@ -178,6 +201,7 @@ export class StyleManager {
           delete targetCell.f;
           delete targetCell.m;
           delete targetCell.dirty;
+          this.d.recordMutation?.({ r, c });
 
           this.d.syncSharedValue(r, c, null);
           this.d.updateDependencyMap(cellId, null);

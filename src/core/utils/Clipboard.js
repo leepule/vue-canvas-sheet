@@ -61,11 +61,13 @@ export class ClipboardManager {
      *   getColCount: () => number,
      *   setCellData: (r: number, c: number, val: any) => void,
      *   recordHistory: (cmd: any) => void,
-     *   notify: (data?: any) => void
+     *   notify: (data?: any) => void,
+     *   withMutation?: (source: string, operation: Function) => any
      * }} deps
      */
     constructor(deps) {
         this.d = deps;
+        this._withMutation = deps.withMutation || ((_source, operation) => operation());
         this.clipboardData = [];
     }
 
@@ -83,6 +85,10 @@ export class ClipboardManager {
     }
 
 	    paste(range) {
+	        return this._withMutation('edit', () => this._paste(range));
+	    }
+
+	    _paste(range) {
 	        if (!this.clipboardData || this.clipboardData.length === 0) return;
 	        const changes = [];
         const startR = range.s.r;

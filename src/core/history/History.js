@@ -28,16 +28,17 @@ const DEFAULT_MAX_DEPTH = 100;
 export class HistoryManager {
   /**
    * 创建历史管理器
-   * @param {{ applyCommand: (cmd: HistoryCommand, isUndo: boolean) => void }} deps
+   * @param {{ applyCommand: (cmd: HistoryCommand, isUndo: boolean) => void, onBatchStart?: Function, onBatchEnd?: Function }} deps
    */
   constructor(deps) {
-    /** @type {{ applyCommand: (cmd: HistoryCommand, isUndo: boolean) => void }} */
+    /** @type {{ applyCommand: (cmd: HistoryCommand, isUndo: boolean) => void, onBatchStart?: Function, onBatchEnd?: Function }} */
     this.d = deps;
     this._maxDepth = DEFAULT_MAX_DEPTH;
     // 容量自动淘汰：push 超出 maxDepth 时自动丢弃最旧条目（替代旧的 shift）
     this.undoStack = new RingBuffer(this._maxDepth);
     this.redoStack = new RingBuffer(this._maxDepth);
     this.batching = false;
+    this._batchDepth = 0;
     this.batchCmds = [];
     
     // 操作合并配置
@@ -169,24 +170,31 @@ export class HistoryManager {
    * 开始批量操作
    */
   startBatch() {
+    this._batchDepth++;
+    if (this._batchDepth > 1) return;
     this.batching = true;
     this.batchCmds = [];
     // 批量操作期间禁用合并
     this.lastOpTime = 0;
+    this.d.onBatchStart?.();
   }
 
   /**
    * 结束批量操作
    */
   endBatch() {
+    if (this._batchDepth === 0) return;
+    this._batchDepth--;
+    if (this._batchDepth > 0) return;
     this.batching = false;
-    if (this.batchCmds.length > 0) {
-      const batchCmd = {
-        type: 'batch',
-        cmds: this.batchCmds
-      };
-      this.execute(batchCmd);
-      this.batchCmds = [];
+    const cmds = this.batchCmds;
+    this.batchCmds = [];
+    try {
+      if (cmds.length > 0) {
+        this.execute({ type: 'batch', cmds });
+      }
+    } finally {
+      this.d.onBatchEnd?.();
     }
   }
 
@@ -240,6 +248,7 @@ export class HistoryManager {
     this.optimizer.trackClearStack(this.redoStack);
     this.undoStack.clear();
     this.redoStack.clear();
+    this.batchCmds = [];
     this.lastOpTime = 0;
     this.lastOpType = null;
     this.lastOpCell = null;

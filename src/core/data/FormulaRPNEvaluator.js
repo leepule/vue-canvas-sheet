@@ -54,6 +54,14 @@ const FUNCTION_TYPES = {
 const BUILT_IN_FUNCTION_NAMES = new Set(Object.values(FUNCTION_TYPES).flat());
 const CUSTOM_FUNCTION_NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 const MAX_CUSTOM_FUNCTION_NAME_LENGTH = 64;
+const MAX_FORMULA_ROWS = 1048576;
+const MAX_FORMULA_COLS = 16384;
+
+/** AI 计划 M1 允许的确定性函数；其余内置函数逐项补齐测试后再开放。 */
+const AI_ALLOWED_FUNCTION_NAMES = new Set([
+  'SUM', 'AVERAGE', 'MIN', 'MAX', 'COUNT', 'ROUND', 'IF'
+]);
+const AI_VOLATILE_FUNCTION_NAMES = new Set(['NOW', 'TODAY']);
 
 const ErrorCodes = {
   FORMULA_ERROR:      'FORMULA_ERROR',
@@ -63,7 +71,13 @@ const ErrorCodes = {
   INVALID_ARGUMENT:   'INVALID_ARGUMENT',
   VALUE_ERROR:        'VALUE_ERROR',
   NUM_ERROR:          'NUM_ERROR',
-  SYNTAX_ERROR:       'SYNTAX_ERROR'
+  SYNTAX_ERROR:       'SYNTAX_ERROR',
+  CROSS_SHEET_REFERENCE: 'CROSS_SHEET_REFERENCE',
+  UNSUPPORTED_REFERENCE: 'UNSUPPORTED_REFERENCE',
+  UNSUPPORTED_FUNCTION: 'UNSUPPORTED_FUNCTION',
+  VOLATILE_FUNCTION:    'VOLATILE_FUNCTION',
+  CUSTOM_FUNCTION:      'CUSTOM_FUNCTION',
+  REFERENCE_OUT_OF_RANGE: 'REFERENCE_OUT_OF_RANGE'
 };
 
 // ═══════════════════════════════════════════════════════════
@@ -117,6 +131,20 @@ class FormulaSyntaxError extends Error {
   }
 }
 
+/**
+ * AI 公式预检失败异常。检查接口返回结构化错误；翻译接口必须 fail-fast，
+ * 避免调用方拿到半条公式后继续生成补丁。
+ */
+class FormulaInspectionError extends Error {
+  constructor(issue) {
+    super(issue.message);
+    this.name = 'FormulaInspectionError';
+    this.code = issue.code;
+    this.pos = typeof issue.pos === 'number' ? issue.pos : -1;
+    this.issue = issue;
+  }
+}
+
 function colStrToIndex(str) {
   let val = 0;
   for (let i = 0; i < str.length; i++) {
@@ -149,6 +177,24 @@ function refToRC(ref) {
 function rangeToRC(range) {
   const parts = range.split(':');
   return { start: refToRC(parts[0]), end: refToRC(parts[1]) };
+}
+
+function isCellRef(ref) {
+  return Number.isInteger(ref?.r) && Number.isInteger(ref?.c) &&
+    ref.r >= 0 && ref.c >= 0 &&
+    ref.r < MAX_FORMULA_ROWS && ref.c < MAX_FORMULA_COLS;
+}
+
+function createInspectionIssue(code, message, pos = -1) {
+  return { code, message, pos };
+}
+
+function rcToRef(ref) {
+  return `${indexToColStr(ref.c)}${ref.r + 1}`;
+}
+
+function translateRef(ref, rowDelta, columnDelta) {
+  return { r: ref.r + rowDelta, c: ref.c + columnDelta };
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -378,6 +424,284 @@ export class FormulaRPNEvaluator {
     } catch {
       return false;
     }
+  }
+
+  _validateFormulaTokenGrammar(tokens) {
+    let index = 0;
+
+    const issue = (message, token) => createInspectionIssue(
+      ErrorCodes.SYNTAX_ERROR,
+      message,
+      token ? token.pos + 1 : 1
+    );
+
+    const parsePrimary = () => {
+      const token = tokens[index];
+      if (!token) throw issue('公式在需要值或引用处结束');
+
+      if (token.type === 'fn') {
+        index++;
+        const left = tokens[index];
+        if (!left || left.type !== 'lparen') throw issue(`函数 ${token.value} 后必须紧跟 "("`, left);
+        index++;
+
+        const right = tokens[index];
+        if (right?.type === 'rparen') {
+          index++;
+          return;
+        }
+
+        for (;;) {
+          parseExpression();
+          const next = tokens[index];
+          if (next?.type === 'comma') {
+            index++;
+            continue;
+          }
+          if (next?.type === 'rparen') {
+            index++;
+            return;
+          }
+          throw issue('函数参数必须以 "," 分隔并以 ")" 结束', next);
+        }
+      }
+
+      if (token.type === 'lparen') {
+        index++;
+        parseExpression();
+        const right = tokens[index];
+        if (!right || right.type !== 'rparen') throw issue('括号表达式未闭合', right || token);
+        index++;
+        return;
+      }
+
+      if (token.type === 'op' && (token.value === '+' || token.value === '-')) {
+        index++;
+        parsePrimary();
+        return;
+      }
+
+      if (
+        token.type === 'cell' || token.type === 'range' ||
+        token.type === 'string' || token.type === 'boolean' || token.type === 'number'
+      ) {
+        index++;
+        return;
+      }
+
+      throw issue(`此处不能出现 "${token.value}"`, token);
+    };
+
+    const parseExpression = () => {
+      parsePrimary();
+      for (;;) {
+        const token = tokens[index];
+        if (token?.type !== 'op' && token?.type !== 'compare') return;
+        index++;
+        parsePrimary();
+      }
+    };
+
+    try {
+      parseExpression();
+      if (index !== tokens.length) {
+        throw issue('公式包含多余内容', tokens[index]);
+      }
+      return null;
+    } catch (error) {
+      if (error?.code === ErrorCodes.SYNTAX_ERROR) return error.issue || error;
+      throw error;
+    }
+  }
+
+  _appendReferenceIssues(tokens, errors) {
+    for (const token of tokens) {
+      if (token.type === 'cell') {
+        if (!isCellRef(refToRC(token.value))) {
+          errors.push(createInspectionIssue(
+            ErrorCodes.REFERENCE_OUT_OF_RANGE,
+            `引用 ${token.value} 超出当前表格边界`,
+            token.pos + 1
+          ));
+        }
+      } else if (token.type === 'range') {
+        const { start, end } = rangeToRC(token.value);
+        if (!isCellRef(start) || !isCellRef(end)) {
+          errors.push(createInspectionIssue(
+            ErrorCodes.REFERENCE_OUT_OF_RANGE,
+            `范围 ${token.value} 超出当前表格边界`,
+            token.pos + 1
+          ));
+        }
+      }
+    }
+  }
+
+  _appendFunctionIssues(tokens, errors) {
+    for (const token of tokens) {
+      if (token.type !== 'fn') continue;
+      const name = token.value;
+      if (this._customFunctions.has(name)) {
+        errors.push(createInspectionIssue(
+          ErrorCodes.CUSTOM_FUNCTION,
+          `AI 计划不允许使用自定义函数 ${name}`,
+          token.pos + 1
+        ));
+      } else if (AI_VOLATILE_FUNCTION_NAMES.has(name)) {
+        errors.push(createInspectionIssue(
+          ErrorCodes.VOLATILE_FUNCTION,
+          `AI 计划不允许使用随时间变化的函数 ${name}`,
+          token.pos + 1
+        ));
+      } else if (!AI_ALLOWED_FUNCTION_NAMES.has(name)) {
+        errors.push(createInspectionIssue(
+          BUILT_IN_FUNCTION_NAMES.has(name)
+            ? ErrorCodes.UNSUPPORTED_FUNCTION
+            : ErrorCodes.UNKNOWN_FUNCTION,
+          BUILT_IN_FUNCTION_NAMES.has(name)
+            ? `AI 计划暂不支持函数 ${name}`
+            : `未知函数 ${name}`,
+          token.pos + 1
+        ));
+      }
+    }
+  }
+
+  inspectFormula(formula) {
+    const functions = [];
+    const references = [];
+    const errors = [];
+
+    if (typeof formula !== 'string' || !formula.startsWith('=') || formula.length === 1) {
+      return {
+        valid: false,
+        functions,
+        references,
+        errors: [createInspectionIssue(
+          ErrorCodes.SYNTAX_ERROR,
+          '公式必须是长度大于 1 且以 "=" 开头的字符串'
+        )]
+      };
+    }
+
+    const expr = formula.substring(1);
+    const crossSheetPos = expr.indexOf('!');
+    if (crossSheetPos >= 0) {
+      return {
+        valid: false,
+        functions,
+        references,
+        errors: [createInspectionIssue(
+          ErrorCodes.CROSS_SHEET_REFERENCE,
+          'AI 计划暂不支持跨 Sheet 引用',
+          crossSheetPos + 1
+        )]
+      };
+    }
+
+    const absoluteRefPos = expr.indexOf('$');
+    if (absoluteRefPos >= 0) {
+      return {
+        valid: false,
+        functions,
+        references,
+        errors: [createInspectionIssue(
+          ErrorCodes.UNSUPPORTED_REFERENCE,
+          'AI 计划暂不支持绝对引用或混合引用',
+          absoluteRefPos + 1
+        )]
+      };
+    }
+
+    let tokens;
+    try {
+      tokens = this.parser.tokenize(expr);
+      this.parser.shuntingYard(tokens);
+      const grammarIssue = this._validateFormulaTokenGrammar(tokens);
+      if (grammarIssue) errors.push(grammarIssue);
+    } catch (error) {
+      errors.push(error instanceof FormulaSyntaxError
+        ? createInspectionIssue(error.code, error.message, error.pos + 1)
+        : createInspectionIssue(ErrorCodes.SYNTAX_ERROR, String(error?.message || error)));
+    }
+
+    if (tokens) {
+      for (const token of tokens) {
+        if (token.type === 'fn' && !functions.includes(token.value)) functions.push(token.value);
+        if (token.type === 'cell') {
+          const { r, c } = refToRC(token.value);
+          references.push({ type: 'cell', ref: token.value, r, c, pos: token.pos + 1, end: token.pos + token.value.length + 1 });
+        } else if (token.type === 'range') {
+          const { start, end: endRef } = rangeToRC(token.value);
+          references.push({
+            type: 'range',
+            ref: token.value,
+            start,
+            endRef,
+            pos: token.pos + 1,
+            end: token.pos + token.value.length + 1
+          });
+        }
+      }
+      this._appendReferenceIssues(tokens, errors);
+      this._appendFunctionIssues(tokens, errors);
+    }
+
+    return { valid: errors.length === 0, functions, references, errors };
+  }
+
+  translateFormula(formula, { from, to } = {}) {
+    const inspection = this.inspectFormula(formula);
+    if (!inspection.valid) {
+      throw new FormulaInspectionError(inspection.errors[0]);
+    }
+    if (!isCellRef(from) || !isCellRef(to)) {
+      throw new FormulaInspectionError(createInspectionIssue(
+        ErrorCodes.REFERENCE_OUT_OF_RANGE,
+        '平移起点和终点必须是有效整数坐标 { r, c }'
+      ));
+    }
+
+    const rowDelta = to.r - from.r;
+    const columnDelta = to.c - from.c;
+    const tokens = this.parser.tokenize(formula.substring(1));
+    let translated = formula;
+
+    for (let i = tokens.length - 1; i >= 0; i--) {
+      const token = tokens[i];
+      if (token.type === 'cell') {
+        const target = translateRef(refToRC(token.value), rowDelta, columnDelta);
+        if (!isCellRef(target)) {
+          throw new FormulaInspectionError(createInspectionIssue(
+            ErrorCodes.REFERENCE_OUT_OF_RANGE,
+            `引用 ${token.value} 平移后超出表格边界`,
+            token.pos + 1
+          ));
+        }
+        const start = token.pos + 1;
+        translated = translated.slice(0, start) + rcToRef(target) + translated.slice(start + token.value.length);
+      } else if (token.type === 'range') {
+        const range = rangeToRC(token.value);
+        const targetStart = translateRef(range.start, rowDelta, columnDelta);
+        const targetEnd = translateRef(range.end, rowDelta, columnDelta);
+        if (!isCellRef(targetStart) || !isCellRef(targetEnd)) {
+          throw new FormulaInspectionError(createInspectionIssue(
+            ErrorCodes.REFERENCE_OUT_OF_RANGE,
+            `范围 ${token.value} 平移后超出表格边界`,
+            token.pos + 1
+          ));
+        }
+        const replacement = `${rcToRef(targetStart)}:${rcToRef(targetEnd)}`;
+        const start = token.pos + 1;
+        translated = translated.slice(0, start) + replacement + translated.slice(start + token.value.length);
+      }
+    }
+
+    const translatedInspection = this.inspectFormula(translated);
+    if (!translatedInspection.valid) {
+      throw new FormulaInspectionError(translatedInspection.errors[0]);
+    }
+    return translated;
   }
 
   // ─── 单元格访问 ─────────────────────────────────────────
@@ -918,5 +1242,6 @@ export class FormulaRPNEvaluator {
 // ─── 便捷导出 ─────────────────────────────────────────────
 
 export { FormulaParser, ErrorCodes, FUNCTION_TYPES, PATTERNS, PRECEDENCE,
-         colStrToIndex, indexToColStr, refToRC, rangeToRC, createError, FormulaSyntaxError };
+         colStrToIndex, indexToColStr, refToRC, rangeToRC, createError,
+         FormulaSyntaxError, FormulaInspectionError };
 export default FormulaRPNEvaluator;

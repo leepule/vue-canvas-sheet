@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "kind": "plan",
+  "runId": "run-123",
+  "documentId": "doc-123",
+  "documentEpoch": "epoch-123",
+  "sheetId": "sheet-1",
+  "baseContentRevision": 17,
+  "allowedReadRanges": [
+    { "s": { "r": 0, "c": 0 }, "e": { "r": 3, "c": 1 } }
+  ],
+  "allowedWriteRanges": [
+    { "s": { "r": 1, "c": 2 }, "e": { "r": 3, "c": 2 } }
+  ],
+  "operations": [
+    {
+      "type": "fill_formula",
+      "seedCell": { "r": 1, "c": 2 },
+      "seedFormula": "=A2*B2",
+      "targetRange": {
+        "s": { "r": 1, "c": 2 },
+        "e": { "r": 3, "c": 2 }
+      }
+    }
+  ],
+  "warnings": []
+}

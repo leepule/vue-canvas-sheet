@@ -11,6 +11,7 @@
  * @property {() => HistoryManager}             getHistory     — 历史管理器
  * @property {(...args: any[]) => void}         emit           — 事件发射
  * @property {(...args: any[]) => void}         notify         — UI 通知
+ * @property {(source: string, operation: Function) => any} [withMutation]
  */
 
 import { cloneCell, cloneRange } from './utils/Clipboard.js';
@@ -22,6 +23,7 @@ export class MergeManager {
   constructor(deps) {
     /** @type {MergeManagerDeps} */
     this.d = deps;
+    this._withMutation = deps.withMutation || ((_source, operation) => operation());
     this._mergeRowIndex = new Map();
     this._mergeIndexDirty = true;
   }
@@ -73,6 +75,10 @@ export class MergeManager {
   }
 
   addMerge(range) {
+    return this._withMutation('structure', () => this._addMerge(range));
+  }
+
+  _addMerge(range) {
     const merges = [...this.d.getMerges(), range];
     this.d.setMerges(merges);
     const mergeMap = { ...this.d.getMergeMap() };
@@ -86,6 +92,10 @@ export class MergeManager {
   }
 
   removeMerge(range) {
+    return this._withMutation('structure', () => this._removeMerge(range));
+  }
+
+  _removeMerge(range) {
     const merges = this.d.getMerges();
     const mergeMap = { ...this.d.getMergeMap() };
     const toRemove = merges.filter(m => {
@@ -113,26 +123,37 @@ export class MergeManager {
 
   mergeCells(range) {
     if (range.s.r === range.e.r && range.s.c === range.e.c) return;
+    return this._withMutation('structure', () => this._mergeCells(range));
+  }
+
+  _mergeCells(range) {
     this.d.getHistory().startBatch();
-    const changes = [];
-    this.d.iterateRange(range, (r, c, cell) => {
-      if (r === range.s.r && c === range.s.c) return;
-      const oldVal = cell ? cloneCell(cell) : null;
-      if (oldVal) {
-        this.d.getDataMatrix().delete(r, c);
-        changes.push({ r, c, oldValue: oldVal, newValue: null });
+    try {
+      const changes = [];
+      this.d.iterateRange(range, (r, c, cell) => {
+        if (r === range.s.r && c === range.s.c) return;
+        const oldVal = cell ? cloneCell(cell) : null;
+        if (oldVal) {
+          this.d.getDataMatrix().delete(r, c);
+          changes.push({ r, c, oldValue: oldVal, newValue: null });
+        }
+      });
+      if (changes.length > 0) {
+        this.d.getHistory().execute({ type: 'batch-set-cell', changes });
       }
-    });
-    if (changes.length > 0) {
-      this.d.getHistory().execute({ type: 'batch-set-cell', changes });
+      const rr = cloneRange(range);
+      this.addMerge(rr);
+      this.d.getHistory().execute({ type: 'merge', range: rr });
+    } finally {
+      this.d.getHistory().endBatch();
     }
-    const rr = cloneRange(range);
-    this.addMerge(rr);
-    this.d.getHistory().execute({ type: 'merge', range: rr });
-    this.d.getHistory().endBatch();
   }
 
   unmergeCells(range) {
+    return this._withMutation('structure', () => this._unmergeCells(range));
+  }
+
+  _unmergeCells(range) {
     const sel = range;
     const toRemove = this.d.getMerges().filter(m => {
       const intersects = !(sel.e.c < m.s.c || sel.s.c > m.e.c || sel.e.r < m.s.r || sel.s.r > m.e.r);
@@ -140,11 +161,14 @@ export class MergeManager {
     });
     if (toRemove.length > 0) {
       this.d.getHistory().startBatch();
-      toRemove.forEach(m => {
-        this.removeMerge(m);
-        this.d.getHistory().execute({ type: 'unmerge', range: m });
-      });
-      this.d.getHistory().endBatch();
+      try {
+        toRemove.forEach(m => {
+          this.removeMerge(m);
+          this.d.getHistory().execute({ type: 'unmerge', range: m });
+        });
+      } finally {
+        this.d.getHistory().endBatch();
+      }
     }
   }
 

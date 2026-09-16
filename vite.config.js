@@ -68,6 +68,11 @@ export default defineConfig(({ command }) => ({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./tests/setup.js'],
+    server: {
+      deps: {
+        inline: ['@lucide/vue']
+      }
+    },
     include: ['tests/**/*.spec.js', 'tests/**/*.test.js'],
     testTimeout: 30000,
     coverage: {

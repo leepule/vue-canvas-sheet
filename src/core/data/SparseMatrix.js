@@ -57,6 +57,8 @@ export class SparseMatrix {
     this._bounds = { minRow: 0, maxRow: -1, minCol: 0, maxCol: -1 };
     this._boundsDirty = false;
     this.onDeleteCell = options.onDeleteCell || null;
+    this._onMutation = options.onMutation || null;
+    this._withMutation = options.withMutation || (operation => operation());
 
     this._stats = {
       compactCount: 0,
@@ -127,6 +129,7 @@ export class SparseMatrix {
     }
     
     this._version++;
+    this._onMutation?.({ r: row, c: col });
   }
 
   _updateColIndex(col, row, isAdd) {
@@ -231,7 +234,8 @@ export class SparseMatrix {
       this._bounds = { minRow: 0, maxRow: -1, minCol: 0, maxCol: -1 };
       this._boundsDirty = false;
     }
-    
+    this._onMutation?.({ r: row, c: col });
+
     return true;
   }
 
@@ -287,7 +291,8 @@ export class SparseMatrix {
     this._size -= count;
     this._version++;
     this._boundsDirty = true;
-    
+    this._onMutation?.({ allCells: true });
+
     return count;
   }
 
@@ -323,11 +328,16 @@ export class SparseMatrix {
     this._size -= count;
     this._version++;
     this._boundsDirty = true;
+    this._onMutation?.({ allCells: true });
 
     return count;
   }
 
   deleteRowRange(startRow, endRow = -1) {
+    return this._withMutation(() => this._deleteRowRange(startRow, endRow));
+  }
+
+  _deleteRowRange(startRow, endRow) {
     let count = 0;
     const rowsToDelete = [];
     for (const row of this._rows.keys()) {
@@ -342,6 +352,10 @@ export class SparseMatrix {
   }
 
   deleteColRange(startCol, endCol = -1) {
+    return this._withMutation(() => this._deleteColRange(startCol, endCol));
+  }
+
+  _deleteColRange(startCol, endCol) {
     let count = 0;
     const colsToDelete = [];
     for (const col of this._colIndex.keys()) {
@@ -460,6 +474,7 @@ export class SparseMatrix {
   }
 
   clear() {
+    const hadCells = this._size > 0;
     if (this.onDeleteCell) {
       this.forEach((r, c, cell) => {
         this.onDeleteCell(cell, r, c);
@@ -473,6 +488,7 @@ export class SparseMatrix {
     this._bounds = { minRow: 0, maxRow: -1, minCol: 0, maxCol: -1 };
     this._boundsDirty = false;
     this._stats = { compactCount: 0, fullCount: 0, memorySaved: 0 };
+    if (hadCells) this._onMutation?.({ allCells: true });
   }
 
   getStats() {
@@ -557,6 +573,7 @@ export class SparseMatrix {
     // 批量更新 size 和 version
     this._size += sizeDelta;
     this._version++;
+    this._onMutation?.({ allCells: true });
   }
 
   toObject(useCompactKey = true) {
@@ -569,6 +586,10 @@ export class SparseMatrix {
   }
 
   fromObject(data, keyParser) {
+    return this._withMutation(() => this._fromObject(data, keyParser));
+  }
+
+  _fromObject(data, keyParser) {
     this.clear();
     for (const key of Object.keys(data)) {
       const { r, c } = keyParser(key);
@@ -593,6 +614,10 @@ export class SparseMatrix {
   }
 
   fromJSON(json) {
+    return this._withMutation(() => this._fromJSON(json));
+  }
+
+  _fromJSON(json) {
     this.clear();
     if (json.cells && Array.isArray(json.cells)) {
       for (const item of json.cells) {
@@ -608,6 +633,8 @@ export class SparseMatrix {
  * 
  * @param {Object} options - 配置选项
  * @param {Function} options.onDeleteCell - 删除回调
+ * @param {Function} [options.onMutation] - 内容写入通知，不监听单元格计算缓存的原地回填
+ * @param {Function} [options.withMutation] - 同步复合操作的批次边界
  * @returns {SparseMatrix}
  */
 export function createSparseMatrix(options = {}) {

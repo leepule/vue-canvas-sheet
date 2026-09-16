@@ -30,7 +30,13 @@ import {
   createAutoSavePlugin as createPluginsAutoSavePlugin,
   createRealtimeCollaborationPlugin
 } from 'vue-canvas-sheet/plugins';
-import type { FormulaFunction, PersistenceStorage } from 'vue-canvas-sheet/core';
+import type {
+  FormulaFunction,
+  FormulaInspectionResult,
+  FormulaTranslationOptions,
+  CellPatchOptions,
+  PersistenceStorage
+} from 'vue-canvas-sheet/core';
 
 const workbook = new CoreWorkbook();
 const wasmDisabledWorkbook = new CoreWorkbook({ enableWasm: false });
@@ -45,6 +51,19 @@ workbook.formulaEvaluator.recalcDirty();
 workbook.formulaEvaluator.triggerRecalc(0, 0);
 workbook.formulaEvaluator.evaluateFormula('=1+1', 0, 0);
 workbook.formulaEvaluator.getDependencies('=A1');
+const inspection: FormulaInspectionResult = workbook.inspectFormula('=A1');
+const translationOptions: FormulaTranslationOptions = {
+  from: { r: 0, c: 0 },
+  to: { r: 1, c: 0 }
+};
+const translatedFormula: string = workbook.translateFormula('=A1', translationOptions);
+const cellPatch: CellPatchOptions = {
+  mutationId: 'patch-1',
+  sheetId: workbook.activeSheetId || 'sheet-1',
+  expectedRevision: workbook.getContentRevision(),
+  changes: [{ r: 0, c: 0, before: null, after: { v: 1 } }]
+};
+const patchResult = workbook.applyCellPatch(cellPatch);
 const double: FormulaFunction = (value) => value * 2;
 workbook.registerFunction('MYFN', double);
 workbook.hasRegisteredFunction('myfn');
@@ -76,6 +95,10 @@ void [
   ExportPlugin,
   createPluginsAutoSavePlugin,
   createRealtimeCollaborationPlugin,
+  inspection,
+  translationOptions,
+  translatedFormula,
+  patchResult,
   wasmDisabledWorkbook,
   detailSheetId
 ];

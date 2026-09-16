@@ -65,6 +65,20 @@ export interface SheetInfo {
   isActive: boolean;
 }
 
+export interface ContentMutationEvent {
+  type: 'mutation-committed';
+  /** Unique within the current Workbook instance. */
+  mutationId: string;
+  previousRevision: number;
+  revision: number;
+  /** Null when a batch changes more than one sheet. */
+  sheetId: string | null;
+  sheetIds: string[];
+  source: 'edit' | 'patch' | 'style' | 'structure' | 'comment' | 'import' | 'undo' | 'redo';
+  /** Distinct touched coordinates, or null for whole-sheet and structural replacements. */
+  changedCells: number | null;
+}
+
 export type Unsubscribe = () => void;
 
 export interface PluginInterface {
@@ -113,6 +127,76 @@ export interface FormulaDependencies {
   readonly size: number;
 }
 
+export type FormulaInspectionErrorCode =
+  | 'SYNTAX_ERROR'
+  | 'CROSS_SHEET_REFERENCE'
+  | 'UNSUPPORTED_REFERENCE'
+  | 'UNKNOWN_FUNCTION'
+  | 'UNSUPPORTED_FUNCTION'
+  | 'VOLATILE_FUNCTION'
+  | 'CUSTOM_FUNCTION'
+  | 'REFERENCE_OUT_OF_RANGE';
+
+export interface FormulaInspectionIssue {
+  code: FormulaInspectionErrorCode;
+  message: string;
+  /** Zero-based position in the full formula string; -1 when unknown. */
+  pos: number;
+}
+
+export interface FormulaCellReference extends CellRef {
+  type: 'cell';
+  ref: string;
+  pos: number;
+  end: number;
+}
+
+export interface FormulaRangeReference {
+  type: 'range';
+  ref: string;
+  start: CellRef;
+  /** Inclusive endpoint of the referenced range. */
+  endRef: CellRef;
+  /** Exclusive end position in the source formula. */
+  end: number;
+  pos: number;
+}
+
+export type FormulaReference = FormulaCellReference | FormulaRangeReference;
+
+export interface FormulaInspectionResult {
+  valid: boolean;
+  functions: string[];
+  references: FormulaReference[];
+  errors: FormulaInspectionIssue[];
+}
+
+export interface FormulaTranslationOptions {
+  from: CellRef;
+  to: CellRef;
+}
+
+export interface CellPatchChange {
+  r: number;
+  c: number;
+  before: Cell | null;
+  after: Cell | null;
+}
+
+export interface CellPatchOptions {
+  mutationId: string;
+  sheetId: string;
+  expectedRevision: number;
+  changes: CellPatchChange[];
+}
+
+export interface CellPatchResult {
+  mutationId: string;
+  previousRevision: number;
+  revision: number;
+  changedCells: number;
+}
+
 /** 自定义公式函数；范围参数会以二维数组传入。 */
 export type FormulaFunction = (...args: any[]) => unknown;
 
@@ -126,6 +210,8 @@ export interface FormulaEvaluator {
   hasCustomFunction(name: string): boolean;
   getCustomFunctionNames(): string[];
   usesCustomFunction(formula: string, name?: string | null): boolean;
+  inspectFormula(formula: string): FormulaInspectionResult;
+  translateFormula(formula: string, options: FormulaTranslationOptions): string;
 }
 
 export class EventEmitter {
@@ -181,7 +267,7 @@ export class Store<S = unknown> {
 }
 
 export class StoreManager {
-  constructor(stores?: Record<string, Store>);
+  constructor(stores?: Record<string, Store>, options?: { onBatchStart?: () => void; onBatchEnd?: () => void });
   getStore(name: string): Store | undefined;
   addStore(name: string, store: Store): void;
   subscribe(listener: Function): Unsubscribe;
@@ -258,6 +344,8 @@ export class Workbook {
   sheetName: string;
   readonly activeSheetId: string | null;
 
+  /** Instance-local, monotonic; never restored from JSON or sheet state. */
+  getContentRevision(): number;
   getDataMatrix(): unknown;
   getDirtyCells(): Map<string, Cell | null> | null;
   indexToColStr(colIndex: number): string;
@@ -339,6 +427,9 @@ export class Workbook {
   unregisterFunction(name: string): boolean;
   hasRegisteredFunction(name: string): boolean;
   getRegisteredFunctions(): string[];
+  inspectFormula(formula: string): FormulaInspectionResult;
+  translateFormula(formula: string, options: FormulaTranslationOptions): string;
+  applyCellPatch(patch: CellPatchOptions): CellPatchResult;
   recalcAll(options?: { useWorker?: boolean }): Promise<void> | void;
   rebuildDependencyMap(): void;
   getCalculationStats(): unknown;
@@ -360,8 +451,10 @@ export class Workbook {
   find(query: unknown, startFrom?: CellRef): unknown;
   replaceAll(query: unknown, replacement: string): number;
 
+  on(event: 'mutation-committed', callback: (event: ContentMutationEvent) => void): Unsubscribe;
   on(event: string, callback: Function): Unsubscribe;
   off(event: string, callback: Function): void;
+  once(event: 'mutation-committed', callback: (event: ContentMutationEvent) => void): Unsubscribe;
   once(event: string, callback: Function): Unsubscribe;
   notify(payload?: unknown): void;
   usePlugin(plugin: PluginInterface, options?: { autoMount?: boolean }): Workbook;

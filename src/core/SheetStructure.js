@@ -16,6 +16,7 @@
  * @property {(updates: Array) => void}         bulkSetCells     — 批量设置单元格
  * @property {(...args: any[]) => void}         notify           — UI 通知
  * @property {(isRow: boolean, index: number, delta: number) => void} [shiftComments]
+ * @property {(source: string, operation: Function) => any} [withMutation]
  */
 
 import { cloneCell } from './utils/Clipboard.js';
@@ -27,6 +28,7 @@ export class SheetStructure {
   constructor(deps) {
     /** @type {SheetStructureDeps} */
     this.d = deps;
+    this._withMutation = deps.withMutation || ((_source, operation) => operation());
   }
 
   fillAuto(sourceRange, targetRange) {
@@ -105,11 +107,17 @@ export class SheetStructure {
   }
 
   insertRow(rowIndex) {
-    this._shiftDimension(true, rowIndex, 1);
-    this.d.getHistory().execute({ type: 'insert-row', r: rowIndex });
+    return this._withMutation('structure', () => {
+      this._shiftDimension(true, rowIndex, 1);
+      this.d.getHistory().execute({ type: 'insert-row', r: rowIndex });
+    });
   }
 
   deleteRow(rowIndex) {
+    return this._withMutation('structure', () => this._deleteRowWithHistory(rowIndex));
+  }
+
+  _deleteRowWithHistory(rowIndex) {
     const deletedCells = [];
     const rowData = this.d.getDataMatrix().getRow(rowIndex);
     if (rowData) {
@@ -122,11 +130,17 @@ export class SheetStructure {
   }
 
   insertColumn(colIndex) {
-    this._shiftDimension(false, colIndex, 1);
-    this.d.getHistory().execute({ type: 'insert-col', c: colIndex });
+    return this._withMutation('structure', () => {
+      this._shiftDimension(false, colIndex, 1);
+      this.d.getHistory().execute({ type: 'insert-col', c: colIndex });
+    });
   }
 
   deleteColumn(colIndex) {
+    return this._withMutation('structure', () => this._deleteColumnWithHistory(colIndex));
+  }
+
+  _deleteColumnWithHistory(colIndex) {
     const deletedCells = [];
     const colData = this.d.getDataMatrix().getCol(colIndex);
     if (colData) {
@@ -139,6 +153,10 @@ export class SheetStructure {
   }
 
   _shiftDimension(isRow, index, delta) {
+    return this._withMutation('structure', () => this._shiftDimensionInternal(isRow, index, delta));
+  }
+
+  _shiftDimensionInternal(isRow, index, delta) {
     const isInsert = delta > 0;
     const dataMatrix = this.d.getDataMatrix();
 

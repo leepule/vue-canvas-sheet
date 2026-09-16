@@ -63,6 +63,10 @@
     "readme.md",
     "README_zh.md"
   ],
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
   "scripts": {
     "dev": "vite",
     "demo": "vite samples/basic-usage",
@@ -74,6 +78,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
+    "dev:ai": "node scripts/dev-ai.mjs",
+    "test:ai:web": "npm run test --workspace @ai-sheet/web",
+    "test:ai:api": "npm run test --workspace @ai-sheet/api",
+    "test:ai:contracts": "npm run test --workspace @ai-sheet/contracts",
     "test:wasm:real": "vitest run tests/core/WasmRealEngine.spec.js",
     "test:perf": "node scripts/run-performance-tests.mjs",
     "benchmark": "node scripts/benchmark.mjs",

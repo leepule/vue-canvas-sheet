@@ -92,6 +92,16 @@ export class FormulaEvaluator {
     return this._rpnEvaluator.usesCustomFunction(formula, name);
   }
 
+  inspectFormula(formula) {
+    this._ensureRpnEvaluator();
+    return this._rpnEvaluator.inspectFormula(formula);
+  }
+
+  translateFormula(formula, options) {
+    this._ensureRpnEvaluator();
+    return this._rpnEvaluator.translateFormula(formula, options);
+  }
+
   // ═══════════════════════════════════════════════════════════
   // 辅助方法：引用解析
   // ═══════════════════════════════════════════════════════════

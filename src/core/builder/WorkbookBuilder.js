@@ -67,6 +67,14 @@ export class WorkbookBuilder {
   // ═══════════════════════════════════════════════════════════
   /** @private */
   static _phase0_infrastructure(ctx) {
+    ctx._contentRevision = 0;
+    ctx._contentMutationDepth = 0;
+    ctx._contentMutationSource = null;
+    ctx._contentMutationSuppression = 0;
+    ctx._pendingContentMutation = null;
+    ctx._contentMutationEvents = [];
+    ctx._emittingContentMutation = false;
+
     // PluginRegistry — 需要 Workbook 引用本身
     ctx.plugins = new PluginRegistry(ctx);
 
@@ -78,6 +86,9 @@ export class WorkbookBuilder {
       data: ctx._dataStore,
       selection: ctx._selectionStore,
       ui: ctx._uiStore
+    }, {
+      onBatchStart: () => ctx._beginContentMutation('edit'),
+      onBatchEnd: () => ctx._endContentMutation()
     });
   }
 
@@ -142,7 +153,9 @@ export class WorkbookBuilder {
   static _phase3_deferredManagers(ctx) {
     // HistoryManager — 闭包延迟引用 _commandExecutor
     ctx.history = new HistoryManager({
-      applyCommand: (cmd, isUndo) => ctx._commandExecutor.execute(cmd, isUndo),
+      applyCommand: (cmd, isUndo) => ctx.applyCommand(cmd, isUndo),
+      onBatchStart: () => ctx._beginContentMutation('edit'),
+      onBatchEnd: () => ctx._endContentMutation(),
     });
 
     // SearchEngine
@@ -165,6 +178,7 @@ export class WorkbookBuilder {
       setCellData: (r, c, val) => ctx._setCellData(r, c, val),
       recordHistory: (cmd) => ctx.history.execute(cmd),
       notify: (data) => ctx.notify(data),
+      withMutation: (source, operation) => ctx._withContentMutation(source, operation),
     });
     ctx.clipboard = ctx._clipboardManager;
 
@@ -241,7 +255,9 @@ export class WorkbookBuilder {
 
     // SparseMatrix — 延迟引用 _cellPool
     ctx._dataMatrix = createSparseMatrix({
-      onDeleteCell: (cell) => { ctx._cellPool.releaseCell(cell); }
+      onDeleteCell: (cell) => { ctx._cellPool.releaseCell(cell); },
+      onMutation: change => ctx._recordContentMutation(change),
+      withMutation: operation => ctx._withContentMutation('edit', operation)
     });
     ctx._dataCache = null;
     ctx._dataCacheVersion = -1;
@@ -289,6 +305,7 @@ export class WorkbookBuilder {
       getHistory: () => ctx.history,
       emit: (...a) => ctx._emit(...a),
       notify: (...a) => ctx.notify(...a),
+      withMutation: (source, operation) => ctx._withContentMutation(source, operation),
     });
 
     ctx._selectionManager = new SelectionManager({
@@ -314,6 +331,8 @@ export class WorkbookBuilder {
       syncSharedValue: (r, c, v) => ctx._syncSharedValue(r, c, v),
       updateDependencyMap: (id, f) => ctx._formulaEvaluator._updateDependencyMap(id, f),
       markCellChanged: (r, c) => ctx._markCellChanged(r, c),
+      recordMutation: change => ctx._recordContentMutation(change),
+      withMutation: (source, operation) => ctx._withContentMutation(source, operation),
     });
 
     ctx._sheetStructure = new SheetStructure({
@@ -331,6 +350,7 @@ export class WorkbookBuilder {
       bulkSetCells: (updates) => ctx.bulkSetCells(updates),
       shiftComments: (isRow, index, delta) => ctx._shiftComments(isRow, index, delta),
       notify: (...a) => ctx.notify(...a),
+      withMutation: (source, operation) => ctx._withContentMutation(source, operation),
     });
   }
 
@@ -350,11 +370,11 @@ export class WorkbookBuilder {
     // 持久化存储
     if (enablePersistence) {
       ctx._storage = new IndexedDBStorage();
-      ctx._dirtyCells = new Map();
       ctx._persistTimer = null;
     } else {
       ctx._storage = null;
     }
+    ctx._dirtyCells = new Map();
 
     ctx._persistenceManager = new PersistenceManager({
       getStorage: () => ctx._storage,
@@ -401,6 +421,8 @@ export class WorkbookBuilder {
       notify: (...a) => ctx.notify(...a),
       getPersistTimer: () => ctx._persistTimer,
       setPersistTimer: (t) => { ctx._persistTimer = t; },
+      withMutation: (source, operation) => ctx._withContentMutation(source, operation),
+      recordMutation: change => ctx._recordContentMutation(change),
     });
   }
 
@@ -448,11 +470,11 @@ export class WorkbookBuilder {
       notify: (...a) => ctx.notify(...a),
       markCellChanged: (r, c) => ctx._markCellChanged(r, c),
       maybeInitWasm: () => ctx._maybeStartWasmInitialization(),
+      recordMutation: change => ctx._recordContentMutation(change),
       recalcAll: () => ctx.recalcAll(),
       rebuildContext: () => {
-        ctx.history = new HistoryManager({
-          applyCommand: (cmd, isUndo) => ctx.applyCommand(cmd, isUndo),
-        });
+        // 保留 History 实例及外层批次，避免重载后遗留未关闭的修订号批次。
+        ctx.history.clear();
         if (ctx.calcEngine) ctx.calcEngine.reset();
         ctx._formulaEvaluator._clearDependencyGraph();
         if (ctx._dirtyCells) ctx._dirtyCells.clear();
@@ -466,5 +488,16 @@ export class WorkbookBuilder {
     ctx._autoPersist = false;
     ctx._persistTimer = null;
     ctx._renderScheduler = null;
+
+    const contentConfig = [
+      'rowCount', 'colCount', 'colWidths', 'rowHeights', 'merges', 'mergeMap',
+      'defaultColWidth', 'defaultRowHeight', 'fieldMap', 'headerDepth'
+    ];
+    ctx._storeManager.subscribe((name, state, previous) => {
+      const changed = name === 'data'
+        ? contentConfig.some(key => state[key] !== previous[key])
+        : name === 'ui' && state.freeze !== previous.freeze;
+      if (changed) ctx._recordContentMutation({ source: 'structure' });
+    });
   }
 }
