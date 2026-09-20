@@ -8,6 +8,9 @@ const execFileAsync = promisify(execFile);
 const MAX_PACKAGE_SIZE = 10 * 1024 * 1024;
 const MAX_ENTRY_COUNT = 200;
 const FORBIDDEN_PREFIXES = ['src/wasm/target/'];
+// worker 子构建漏掉 external 时会把 xlsx-js-style 整包和 base64 内联的 WASM 打进 dist/assets，
+// 包体积翻三倍。见 vite.config.js 的 worker.rollupOptions.external。
+const FORBIDDEN_PATTERNS = [/^dist\/assets\/xlsx/, /^dist\/assets\/table_wasm_engine/];
 const REQUIRED_FILES = [
   'dist/core.es.js',
   'dist/designer.es.js',
@@ -39,14 +42,15 @@ try {
 const [packageReport] = JSON.parse(stdout);
 const packagedFiles = packageReport.files || [];
 const forbiddenFiles = packagedFiles.filter(({ path }) =>
-  FORBIDDEN_PREFIXES.some(prefix => path.startsWith(prefix))
+  FORBIDDEN_PREFIXES.some(prefix => path.startsWith(prefix)) ||
+  FORBIDDEN_PATTERNS.some(pattern => pattern.test(path))
 );
 const packagedPaths = new Set(packagedFiles.map(({ path }) => path));
 const missingFiles = REQUIRED_FILES.filter(path => !packagedPaths.has(path));
 const failures = [];
 
 if (forbiddenFiles.length > 0) {
-  failures.push(`contains ${forbiddenFiles.length} forbidden src/wasm/target entries`);
+  failures.push(`contains forbidden entries: ${forbiddenFiles.map(({ path }) => path).join(', ')}`);
 }
 if (missingFiles.length > 0) {
   failures.push(`missing required runtime files: ${missingFiles.join(', ')}`);

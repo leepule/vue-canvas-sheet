@@ -17,6 +17,12 @@ pest_derive = "2.6"
 [profile.release]
 lto = true
 opt-level = 'z'
+codegen-units = 1
+# wasm32 本就不支持 unwind，abort 只是去掉多余的落地代码
+panic = "abort"
+# 不要加 strip = true：--strip-all 会连 target_features 自定义段一起删掉，wasm-bindgen
+# 检测不到 reference-types 就会退回旧的 heap 表 ABI，导出符号和胶水随之改变。
+# 约 50 KB 的 name 调试段由 scripts/build-wasm.mjs 在 wasm-pack 之后单独剥离。
 
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false

@@ -6,6 +6,17 @@ const crossOriginIsolationHeaders = {
   'Cross-Origin-Embedder-Policy': 'credentialless'
 }
 
+// 主构建和 worker 子构建都不打包这些依赖，交给使用方的打包器解析。
+// worker 子构建默认不继承 rollupOptions.external，缺了会把 xlsx-js-style 整包
+// 和 base64 的 WASM 内联进 dist/assets，使用方要下载两份 WASM。
+const externalDependencies = [
+  'vue',
+  '@lucide/vue',
+  'es-toolkit',
+  'xlsx-js-style',
+  'vue-canvas-sheet/wasm'
+]
+
 export default defineConfig(({ command }) => ({
   base: './',
   plugins: [vue()],
@@ -33,7 +44,10 @@ export default defineConfig(({ command }) => ({
     headers: crossOriginIsolationHeaders
   },
   worker: {
-    format: 'es'
+    format: 'es',
+    rollupOptions: {
+      external: externalDependencies
+    }
   },
   build: {
     lib: {
@@ -49,13 +63,7 @@ export default defineConfig(({ command }) => ({
       fileName: (format, entryName) => `${entryName}.${format}.js`
     },
     rollupOptions: {
-      external: [
-        'vue',
-        '@lucide/vue',
-        'es-toolkit',
-        'xlsx-js-style',
-        'vue-canvas-sheet/wasm'
-      ],
+      external: externalDependencies,
       output: {
         exports: 'named',
         globals: {
