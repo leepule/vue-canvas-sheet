@@ -2,6 +2,9 @@
 name = "table-wasm-engine"
 version = "0.1.0"
 edition = "2021"
+description = "Formula calculation engine for vue-canvas-sheet, compiled to WebAssembly"
+repository = "https://github.com/leepule/vue-canvas-sheet"
+license = "Apache-2.0"
 
 [lib]
 crate-type = ["cdylib", "rlib"]

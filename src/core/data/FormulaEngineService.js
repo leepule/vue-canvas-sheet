@@ -11,10 +11,11 @@
  */
 import { WasmBridge } from '../worker/WasmBridge.js';
 import {
-  WorkerManager,
   createFormulaWorkerManager,
   isWorkerSupported
 } from '../worker/WorkerManager.js';
+
+/** @typedef {import('../worker/WorkerManager.js').WorkerManager} WorkerManager */
 import { SheetError, ErrorCodes } from './SheetError.js';
 import { SharedValueStore } from './SharedValueStore.js';
 import { HeadPointerQueue } from '../utils/Queues.js';

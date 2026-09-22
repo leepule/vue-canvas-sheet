@@ -690,8 +690,7 @@ export class ScrollLoader {
    * @returns {Promise<boolean>} 是否触发了加载
    */
   async handleScroll(scrollTop, viewportHeight, totalHeight) {
-    // 计算当前可见范围
-    const startRow = Math.floor(scrollTop / this._rowHeight);
+    // 计算当前可见范围的末行
     const endRow = Math.ceil((scrollTop + viewportHeight) / this._rowHeight);
     
     // 计算距离底部的距离

@@ -83,11 +83,12 @@ export default defineConfig(({ command }) => ({
       include: ['src/core/**/*.js', 'src/plugins/**/*.js'],
       reportsDirectory: 'coverage',
       reporter: ['text', 'lcov', 'html'],
+      // 2026-09-21 实测：statements 77.3 / branches 77.6 / functions 75.3 / lines 77.3
       thresholds: {
-        statements: 70,
-        branches: 70,
-        functions: 65,
-        lines: 70,
+        statements: 75,
+        branches: 75,
+        functions: 72,
+        lines: 75,
       },
     },
   },

@@ -1,6 +1,6 @@
 # 🚀 Vue Canvas Sheet
 
-[![npm version](https://img.shields.io/badge/npm-v0.1.0-blue.svg)](https://www.npmjs.com/package/vue-canvas-sheet)
+[![npm version](https://img.shields.io/npm/v/vue-canvas-sheet.svg)](https://www.npmjs.com/package/vue-canvas-sheet)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5%2B-brightgreen.svg)](https://vuejs.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Engine: WASM](https://img.shields.io/badge/Engine-Rust%20%2B%20WASM-blueviolet.svg)](https://webassembly.org/)
@@ -200,6 +200,8 @@ Cross-Origin-Embedder-Policy: require-corp
 ```
 
 未配置 COOP/COEP 时引擎会自动降级到主线程计算，可调用 `wb.getSystemReport()` 查看当前运行状态。
+
+> **`require-corp` 与 `credentialless` 的区别** —— `require-corp` 在所有支持跨源隔离的浏览器中可用（Chrome 83+、Firefox 79+、Safari 15.2+），但页面嵌入的每个跨源资源都必须带 `Cross-Origin-Resource-Policy` 或 CORS 响应头。`credentialless`（本仓库 dev server 所用）改为以无凭据方式加载这些资源，无需逐个改头；但 Safari 不支持该值，会静默退回无隔离状态，`SharedArrayBuffer` 随之不可用。生产环境除非只面向 Chromium 96+ / Firefox 119+，否则请使用 `require-corp`。
 
 ---
 

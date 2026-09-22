@@ -42,7 +42,6 @@ describe('FormulaBar', () => {
     });
 
     it('已有定时器时应先清除', () => {
-      const clearSpy = vi.fn();
       vm.timer = { _id: 1 };
       const origClear = clearTimeout;
       global.clearTimeout = vi.fn();

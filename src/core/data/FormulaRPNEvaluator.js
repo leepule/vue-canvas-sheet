@@ -16,7 +16,7 @@
  *   const result = evaluator.evaluate('=SUM(A1:A10)', { stack: [] });
  */
 
-import { cellKey, parseCellKey } from './CellKey.js';
+import { cellKey } from './CellKey.js';
 
 // ═══════════════════════════════════════════════════════════
 // 常量
@@ -29,7 +29,7 @@ const PATTERNS = [
   { type: 'string',  regex: /"([^"]*)"/y },
   { type: 'boolean', regex: /(TRUE|FALSE)(?![A-Z0-9])/iy },
   { type: 'number',  regex: /\d+(\.\d+)?/y },
-  { type: 'op',      regex: /[\+\-\*\/]/y },
+  { type: 'op',      regex: /[+\-*/]/y },
   { type: 'compare', regex: /(<>|<=|>=|[<>=])/y },
   { type: 'lparen',  regex: /\(/y },
   { type: 'rparen',  regex: /\)/y },

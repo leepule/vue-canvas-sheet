@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { PerformanceMonitor, createPerformanceMonitor } from '../../src/core/utils/PerformanceMonitor';
+import { PerformanceMonitor } from '../../src/core/utils/PerformanceMonitor';
 
 
 describe('PerformanceMonitor Metric 增量统计', () => {

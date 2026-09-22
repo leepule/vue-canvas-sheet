@@ -11,6 +11,8 @@ import {
 import { buildWorksheetFromSparseSnapshot } from './utils/xlsxAdapter.js';
 
 const XLSX_MIME = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+// 控制字符是有意匹配的：防止 CSV 公式注入绕过前缀检测
+// eslint-disable-next-line no-control-regex
 const CSV_FORMULA_PREFIX = /^[\s\u0000-\u001F\u007F-\u009F\u200B-\u200F\u202A-\u202E\u2060-\u206F]*[=+\-@]/u;
 
 function downloadBlob(blob, filename) {

@@ -25,7 +25,6 @@ const STRESS_ITERATIONS = 5000;
  * 将多个任务拆分为微步骤，使用 Promise 交错执行。
  */
 async function simulateConcurrent(tasks, interleaveCount = 10) {
-  const results = new Array(tasks.length);
   const steps = [];
 
   // 将每个任务拆分为 interleaveCount 步
@@ -276,7 +275,7 @@ describe('SharedArrayBuffer 数据完整性测试', () => {
       while (Date.now() - startTime < 500) {
         // 持续读写旧缓冲区
         const idx = Math.floor(Math.random() * 1000);
-        const oldVal = view[idx];
+        void view[idx]; // 先读后写，模拟读写交错
         view[idx] = Math.random() * 1000;
 
         // 间歇性"扩容"

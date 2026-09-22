@@ -71,8 +71,12 @@ export default {
   data() {
     return {
       toasts: [],
-      _timers: new Map(),
     };
+  },
+
+  created() {
+    // 定时器句柄不需要响应式，且 data 中的 `_` 前缀键是 Vue 保留前缀
+    this._timers = new Map();
   },
 
   methods: {

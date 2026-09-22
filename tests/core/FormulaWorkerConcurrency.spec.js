@@ -15,7 +15,7 @@ vi.unmock('@/core/worker/WorkerManager.js');
 vi.unmock('@/core/worker/WorkerClient.js');
 vi.unmock('@/core/worker/TransferableSerializer.js');
 
-const { WorkerManager, createFormulaWorkerManager } = await import('@/core/worker/WorkerManager.js');
+const { WorkerManager } = await import('@/core/worker/WorkerManager.js');
 const { WorkerClient } = await import('@/core/worker/WorkerClient.js');
 const { FormulaEngineService } = await import('@/core/data/FormulaEngineService.js');
 

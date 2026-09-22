@@ -32,7 +32,7 @@
  * @property {(r:number,c:number) => void} markCellChanged
  */
 
-import { SheetError, ErrorCodes } from './SheetError.js';
+import { SheetError } from './SheetError.js';
 import { formulaCompiler } from './FormulaCompiler.js';
 import { FormulaRPNEvaluator } from './FormulaRPNEvaluator.js';
 import { isWasmFormulaSupported } from './WasmFormulaSupport.js';

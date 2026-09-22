@@ -1,6 +1,6 @@
 # 🚀 Vue Canvas Sheet
 
-[![npm version](https://img.shields.io/badge/npm-v0.1.0-blue.svg)](https://www.npmjs.com/package/vue-canvas-sheet)
+[![npm version](https://img.shields.io/npm/v/vue-canvas-sheet.svg)](https://www.npmjs.com/package/vue-canvas-sheet)
 [![Vue 3](https://img.shields.io/badge/Vue-3.5%2B-brightgreen.svg)](https://vuejs.org/)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Engine: WASM](https://img.shields.io/badge/Engine-Rust%20%2B%20WASM-blueviolet.svg)](https://webassembly.org/)
@@ -182,6 +182,8 @@ Cross-Origin-Embedder-Policy: require-corp
 ```
 
 The engine gracefully falls back to main-thread execution when COOP/COEP is absent — call `wb.getSystemReport()` to inspect the current state.
+
+> **`require-corp` vs `credentialless`** — `require-corp` is supported wherever cross-origin isolation exists (Chrome 83+, Firefox 79+, Safari 15.2+), but every cross-origin resource you embed must send `Cross-Origin-Resource-Policy` or CORS headers. `credentialless` (what this repo's dev server uses) instead loads those resources without credentials, so nothing else needs to change — but Safari does not support the value and silently falls back to no isolation, which disables `SharedArrayBuffer`. Use `require-corp` in production unless you only target Chromium 96+ / Firefox 119+.
 
 ---
 

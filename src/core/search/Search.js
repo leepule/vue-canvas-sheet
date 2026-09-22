@@ -293,7 +293,7 @@ export class SearchEngine {
         if (value === undefined || value === null) return false;
         
         const valStr = String(value);
-        const { regex, isRegex, queryStr } = parsedQuery;
+        const { regex, queryStr } = parsedQuery;
         const { caseSensitive = false } = options;
 
         if (regex) {

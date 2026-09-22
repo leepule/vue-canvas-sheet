@@ -411,16 +411,7 @@ export class OffscreenRenderer {
    * @private
    */
   _renderOnMainThread(renderData, startTime = performance.now()) {
-    const { 
-      cellDataList, 
-      borderBatch, 
-      bgGroups, 
-      gridLines,
-      renderRect,
-      colHeaders,
-      rowHeaders,
-      frozenLines
-    } = renderData;
+    const { renderRect } = renderData;
 
     const ctx = this.ctx;
     if (!ctx) {

@@ -18,6 +18,23 @@ env:
   NPM_VERSION: 11.14.1
 
 jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node and install dependencies
+        uses: ./.github/actions/setup-node-deps
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          npm-version: ${{ env.NPM_VERSION }}
+
+      - name: Run oxlint (warnings fail the build)
+        run: npm run lint
+
   unit:
     name: Unit tests and coverage
     needs: build
@@ -27,17 +44,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - name: Setup Node and install dependencies
+        uses: ./.github/actions/setup-node-deps
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-
-      - name: Pin npm
-        run: npm install --global "npm@${NPM_VERSION}"
-
-      - name: Install dependencies
-        run: npm ci
+          npm-version: ${{ env.NPM_VERSION }}
 
       - name: Download freshly built WASM package
         uses: actions/download-artifact@v7
@@ -67,14 +78,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - name: Setup Node and install dependencies
+        uses: ./.github/actions/setup-node-deps
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-
-      - name: Pin npm
-        run: npm install --global "npm@${NPM_VERSION}"
+          npm-version: ${{ env.NPM_VERSION }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -85,9 +93,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: wasm-pack@0.13.1
-
-      - name: Install dependencies
-        run: npm ci
 
       - name: Build WASM and JavaScript artifacts
         run: npm run build
@@ -125,17 +130,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - name: Setup Node and install dependencies
+        uses: ./.github/actions/setup-node-deps
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-
-      - name: Pin npm
-        run: npm install --global "npm@${NPM_VERSION}"
-
-      - name: Install dependencies
-        run: npm ci
+          npm-version: ${{ env.NPM_VERSION }}
 
       - name: Download freshly built WASM package
         uses: actions/download-artifact@v7
@@ -167,17 +166,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - name: Setup Node and install dependencies
+        uses: ./.github/actions/setup-node-deps
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-
-      - name: Pin npm
-        run: npm install --global "npm@${NPM_VERSION}"
-
-      - name: Install dependencies
-        run: npm ci
+          npm-version: ${{ env.NPM_VERSION }}
 
       - name: Run performance gates
         run: npm run test:perf
@@ -199,17 +192,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Setup Node
-        uses: actions/setup-node@v6
+      - name: Setup Node and install dependencies
+        uses: ./.github/actions/setup-node-deps
         with:
           node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-
-      - name: Pin npm
-        run: npm install --global "npm@${NPM_VERSION}"
-
-      - name: Install dependencies
-        run: npm ci
+          npm-version: ${{ env.NPM_VERSION }}
 
       - name: Download freshly built WASM package
         uses: actions/download-artifact@v7
@@ -273,11 +260,12 @@ jobs:
   quality-gate:
     name: Required quality gate
     if: always()
-    needs: [unit, build, cargo, e2e, performance, package]
+    needs: [lint, unit, build, cargo, e2e, performance, package]
     runs-on: ubuntu-latest
     steps:
       - name: Require every gate to pass
         env:
+          LINT_RESULT: ${{ needs.lint.result }}
           UNIT_RESULT: ${{ needs.unit.result }}
           BUILD_RESULT: ${{ needs.build.result }}
           CARGO_RESULT: ${{ needs.cargo.result }}
@@ -285,6 +273,6 @@ jobs:
           PERFORMANCE_RESULT: ${{ needs.performance.result }}
           PACKAGE_RESULT: ${{ needs.package.result }}
         run: |
-          for result in "$UNIT_RESULT" "$BUILD_RESULT" "$CARGO_RESULT" "$E2E_RESULT" "$PERFORMANCE_RESULT" "$PACKAGE_RESULT"; do
+          for result in "$LINT_RESULT" "$UNIT_RESULT" "$BUILD_RESULT" "$CARGO_RESULT" "$E2E_RESULT" "$PERFORMANCE_RESULT" "$PACKAGE_RESULT"; do
             test "$result" = "success"
           done

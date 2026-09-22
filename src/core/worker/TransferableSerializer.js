@@ -45,8 +45,6 @@ const RENDER_VALIGN = { top: 0, middle: 1, bottom: 2 };
 const RENDER_VALIGN_BY_ID = ['top', 'middle', 'bottom'];
 const RENDER_BORDER_STYLE = { solid: 0, dashed: 1, dotted: 2 };
 const RENDER_BORDER_STYLE_BY_ID = ['solid', 'dashed', 'dotted'];
-const RENDER_FONT_WEIGHT = { normal: 0, bold: 1 };
-const RENDER_FONT_STYLE = { normal: 0, italic: 1 };
 
 function writeNullableRect(writer, rect) {
   writer.writeUint8(rect ? 1 : 0);

@@ -3,7 +3,6 @@
  * (c) 2026-present
  * Released under the Apache License, Version 2.0.
  */
-import { HookTypes } from '../core/plugin/PluginRegistry.js';
 
 /**
  * 选区历史管理器插件

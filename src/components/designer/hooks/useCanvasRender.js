@@ -506,8 +506,6 @@ export default function useCanvasRender(tableContext) {
     const wb = tableContext.props.workbook;
     if (!wb || !wb.copyRange) return;
 
-    const sel = wb.copyRange;
-
     // 在主体区域绘制
     ctx.save();
     ctx.beginPath();

@@ -413,7 +413,7 @@ export class SparseMatrix {
   }
 
   *values() {
-    for (const [row, rowMap] of this._rows) {
+    for (const rowMap of this._rows.values()) {
       for (const cell of rowMap.values()) {
         yield cell;
       }

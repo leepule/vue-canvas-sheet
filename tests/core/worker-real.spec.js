@@ -6,8 +6,6 @@ vi.unmock('../../src/core/worker/TransferableSerializer.js');
 
 import {
   serializeFormulaBatch,
-  deserializeFormulaBatch,
-  serializeFormulaResults,
   deserializeFormulaResults
 } from '../../src/core/worker/TransferableSerializer.js';
 

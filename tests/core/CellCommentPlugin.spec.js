@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import { Workbook } from '@/core/Workbook';
 import { CellCommentPlugin } from '@/plugins/CellCommentPlugin';
 import { CollaborativeCursorPlugin } from '@/plugins/CollaborativeCursorPlugin';

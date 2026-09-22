@@ -649,7 +649,6 @@ class RenderTaskGenerator {
       priority: Priority.HIGH,
       estimatedTime: 0,
       execute: (context) => {
-        const startTime = performance.now();
         let processed = 0;
         
         for (let r = startRow; r <= endRow && processed < batchSize; r++) {

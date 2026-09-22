@@ -598,7 +598,7 @@ export class IndexedDBStorage {
 		const clearStore = (storeName) => {
 			return new Promise((resolve, reject) => {
 				const { transaction, store } = this._getStore(storeName, 'readwrite');
-				const request = store.clear();
+				store.clear();
 				transaction.oncomplete = () => resolve();
 				transaction.onerror = () => reject(transaction.error);
 			});

@@ -9,7 +9,7 @@
  * 4. 边界条件和异常路径
  */
 
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import { SharedValueStore } from '../../src/core/data/SharedValueStore.js';
 
 const EMPTY = SharedValueStore.EMPTY_VALUE;
@@ -115,7 +115,6 @@ describe('SharedValueStore 并发读写压力测试', () => {
       store.set(100, 0, 30);
       store.getBuffer();
 
-      const initialCols = store._continuousCols;
       const initialLen = store.continuousView.length;
 
       // 写入超出当前容量的行 — 触发扩容

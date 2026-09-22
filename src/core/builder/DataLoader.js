@@ -34,7 +34,6 @@
  */
 
 import { cloneCell } from '../utils/Clipboard.js';
-import { HistoryManager } from '../history/History.js';
 import { Events } from '../events/EventEmitter.js';
 
 export class DataLoader {
