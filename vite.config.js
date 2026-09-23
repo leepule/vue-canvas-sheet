@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
+import { configDefaults } from 'vitest/config'
 
 const crossOriginIsolationHeaders = {
   'Cross-Origin-Opener-Policy': 'same-origin',
@@ -16,6 +17,10 @@ const externalDependencies = [
   'xlsx-js-style',
   'vue-canvas-sheet/wasm'
 ]
+
+// tests/performance 只由 `npm run test:perf`（scripts/run-performance-tests.mjs）串行执行，
+// 该脚本会设置 PERF_ARTIFACT_DIR。普通 `npm test` 排除它们，避免性能预算受并行负载影响而抖动。
+const isPerfRun = Boolean(process.env.PERF_ARTIFACT_DIR)
 
 export default defineConfig(({ command }) => ({
   base: './',
@@ -76,7 +81,10 @@ export default defineConfig(({ command }) => ({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./tests/setup.js'],
-    include: ['tests/**/*.spec.js', 'tests/**/*.test.js'],
+    include: isPerfRun
+      ? ['tests/performance/**/*.test.js']
+      : ['tests/**/*.spec.js', 'tests/**/*.test.js'],
+    exclude: [...configDefaults.exclude, ...(isPerfRun ? [] : ['tests/performance/**'])],
     testTimeout: 30000,
     coverage: {
       provider: 'v8',

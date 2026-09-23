@@ -19,6 +19,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Dev dependencies refreshed with `npm audit fix` and `npm update`. Critical and high advisories are cleared; the remaining moderate ones sit in the vitest 3 chain and need vitest 5.
 - CI gains an oxlint job that fails on warnings, coverage thresholds rise to 75 / 75 / 72 / 75 (statements / branches / functions / lines), and Node setup is shared through a composite action.
+- `npm test` no longer runs the `tests/performance` suite. It only runs through `npm run test:perf`, which executes the files serially so the timing budgets are not skewed by parallel load.
+- Removed the unused `MemoryManager` and `StyleUtils` modules together with the `StyleUtils` test case. Neither was reachable from any entry point, so the published bundles are unchanged.
+- `samples/basic-usage/dist` is no longer tracked in git and `.gitignore` covers `samples/**/dist`. The demo deploy workflow already rebuilds it on every run.
 
 ## [1.0.0] - 2026-09-16
 

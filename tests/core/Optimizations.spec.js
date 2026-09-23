@@ -1,6 +1,5 @@
 
 import { StyleCache } from '../../src/core/render/StyleCache';
-import { StyleUtils } from '../../src/core/render/StyleUtils';
 
 
 describe('Table Optimizations', () => {
@@ -16,16 +15,5 @@ describe('Table Optimizations', () => {
     
     expect(id1).toBe(id2);
     expect(id1).toBe(id3);
-  });
-
-  test('StyleUtils Bitmasks should work correctly', () => {
-    const props = { fontWeight: 'bold', fontStyle: 'italic', td: 'line-through', wrap: true };
-    const mask = StyleUtils.encodeBitmask(props);
-    const decoded = StyleUtils.decodeBitmask(mask);
-    
-    expect(decoded.fontWeight).toBe('bold');
-    expect(decoded.fontStyle).toBe('italic');
-    expect(decoded.td).toBe('line-through');
-    expect(decoded.wrap).toBe(true);
   });
 });
