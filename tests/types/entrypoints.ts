@@ -102,4 +102,7 @@ workbook.getDependencies('=A1');
 // @ts-expect-error subscribe is not a Workbook runtime method.
 workbook.subscribe(() => {});
 
-void [RootStore, CoreTableDesigner, RenderWorkbook, RootRenderer, PluginsTableDesigner];
+import wasmUrl from 'vue-canvas-sheet/wasm/url';
+const wasmUrlText: string = wasmUrl;
+
+void [RootStore, CoreTableDesigner, RenderWorkbook, RootRenderer, PluginsTableDesigner, wasmUrlText];

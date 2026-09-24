@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { AutoSavePlugin } from '../../src/plugins/AutoSavePlugin';
 import { Events } from '../../src/core/events/EventEmitter';

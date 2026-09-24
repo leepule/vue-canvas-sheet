@@ -421,7 +421,7 @@ function postWasmInitFailed(error, phase = 'wasm-bridge') {
 }
 
 self.onmessage = function(e) {
-  const { type, taskId, useTransferable, buffer, sharedChunks, sharedRows, sharedCols, ...task } = e.data;
+  const { type, taskId, useTransferable, buffer, sharedChunks, sharedRows, sharedCols, wasmUrl, ...task } = e.data;
 
   if (sharedRows) sharedMaxRows = sharedRows;
   if (sharedCols) sharedMaxCols = sharedCols;
@@ -435,8 +435,9 @@ self.onmessage = function(e) {
 
     // 异步路径：首次加载 WASM 桥接
     if (!wasmBridge) {
+      // 构建时 WasmBridge 与 wasm-bindgen 胶水都内联进本文件；.wasm 地址由主线程传入。
       import('../core/worker/WasmBridge.js').then(m => {
-        wasmBridge = new m.WasmBridge();
+        wasmBridge = new m.WasmBridge(wasmUrl ? { wasmUrl } : {});
         return wasmBridge.init();
       }).then((loaded) => {
         if (!loaded) {
@@ -444,6 +445,7 @@ self.onmessage = function(e) {
           throw new Error(status.fallbackReason || 'WASM bridge initialization returned false');
         }
         tryBindWasmMemory(sharedChunks);
+        self.postMessage({ type: 'wasm-ready' });
       }).catch(err => postWasmInitFailed(err));
     }
   }

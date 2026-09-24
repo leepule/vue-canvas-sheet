@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { createApp, nextTick } from 'vue';
 import TableDesigner from '@/components/designer/index.vue';
 import { Workbook } from '@/core/Workbook';

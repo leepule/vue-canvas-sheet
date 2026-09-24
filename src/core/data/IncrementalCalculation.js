@@ -375,7 +375,6 @@ export class IncrementalCalculationEngine {
       if (cell && cell.f) {
         // 环检测：防止自引用（E9=E9）或间接环引用，传入批次缓存以复用 DFS 结果
         if (d.checkCycle(r, c, cycleFreeCache)) {
-          console.log('[DEBUG] Main thread cycle detected via IncrementalCalculation at:', r, c);
           cell.v = '#CYCLE!';
           cell.dirty = false;
           // 必须显式清空共享内存，否则 getCellValue 渲染热路径可能读取到残留数值

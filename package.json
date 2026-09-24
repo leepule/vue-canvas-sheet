@@ -59,11 +59,17 @@
       "types": "./src/wasm/pkg/table_wasm_engine.d.ts",
       "import": "./src/wasm/pkg/table_wasm_engine.js"
     },
+    "./wasm/url": {
+      "types": "./src/wasm/url.d.ts",
+      "import": "./src/wasm/url.js"
+    },
     "./style.css": "./dist/vue-canvas-sheet.css"
   },
   "files": [
     "dist",
     "src/wasm/pkg",
+    "src/wasm/url.js",
+    "src/wasm/url.d.ts",
     "types",
     "LICENSE",
     "NOTICE",

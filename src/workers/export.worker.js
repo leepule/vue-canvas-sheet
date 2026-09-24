@@ -2,29 +2,19 @@
  * Excel 导出 Worker
  * 在后台线程中使用 xlsx-js-style 生成文件，避免阻塞 UI。
  *
- * xlsx-js-style 通过动态 import() 按需懒加载，避免 Worker 文件中静态内联
- * ~350KB 的库代码，使 Worker 文件保持轻量。首次消息处理时加载并缓存 Promise，
- * 后续消息复用同一模块实例。
+ * 构建时 xlsx-js-style 整体内联进本文件：使用方打包器把 worker 当静态资源原样拷贝，
+ * worker 里的裸说明符无法解析。Worker 只在导出时创建，内联不影响首屏。
  */
+import * as XLSXModule from 'xlsx-js-style';
 import { buildWorksheetFromSparseSnapshot } from '../plugins/utils/xlsxAdapter.js';
 
-let _xlsxPromise = null;
-function loadXLSX() {
-  if (!_xlsxPromise) {
-    _xlsxPromise = import('xlsx-js-style')
-      .then(m => m.default || m)
-      .catch(err => { _xlsxPromise = null; throw err; });
-  }
-  return _xlsxPromise;
-}
+const XLSX = XLSXModule.default || XLSXModule;
 
 self.onmessage = async (e) => {
     const { data, config, fileName, snapshot } = e.data;
     const startTime = performance.now();
 
     try {
-        const XLSX = await loadXLSX();
-
         self.postMessage({ type: 'progress', phase: 'xlsx-build', progress: 0.25 });
 
         const sheet = snapshot

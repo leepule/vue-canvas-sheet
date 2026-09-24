@@ -19,6 +19,9 @@ import { WorkerClient, isWorkerRuntimeSupported } from './WorkerClient.js';
 export const isWorkerSupported = isWorkerRuntimeSupported;
 export const isTransferableEnabled = isTransferableSupported();
 
+// Worker 是不含 import 的单文件，自己解析不了 .wasm 路径；由主线程解析后随消息传入。
+const loadDefaultWasmUrl = () => import('vue-canvas-sheet/wasm/url').then(m => m.default);
+
 export class WorkerManager {
   constructor(options = {}) {
     this.workerUrl = options.workerUrl || options.workerPath || null;
@@ -27,6 +30,10 @@ export class WorkerManager {
     this.fallbackExecutor = options.fallbackExecutor || null;
     this.useTransferable = options.useTransferable !== false && isTransferableEnabled;
     this.createWorker = options.createWorker || null;
+    this.wasmUrl = options.wasmUrl || null;
+    this.loadWasmUrl = options.loadWasmUrl || loadDefaultWasmUrl;
+    this._wasmUrlPromise = null;
+    this.workerWasmLoaded = false;
 
     this.client = null;
     this.isReady = false;
@@ -87,6 +94,13 @@ export class WorkerManager {
         }
       });
 
+      const worker = this.client.worker;
+      if (worker && worker.addEventListener) {
+        worker.addEventListener('message', (event) => {
+          if (event.data && event.data.type === 'wasm-ready') this.workerWasmLoaded = true;
+        });
+      }
+
       this.client.ready()
         .then(() => {
           this.isReady = true;
@@ -113,6 +127,19 @@ export class WorkerManager {
     this.useFallback = true;
     this.isReady = true;
     this._triggerReadyCallbacks();
+  }
+
+  _resolveWasmUrl() {
+    if (this.wasmUrl) return Promise.resolve(this.wasmUrl);
+    if (!this._wasmUrlPromise) {
+      this._wasmUrlPromise = Promise.resolve()
+        .then(() => this.loadWasmUrl())
+        .catch((error) => {
+          console.warn('[WorkerManager] Failed to resolve WASM URL:', error?.message || error);
+          return null;
+        });
+    }
+    return this._wasmUrlPromise;
   }
 
   _triggerReadyCallbacks() {
@@ -211,6 +238,12 @@ export class WorkerManager {
       transferables = serialized.transferables;
     }
 
+    // Worker 在第一条带共享内存的消息上加载 WASM，只有这时才需要地址。
+    if (payload.sharedChunks) {
+      const wasmUrl = await this._resolveWasmUrl();
+      if (wasmUrl) payload.wasmUrl = wasmUrl;
+    }
+
     try {
       const response = await this.client.request(payload, transferables);
 
@@ -258,6 +291,7 @@ export class WorkerManager {
       this.client.destroy('Worker terminated');
       this.client = null;
     }
+    this.workerWasmLoaded = false;
     this.isReady = false;
     this.useFallback = true;
   }
@@ -267,6 +301,7 @@ export class WorkerManager {
       this.client.destroy('Worker restarted');
       this.client = null;
     }
+    this.workerWasmLoaded = false;
     this.isReady = false;
     this.useFallback = false;
     this._initWorker();
@@ -278,7 +313,8 @@ export class WorkerManager {
       pendingTasks: this.pendingTasks.size,
       isReady: this.isReady,
       useFallback: this.useFallback,
-      useTransferable: this.useTransferable
+      useTransferable: this.useTransferable,
+      workerWasmLoaded: this.workerWasmLoaded
     };
   }
 

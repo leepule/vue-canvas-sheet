@@ -71,6 +71,55 @@ describe('WorkerManager', () => {
     manager.destroy();
   });
 
+  test('带共享内存的任务应附带主线程解析的 wasmUrl，且只解析一次', async () => {
+    const worker = new ControllableWorker();
+    const loadWasmUrl = vi.fn(async () => 'https://cdn.example/engine.wasm');
+    const manager = new WorkerManager({
+      createWorker: () => worker,
+      timeout: 100,
+      useTransferable: false,
+      loadWasmUrl
+    });
+
+    worker.emitMessage({ type: 'ready' });
+    manager.execute('recalcAll', { formulas: [], sharedChunks: { continuousBuffer: null } });
+    manager.execute('recalcAll', { formulas: [], sharedChunks: { continuousBuffer: null } });
+    manager.execute('evaluate', { formula: '=1+1' });
+
+    await vi.waitFor(() => expect(worker.messages).toHaveLength(3));
+    const shared = worker.messages.filter(message => message.type === 'recalcAll');
+    expect(shared.map(message => message.wasmUrl)).toEqual([
+      'https://cdn.example/engine.wasm',
+      'https://cdn.example/engine.wasm'
+    ]);
+    expect(worker.messages.find(message => message.type === 'evaluate').wasmUrl).toBeUndefined();
+    expect(loadWasmUrl).toHaveBeenCalledTimes(1);
+
+    manager.destroy();
+  });
+
+  test('Worker 报告 wasm-ready 后统计应标记 workerWasmLoaded', async () => {
+    const worker = new ControllableWorker();
+    const manager = new WorkerManager({
+      createWorker: () => worker,
+      timeout: 100,
+      useTransferable: false
+    });
+
+    const readyPromise = manager.ready();
+    worker.emitMessage({ type: 'ready' });
+    await readyPromise;
+    expect(manager.getStats().workerWasmLoaded).toBe(false);
+
+    worker.emitMessage({ type: 'wasm-ready' });
+    expect(manager.getStats().workerWasmLoaded).toBe(true);
+
+    manager.restart();
+    expect(manager.getStats().workerWasmLoaded).toBe(false);
+
+    manager.destroy();
+  });
+
   test('超时任务应该 reject 且不触发 fallback', async () => {
     const worker = new ControllableWorker();
     const fallbackExecutor = vi.fn(() => 'fallback');

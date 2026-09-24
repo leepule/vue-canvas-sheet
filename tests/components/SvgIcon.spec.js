@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { createApp, h } from 'vue';
 import SvgIcon from '@/components/designer/icons/SvgIcon.vue';
 

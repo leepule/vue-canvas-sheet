@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { describe, expect, test } from 'vitest';
 import { createApp } from 'vue';
 import AlertDialog from '@/components/designer/AlertDialog.vue';

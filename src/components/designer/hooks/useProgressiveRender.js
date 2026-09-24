@@ -52,16 +52,6 @@ export default function useProgressiveRender(tableContext) {
       useIdleCallback: PROGRESSIVE_CONFIG.useIdleCallback
     });
 
-    progressiveRenderer.value.onFrameStart = (remainingTime) => {
-      // 可以在这里做一些帧前准备工作
-    };
-
-    progressiveRenderer.value.onFrameEnd = (frameTime, tasksExecuted) => {
-      if (frameTime > PROGRESSIVE_CONFIG.frameBudget * 1.5) {
-        console.warn(`[ProgressiveRender] Frame time ${frameTime.toFixed(2)}ms exceeded budget`);
-      }
-    };
-
     progressiveRenderer.value.onAllTasksComplete = () => {
       progressiveState.isRendering = false;
       progressiveState.phase = 'complete';

@@ -88,7 +88,7 @@ export class WasmBridge {
   async _loadConfiguredRuntime() {
     const wasmModule = await this.wasmLoader();
     const input = this.wasmBinary || this.wasmUrl || undefined;
-    await wasmModule.default(input);
+    await wasmModule.default(input === undefined ? undefined : { module_or_path: input });
     return wasmModule;
   }
 

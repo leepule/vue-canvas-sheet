@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Workbook } from '../../src/core/Workbook';
 import { ExportPlugin } from '../../src/plugins/ExportPlugin';

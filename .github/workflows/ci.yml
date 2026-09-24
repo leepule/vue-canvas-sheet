@@ -35,9 +35,9 @@ jobs:
       - name: Run oxlint (warnings fail the build)
         run: npm run lint
 
+  # 不等 build：单元测试用仓库里已提交的 src/wasm/pkg，新鲜 wasm 的集成测试在 build job 里跑。
   unit:
     name: Unit tests and coverage
-    needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -49,15 +49,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           npm-version: ${{ env.NPM_VERSION }}
-
-      - name: Download freshly built WASM package
-        uses: actions/download-artifact@v7
-        with:
-          name: wasm-package
-          path: src/wasm/pkg
-
-      - name: Run real WASM integration test
-        run: npm run test:wasm:real
 
       - name: Run unit tests with coverage thresholds
         run: npm run test:coverage
@@ -89,6 +80,11 @@ jobs:
         with:
           targets: wasm32-unknown-unknown
 
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/wasm
+
       - name: Install wasm-pack
         uses: taiki-e/install-action@v2
         with:
@@ -96,6 +92,9 @@ jobs:
 
       - name: Build WASM and JavaScript artifacts
         run: npm run build
+
+      - name: Run real WASM integration test
+        run: npm run test:wasm:real
 
       - name: Verify runtime export contracts
         run: npm run check:types:runtime
@@ -117,6 +116,11 @@ jobs:
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src/wasm
 
       - name: Run Rust tests with frozen dependencies
         run: cargo test --manifest-path src/wasm/Cargo.toml --locked
@@ -141,6 +145,13 @@ jobs:
         with:
           name: wasm-package
           path: src/wasm/pkg
+
+      # 命中缓存时 playwright install 跳过浏览器下载，只安装系统依赖。
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
       - name: Install Chromium and system dependencies
         run: npx playwright install --with-deps chromium
@@ -222,40 +233,18 @@ jobs:
           TARBALL=$(npm pack --pack-destination "$RUNNER_TEMP/package-artifact")
           echo "PACKAGE_TARBALL=$RUNNER_TEMP/package-artifact/$TARBALL" >> "$GITHUB_ENV"
 
-      - name: Install and build empty Vue consumer
-        working-directory: ${{ runner.temp }}
-        run: |
-          mkdir package-consumer
-          cd package-consumer
-          npm init -y
-          npm install "$PACKAGE_TARBALL" vue@^3.5.0 vite@^6.2.0 typescript@^5.8.0
-          cp "$GITHUB_WORKSPACE/tests/types/entrypoints.ts" entrypoints.ts
-          cp "$GITHUB_WORKSPACE/tests/types/tsconfig.json" tsconfig.json
-          npx tsc -p tsconfig.json
-          mkdir src
-          cat > index.html <<'EOF'
-          <div id="app"></div>
-          <script type="module" src="/src/main.js"></script>
-          EOF
-          cat > src/main.js <<'EOF'
-          import { createApp, h } from 'vue'
-          import { TableDesigner, Workbook, SvgIcon } from 'vue-canvas-sheet'
-          import { Workbook as CoreWorkbook } from 'vue-canvas-sheet/core'
-          import { OffscreenRenderer } from 'vue-canvas-sheet/render'
-          import 'vue-canvas-sheet/style.css'
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
 
-          const workbook = new CoreWorkbook()
-          if (typeof Workbook !== 'function' || !SvgIcon || typeof OffscreenRenderer !== 'function') {
-            throw new TypeError('A documented package export is unavailable')
-          }
-          createApp({
-            render: () => h(TableDesigner, {
-              initialData: [['Name', 'Total'], ['Product A', { f: '=1+1' }]]
-            })
-          }).mount('#app')
-          workbook.destroy()
-          EOF
-          npx vite build
+      - name: Install Chromium and system dependencies
+        run: npx playwright install --with-deps chromium
+
+      # 空 Vue 项目安装 tarball、类型检查、构建，再用无头浏览器确认 formula / export Worker 没有降级到主线程。
+      - name: Run consumer smoke test
+        run: node scripts/consumer-smoke.mjs "$PACKAGE_TARBALL" "$RUNNER_TEMP/package-consumer"
 
   quality-gate:
     name: Required quality gate

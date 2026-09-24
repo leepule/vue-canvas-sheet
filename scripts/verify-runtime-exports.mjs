@@ -74,6 +74,9 @@ const entrypointContracts = {
   ]
 };
 
+const { default: wasmUrl } = await import('vue-canvas-sheet/wasm/url');
+assert.match(wasmUrl, /\/table_wasm_engine_bg\.wasm$/, 'vue-canvas-sheet/wasm/url must point at the WASM binary');
+
 for (const [moduleSpecifier, expectedExports] of Object.entries(entrypointContracts)) {
   const runtimeModule = await import(moduleSpecifier);
   const actualExports = Object.keys(runtimeModule).sort();

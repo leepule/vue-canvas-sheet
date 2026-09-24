@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { describe, expect, it, vi } from 'vitest';
 import { Workbook } from '../../src/core/Workbook.js';
 import {

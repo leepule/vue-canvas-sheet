@@ -1,3 +1,5 @@
+// @vitest-environment jsdom
+
 import { createApp, nextTick } from 'vue';
 import CanvasTable from '@/components/designer/CanvasTable.vue';
 

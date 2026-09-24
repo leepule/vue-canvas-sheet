@@ -198,6 +198,7 @@ export class FormulaEngineService {
 
       // 应用 Worker 返回的结果（含降级环境下的数字结果）
       this._applyWorkerResults(results);
+      if (sharedChunks) this._applySharedNumericResults(formulas, results);
 
       this._workerCalculating = false;
       this._processWorkerQueue();
@@ -272,6 +273,26 @@ export class FormulaEngineService {
   _containsCustomFunctions(formulas) {
     if (typeof this.d.hasCustomFunction !== 'function') return false;
     return formulas.some(({ formula }) => this.d.hasCustomFunction(formula));
+  }
+
+  /**
+   * 有共享内存时 Worker 把数值结果直接写进 SharedArrayBuffer，results 里只有非数值结果。
+   * 把这些数值读回单元格，否则公式单元格的 v 一直为空。
+   */
+  _applySharedNumericResults(formulas, results) {
+    const store = this.sharedValueStore;
+    if (!store) return;
+    for (const { cellId } of formulas) {
+      if (results && Object.prototype.hasOwnProperty.call(results, cellId)) continue;
+      const { r, c } = this.d.parseKey(cellId);
+      const value = store.get(r, c);
+      if (value === SharedValueStore.EMPTY_VALUE || Number.isNaN(value)) continue;
+      const cell = this.d.getDataMatrix().get(r, c);
+      if (cell) {
+        cell.v = value;
+        cell.dirty = false;
+      }
+    }
   }
 
   _applyWorkerResults(results) {

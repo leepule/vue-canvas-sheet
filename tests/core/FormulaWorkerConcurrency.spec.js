@@ -551,6 +551,27 @@ describe('FormulaEngineService 并发队列', () => {
     expect(syncSharedValue).toHaveBeenLastCalledWith(0, 0, 'new-result');
   });
 
+  it('recalcAllWithWorker 应把 Worker 写进共享内存的数值结果回填到单元格', async () => {
+    const { service, cells, workerCalls } = createFormulaEngineHarness();
+    cells.set('1,0', { f: '=1/0', v: null, dirty: true });
+    const shared = new Map([['0,0', 7]]);
+    service.sharedValueStore = {
+      maxRows: 10,
+      maxCols: 10,
+      serialize: () => ({ continuousBuffer: null }),
+      get: (r, c) => shared.get(`${r},${c}`) ?? -Infinity
+    };
+
+    const run = service.recalcAllWithWorker();
+    expect(workerCalls[0].payload.sharedChunks).toBeTruthy();
+    // 数值结果只在共享内存里，results 只带非数值结果
+    workerCalls[0].deferred.resolve({ '1,0': '#DIV/0!' });
+    await run;
+
+    expect(cells.get('0,0')).toMatchObject({ v: 7, dirty: false });
+    expect(cells.get('1,0')).toMatchObject({ v: '#DIV/0!', dirty: false });
+  });
+
   it('recalcAllWithWorker 遇到自定义函数时应回退主线程且不发送 Worker 任务', async () => {
     const { service, workerCalls } = createFormulaEngineHarness({
       hasCustomFunction: () => true
